@@ -142,7 +142,7 @@ All editable fields support a **⛶ popout editor** for comfortable editing in a
 
 ## Requirements
 
-- [SillyTavern](https://github.com/SillyTavern/SillyTavern) (latest stable recommended)
+- [SillyTavern](https://github.com/SillyTavern/SillyTavern) (1.18.0 or higher)
 - At least one configured API connection in SillyTavern
 - A second connection profile recommended for Day Advancement (lighter model)
 - A third connection profile recommended for Narrative Consistency (mid-size or local model)
