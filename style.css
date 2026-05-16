@@ -1,0 +1,1175 @@
+/* =============================================================================
+   Narrative World State Tracker (NWST) — Stylesheet
+   =============================================================================
+   All CSS classes are prefixed with "nwst-" to avoid conflicts with
+   SillyTavern's own styles. The design replicates nwst-mockup.html exactly.
+   Where possible, ST's CSS custom properties (--SmartTheme*) are used for
+   theming compatibility.
+   ============================================================================= */
+
+/* ── Panel Shell ─────────────────────────────────────────────────────────── */
+.nwst-panel {
+    /* The panel is mounted inside #movingDivs; inherits ST's drawer layout */
+}
+
+.nwst-shell {
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--SmartThemeBlurTintColor, #fff);
+    max-width: 700px;
+    font-family: var(--SmartThemeBodyFont, system-ui, sans-serif);
+    font-size: 13px;
+    color: var(--SmartThemeBodyColor, #111);
+}
+
+/* ── Tab Bar ─────────────────────────────────────────────────────────────── */
+.nwst-tabs {
+    display: flex;
+    border-bottom: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    overflow-x: auto;
+}
+
+.nwst-tab {
+    padding: 9px 13px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    color: var(--SmartThemeEmColor, #666);
+    font-size: 13px;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.nwst-tab:hover {
+    color: var(--SmartThemeBodyColor, #111);
+}
+
+.nwst-tab-on {
+    color: var(--SmartThemeBodyColor, #111);
+    border-bottom: 2px solid #7F77DD;
+    font-weight: 500;
+}
+
+/* ── Tab Panes ───────────────────────────────────────────────────────────── */
+.nwst-pane {
+    padding: 16px;
+    display: none;
+}
+
+.nwst-pane-on {
+    display: block;
+}
+
+.nwst-placeholder {
+    font-size: 13px;
+    color: #999;
+    font-style: italic;
+    padding: 20px;
+    text-align: center;
+}
+
+/* ── Shared Labels ───────────────────────────────────────────────────────── */
+.nwst-lbl {
+    font-size: 11px;
+    font-weight: 500;
+    color: #999;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+/* ── Dividers ────────────────────────────────────────────────────────────── */
+.nwst-div {
+    border: none;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    margin: 13px 0;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.nwst-btn {
+    font-size: 12px;
+    padding: 5px 11px;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--SmartThemeBodyColor, #111);
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.nwst-btn:hover {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-btn-regen {
+    font-size: 12px;
+    padding: 5px 11px;
+    border: 0.5px solid #AFA9EC;
+    border-radius: 8px;
+    background: transparent;
+    color: #3C3489;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.nwst-btn-regen:hover {
+    background: #EEEDFE;
+}
+
+.nwst-btn-danger {
+    font-size: 12px;
+    padding: 5px 11px;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
+    border-radius: 8px;
+    background: transparent;
+    color: #993C1D;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.nwst-btn-danger:hover {
+    background: #FDE8E3;
+}
+
+.nwst-btn-row {
+    display: flex;
+    gap: 7px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+/* ── Icon Buttons ────────────────────────────────────────────────────────── */
+.nwst-icon-btn {
+    width: 28px;
+    height: 28px;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: #666;
+    flex-shrink: 0;
+}
+
+.nwst-icon-btn:hover {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-icon-btn.nwst-active {
+    border-color: #7F77DD;
+    color: #3C3489;
+    background: #EEEDFE;
+}
+
+/* ── Form Elements ───────────────────────────────────────────────────────── */
+.nwst-panel textarea,
+.nwst-panel select,
+.nwst-panel input[type="text"],
+.nwst-panel input[type="number"] {
+    width: 100%;
+    font-size: 13px;
+    padding: 6px 10px;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
+    border-radius: 8px;
+    background: var(--SmartThemeBlurTintColor, #fff);
+    color: var(--SmartThemeBodyColor, #111);
+    font-family: inherit;
+}
+
+.nwst-panel input[type="number"] {
+    width: auto;
+}
+
+.nwst-panel textarea {
+    resize: vertical;
+    line-height: 1.5;
+}
+
+/* ── Toggle Switch ───────────────────────────────────────────────────────── */
+.nwst-toggle {
+    position: relative;
+    width: 40px;
+    height: 22px;
+    flex-shrink: 0;
+}
+
+.nwst-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.nwst-slider {
+    position: absolute;
+    inset: 0;
+    border-radius: 22px;
+    background: #ccc;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.nwst-slider::before {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    left: 3px;
+    top: 3px;
+    border-radius: 50%;
+    background: #fff;
+    transition: 0.2s;
+}
+
+.nwst-toggle input:checked + .nwst-slider {
+    background: #7F77DD;
+}
+
+.nwst-toggle input:checked + .nwst-slider::before {
+    transform: translateX(18px);
+}
+
+/* ── Info Box ────────────────────────────────────────────────────────────── */
+.nwst-info-box {
+    background: #EEEDFE;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    color: #3C3489;
+    margin-bottom: 14px;
+    line-height: 1.5;
+}
+
+/* ── Setting Row (used in Settings tab) ──────────────────────────────────── */
+.nwst-setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 0;
+    border-bottom: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    gap: 12px;
+}
+
+.nwst-setting-row:last-child {
+    border-bottom: none;
+}
+
+.nwst-setting-label {
+    font-size: 13px;
+}
+
+.nwst-setting-sub {
+    font-size: 11px;
+    color: #999;
+    margin-top: 2px;
+}
+
+/* ── Card ────────────────────────────────────────────────────────────────── */
+.nwst-card {
+    background: var(--SmartThemeBlurTintColor, #fff);
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+}
+
+/* ── Day Navigation Bar ──────────────────────────────────────────────────── */
+.nwst-day-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.nwst-day-nav-btn {
+    width: 30px;
+    height: 30px;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    font-size: 14px;
+    color: #666;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.nwst-day-nav-btn:hover {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-day-label {
+    flex: 1;
+    text-align: center;
+}
+
+.nwst-date-main {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--SmartThemeBodyColor, #111);
+}
+
+.nwst-date-sub {
+    font-size: 11px;
+    color: #999;
+    margin-top: 1px;
+}
+
+/* ── Time Skip / Jump ────────────────────────────────────────────────────── */
+.nwst-jump-wrap {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.nwst-jump-wrap input {
+    width: 120px;
+    font-size: 12px;
+    padding: 4px 8px;
+    flex: 1;
+}
+
+.nwst-jump-wrap .nwst-btn {
+    font-size: 11px;
+    padding: 4px 9px;
+}
+
+/* ── Journal Block (Current Day, Forecast, etc.) ─────────────────────────── */
+.nwst-journal-block {
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 10px;
+}
+
+.nwst-journal-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 12px;
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    border-bottom: 0.5px solid var(--SmartThemeBorderColor, #eee);
+}
+
+.nwst-journal-hdr-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: #444;
+}
+
+.nwst-journal-body {
+    padding: 12px;
+}
+
+.nwst-journal-body.nwst-editing {
+    padding: 0;
+}
+
+.nwst-journal-body textarea {
+    border-radius: 0;
+    border: none;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    min-height: 80px;
+}
+
+/* ── Markdown-Style Rendered Content ─────────────────────────────────────── */
+.nwst-md {
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--SmartThemeBodyColor, #222);
+}
+
+.nwst-md h3 {
+    font-size: 12px;
+    font-weight: 600;
+    color: #444;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 10px 0 5px;
+}
+
+.nwst-md h3:first-child {
+    margin-top: 0;
+}
+
+.nwst-md ul {
+    padding-left: 0;
+    list-style: none;
+}
+
+.nwst-md ul li {
+    padding: 2px 0;
+    font-size: 13px;
+    color: #333;
+}
+
+.nwst-md ul li::before {
+    content: '\2014'; /* em dash */
+    color: #bbb;
+    margin-right: 7px;
+}
+
+.nwst-md strong {
+    font-weight: 600;
+    color: var(--SmartThemeBodyColor, #111);
+}
+
+.nwst-season-chip {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 100px;
+    background: #F1EFE8;
+    color: #555;
+    margin-right: 6px;
+}
+
+/* ── Weather Strip (7-day forecast cards) ────────────────────────────────── */
+.nwst-weather-strip {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 2px 0 6px;
+    margin-bottom: 4px;
+}
+
+.nwst-weather-day {
+    flex-shrink: 0;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    padding: 7px 10px;
+    text-align: center;
+    min-width: 72px;
+}
+
+.nwst-weather-day.nwst-today {
+    border-color: #AFA9EC;
+    background: #EEEDFE;
+}
+
+.nwst-wd-name {
+    font-size: 10px;
+    color: #999;
+    margin-bottom: 3px;
+}
+
+.nwst-weather-day.nwst-today .nwst-wd-name {
+    color: #3C3489;
+}
+
+.nwst-wd-icon {
+    font-size: 18px;
+    margin-bottom: 3px;
+}
+
+.nwst-wd-desc {
+    font-size: 10px;
+    color: #555;
+    line-height: 1.3;
+    margin-bottom: 5px;
+}
+
+.nwst-weather-day.nwst-today .nwst-wd-desc {
+    color: #3C3489;
+}
+
+.nwst-wd-temps {
+    display: flex;
+    justify-content: center;
+    gap: 5px;
+    margin-top: 4px;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    padding-top: 4px;
+}
+
+.nwst-weather-day.nwst-today .nwst-wd-temps {
+    border-top-color: #CECBF6;
+}
+
+.nwst-wd-hi {
+    font-size: 10px;
+    font-weight: 600;
+    color: #993C1D;
+}
+
+.nwst-wd-lo {
+    font-size: 10px;
+    color: #3C3489;
+}
+
+.nwst-wd-sep {
+    font-size: 10px;
+    color: #ccc;
+}
+
+.nwst-wd-cf {
+    font-size: 9px;
+    color: #bbb;
+    display: block;
+    margin-top: 1px;
+}
+
+.nwst-wd-precip {
+    font-size: 9px;
+    color: #5580a0;
+    margin-top: 3px;
+    display: block;
+}
+
+/* ── Moon Phase Strip ────────────────────────────────────────────────────── */
+.nwst-moon-strip {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 4px 0 2px;
+}
+
+.nwst-moon-day {
+    flex-shrink: 0;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    padding: 6px 8px;
+    text-align: center;
+    min-width: 64px;
+}
+
+.nwst-moon-day.nwst-today {
+    border-color: #AFA9EC;
+    background: #EEEDFE;
+}
+
+.nwst-mn-name {
+    font-size: 10px;
+    color: #999;
+    margin-bottom: 2px;
+}
+
+.nwst-moon-day.nwst-today .nwst-mn-name {
+    color: #3C3489;
+}
+
+.nwst-mn-icon {
+    font-size: 16px;
+    margin-bottom: 2px;
+}
+
+.nwst-mn-label {
+    font-size: 9px;
+    color: #777;
+    line-height: 1.3;
+}
+
+.nwst-moon-day.nwst-today .nwst-mn-label {
+    color: #3C3489;
+}
+
+/* ── Event Horizon ───────────────────────────────────────────────────────── */
+.nwst-event-group {
+    margin-bottom: 12px;
+}
+
+.nwst-event-group-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.nwst-event-item {
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    margin-bottom: 6px;
+    overflow: hidden;
+}
+
+.nwst-event-item-hdr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+
+.nwst-event-item-hdr:hover {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-event-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.nwst-event-dot.nwst-immediate {
+    background: #993C1D;
+}
+
+.nwst-event-dot.nwst-week {
+    background: #7F77DD;
+}
+
+.nwst-event-dot.nwst-month {
+    background: #1D9E75;
+}
+
+.nwst-event-dot.nwst-undetermined {
+    background: #bbb;
+}
+
+.nwst-event-title {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.nwst-event-meta {
+    font-size: 11px;
+    color: #999;
+    flex-shrink: 0;
+}
+
+.nwst-event-body {
+    padding: 10px 12px;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    display: none;
+}
+
+.nwst-event-item.nwst-open .nwst-event-body {
+    display: block;
+}
+
+/* ── Badges ──────────────────────────────────────────────────────────────── */
+.nwst-badge {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 100px;
+    flex-shrink: 0;
+}
+
+/* Tier badges */
+.nwst-badge-immediate {
+    background: #FDE8E3;
+    color: #993C1D;
+}
+
+.nwst-badge-week {
+    background: #EEEDFE;
+    color: #3C3489;
+}
+
+.nwst-badge-month {
+    background: #E1F5EE;
+    color: #085041;
+}
+
+.nwst-badge-undetermined {
+    background: #F1EFE8;
+    color: #555;
+}
+
+/* NPC badge */
+.nwst-badge-npc {
+    background: #FEF3E2;
+    color: #8a5a00;
+}
+
+/* Status badges */
+.nwst-badge-pending {
+    background: #F1EFE8;
+    color: #666;
+}
+
+.nwst-badge-inprogress {
+    background: #EEEDFE;
+    color: #3C3489;
+}
+
+.nwst-badge-resolved {
+    background: #E1F5EE;
+    color: #085041;
+}
+
+.nwst-badge-missed {
+    background: #FDE8E3;
+    color: #993C1D;
+}
+
+/* ── World State Condition Rows ──────────────────────────────────────────── */
+.nwst-condition-row {
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.nwst-condition-row.nwst-muted {
+    opacity: 0.4;
+}
+
+.nwst-condition-hdr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-condition-label {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.nwst-condition-body {
+    padding: 10px 12px;
+    font-size: 13px;
+    color: #333;
+    line-height: 1.6;
+    display: none;
+}
+
+.nwst-condition-row.nwst-open .nwst-condition-body {
+    display: block;
+}
+
+.nwst-condition-hdr .nwst-icon-btn {
+    border: none;
+    background: transparent;
+}
+
+/* ── Community Summary Entries ───────────────────────────────────────────── */
+.nwst-community-entry {
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.nwst-community-hdr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    cursor: pointer;
+}
+
+.nwst-community-hdr:hover {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-community-body {
+    padding: 10px 12px;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    display: none;
+    font-size: 13px;
+    color: #333;
+    line-height: 1.6;
+}
+
+.nwst-community-entry.nwst-open .nwst-community-body {
+    display: block;
+}
+
+.nwst-community-av {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    background: #EEEDFE;
+    color: #3C3489;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+/* ── Notebook Sections ───────────────────────────────────────────────────── */
+.nwst-nb-section {
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.nwst-nb-section-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 12px;
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    cursor: pointer;
+    border-bottom: 0.5px solid transparent;
+}
+
+.nwst-nb-section.nwst-open .nwst-nb-section-hdr {
+    border-bottom-color: var(--SmartThemeBorderColor, #eee);
+}
+
+.nwst-nb-section-hdr:hover {
+    background: #f0f0f0;
+}
+
+.nwst-nb-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #444;
+}
+
+.nwst-nb-section-body {
+    display: none;
+}
+
+.nwst-nb-section.nwst-open .nwst-nb-section-body {
+    display: block;
+}
+
+/* Notebook fields */
+.nwst-nb-field {
+    margin-bottom: 0;
+    border: none;
+    border-bottom: 0.5px solid #f0f0f0;
+    border-radius: 0;
+    overflow: hidden;
+}
+
+.nwst-nb-field:last-child {
+    border-bottom: none;
+}
+
+.nwst-nb-field-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: #999;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 7px 10px;
+    background: #fafafa;
+    border-bottom: 0.5px solid #f0f0f0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+/* Notebook bullets */
+.nwst-nb-bullets {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.nwst-nb-bullet {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 10px;
+    border-bottom: 0.5px solid #f8f8f8;
+    font-size: 13px;
+    color: #333;
+    line-height: 1.5;
+}
+
+.nwst-nb-bullet:last-child {
+    border-bottom: none;
+}
+
+.nwst-nb-bullet::before {
+    content: '\00B7'; /* middle dot */
+    color: #bbb;
+    font-size: 16px;
+    line-height: 1.3;
+    flex-shrink: 0;
+}
+
+.nwst-nb-bullet-text {
+    flex: 1;
+    cursor: text;
+    outline: none;
+    border-radius: 4px;
+    padding: 1px 4px;
+}
+
+.nwst-nb-bullet-text:hover {
+    color: var(--SmartThemeBodyColor, #111);
+}
+
+.nwst-nb-bullet-text:focus {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-nb-bullet-del {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: transparent;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    flex-shrink: 0;
+    padding: 0;
+    margin-top: 1px;
+}
+
+.nwst-nb-bullet-del:hover {
+    color: #993C1D;
+}
+
+/* Notebook add row */
+.nwst-nb-add-row {
+    padding: 6px 10px;
+    background: #fafafa;
+}
+
+.nwst-nb-add-input {
+    width: 100%;
+    font-size: 12px;
+    padding: 5px 8px;
+    border: 0.5px solid #ddd;
+    border-radius: 6px;
+    color: var(--SmartThemeBodyColor, #111);
+    font-family: inherit;
+    background: var(--SmartThemeBlurTintColor, #fff);
+}
+
+.nwst-nb-add-input::placeholder {
+    color: #bbb;
+}
+
+/* Notebook empty state */
+.nwst-nb-empty {
+    font-size: 12px;
+    color: #bbb;
+    font-style: italic;
+    padding: 8px 10px;
+}
+
+/* ── Secrets ─────────────────────────────────────────────────────────────── */
+.nwst-secret-entry {
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.nwst-secret-hdr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    cursor: pointer;
+    background: var(--SmartThemeBlurTintColor, #fff);
+}
+
+.nwst-secret-hdr:hover {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-secret-body {
+    padding: 12px;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    display: none;
+}
+
+.nwst-secret-entry.nwst-open .nwst-secret-body {
+    display: block;
+}
+
+/* Secret type badges */
+.nwst-secret-type {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 100px;
+    flex-shrink: 0;
+}
+
+.nwst-stype-character {
+    background: #EEEDFE;
+    color: #3C3489;
+}
+
+.nwst-stype-user {
+    background: #E1F5EE;
+    color: #085041;
+}
+
+.nwst-stype-world {
+    background: #F1EFE8;
+    color: #555;
+}
+
+.nwst-stype-irony {
+    background: #FEF3E2;
+    color: #8a5a00;
+}
+
+.nwst-stype-suspicion {
+    background: #FDE8E3;
+    color: #993C1D;
+}
+
+/* Secret fields */
+.nwst-secret-field {
+    margin-bottom: 8px;
+}
+
+.nwst-secret-field-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+/* ── Popout Expand Button & Modal ────────────────────────────────────────── */
+.nwst-expand-btn {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: transparent;
+    color: #bbb;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.nwst-expand-btn:hover {
+    color: #7F77DD;
+}
+
+/* Popout overlay */
+.nwst-popout-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 10000;
+    align-items: center;
+    justify-content: center;
+}
+
+.nwst-popout-overlay.nwst-popout-open {
+    display: flex;
+}
+
+.nwst-popout-modal {
+    background: var(--SmartThemeBlurTintColor, #fff);
+    border-radius: 12px;
+    border: 0.5px solid #ccc;
+    width: 90%;
+    max-width: 560px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.nwst-popout-modal-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+}
+
+.nwst-popout-modal-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--SmartThemeBodyColor, #111);
+}
+
+.nwst-popout-modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px;
+}
+
+.nwst-popout-modal-body textarea {
+    min-height: 200px;
+    width: 100%;
+}
+
+.nwst-popout-modal-footer {
+    padding: 10px 14px;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
+    display: flex;
+    gap: 8px;
+}
+
+/* ── Spinner / Loading State ─────────────────────────────────────────────── */
+.nwst-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid #ddd;
+    border-top-color: #7F77DD;
+    border-radius: 50%;
+    animation: nwst-spin 0.6s linear infinite;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+@keyframes nwst-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.nwst-loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.nwst-loading-text {
+    font-size: 12px;
+    color: #999;
+    font-style: italic;
+}
+
+/* ── Utility ─────────────────────────────────────────────────────────────── */
+.nwst-flex {
+    display: flex;
+}
+
+.nwst-flex-col {
+    display: flex;
+    flex-direction: column;
+}
+
+.nwst-gap-8 {
+    gap: 8px;
+}
+
+.nwst-flex-1 {
+    flex: 1;
+}
+
+.nwst-text-center {
+    text-align: center;
+}
+
+.nwst-mt-8 {
+    margin-top: 8px;
+}
+
+.nwst-mb-8 {
+    margin-bottom: 8px;
+}
+
+.nwst-mb-14 {
+    margin-bottom: 14px;
+}
