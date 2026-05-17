@@ -56,7 +56,8 @@ const DEFAULT_WORLD_STATE = {
         weatherToday: '',
         flora: '',
         fauna: '',
-        spiritualClimate: ''      // Only populated if Spiritual/Supernatural condition is enabled
+        spiritualClimate: '',     // Only populated if Spiritual/Supernatural condition is enabled
+        lunarAngle: 0             // Absolute angle (0-360) in the lunar cycle; 0 = New Moon
     },
     forecast: [],                 // 7 forecast entries (see worldState.js for structure)
     moonPhases: [],               // 7 moon phase entries
@@ -148,7 +149,9 @@ function ensureNWSTStorage() {
 function getChatBucket(chatId) {
     ensureNWSTStorage();
     const ext = getExtSettings();
-    if (!ext[MODULE_NAME].chatData[chatId]) {
+    const isNew = !ext[MODULE_NAME].chatData[chatId];
+    if (isNew) {
+        console.log(`[NWST Storage] getChatBucket: Creating new empty bucket for chatId="${chatId}"`);
         ext[MODULE_NAME].chatData[chatId] = {};
     }
     return ext[MODULE_NAME].chatData[chatId];
@@ -310,10 +313,25 @@ function listAllChats() {
  * @returns {boolean} True if at least one data type exists
  */
 function chatHasData(chatId) {
-    if (!chatId) return false;
+    if (!chatId) {
+        console.log(`[NWST Storage] chatHasData: chatId is falsy, returning false`);
+        return false;
+    }
     ensureNWSTStorage();
     const chatData = getExtSettings()[MODULE_NAME].chatData;
-    return !!(chatData[chatId] && Object.keys(chatData[chatId]).length > 0);
+    const bucket = chatData[chatId];
+    if (!bucket) {
+        console.log(`[NWST Storage] chatHasData: No bucket for chatId="${chatId}", returning false`);
+        return false;
+    }
+    const keys = Object.keys(bucket);
+    console.log(`[NWST Storage] chatHasData: chatId="${chatId}" bucket keys:`, keys, `(count=${keys.length})`);
+    // Only count meaningful content keys — settingContext and snapshots are
+    // auxiliary metadata that should NOT gate the batch scan check.
+    const contentKeys = ['worldState', 'events', 'notebook', 'communities'];
+    const hasContent = contentKeys.some(k => bucket[k] !== undefined);
+    console.log(`[NWST Storage] chatHasData: returning ${hasContent} (content keys found: ${contentKeys.filter(k => bucket[k] !== undefined).join(', ') || 'none'})`);
+    return hasContent;
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────

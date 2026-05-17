@@ -115,10 +115,10 @@ function buildEventItemHTML(event) {
             <textarea class="nwst-events-desc" rows="2" style="margin-bottom:8px" id="nwst-event-desc-${event.id}">${escapeHTML(event.description)}</textarea>
             <div style="font-size:11px;color:#999;margin-bottom:6px">Status</div>
             <div class="nwst-btn-row nwst-events-status-btns" style="margin-bottom:10px">
-                <button class="menu_button nwst-btn nwst-events-status" data-status="pending" style="font-size:11px${event.status === 'pending' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Pending</button>
-                <button class="menu_button nwst-btn nwst-events-status" data-status="inprogress" style="font-size:11px${event.status === 'inprogress' ? ';border-color:#7F77DD;color:#3C3489' : ''}">In progress</button>
-                <button class="menu_button nwst-btn nwst-events-status" data-status="resolved" style="font-size:11px${event.status === 'resolved' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Resolved</button>
-                <button class="menu_button nwst-btn nwst-events-status" data-status="missed" style="font-size:11px${event.status === 'missed' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Missed</button>
+                <button class="menu_button nwst-btn nwst-events-status${event.status === 'pending' ? ' nwst-status-active' : ''}" data-status="pending" style="font-size:11px">Pending</button>
+                <button class="menu_button nwst-btn nwst-events-status${event.status === 'inprogress' ? ' nwst-status-active' : ''}" data-status="inprogress" style="font-size:11px">In progress</button>
+                <button class="menu_button nwst-btn nwst-events-status${event.status === 'resolved' ? ' nwst-status-active' : ''}" data-status="resolved" style="font-size:11px">Resolved</button>
+                <button class="menu_button nwst-btn nwst-events-status${event.status === 'missed' ? ' nwst-status-active' : ''}" data-status="missed" style="font-size:11px">Missed</button>
             </div>
             <div class="nwst-btn-row">
                 <button class="menu_button nwst-btn nwst-events-save">Save</button>

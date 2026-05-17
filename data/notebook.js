@@ -242,7 +242,9 @@ export function replaceMysteryField(chatId, fieldName, bullets) {
  */
 export function getAllSecrets(chatId) {
     const nb = getNotebook(chatId);
-    return nb.secrets;
+    // Defensive: nb.secrets may be undefined if the notebook was stored by batch scan
+    // without a secrets field (e.g., older saved notebook, or LLM didn't include it).
+    return (nb && nb.secrets) || [];
 }
 
 /**

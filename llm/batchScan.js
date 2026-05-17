@@ -1,4 +1,5 @@
 /* eslint-disable */
+import { generateWithProfile } from './connections.js';
 // =============================================================================
 // NWST Batch Scan — llm/batchScan.js
 // =============================================================================
@@ -11,10 +12,11 @@
 //   1. Chunk the full chat history into context-window-safe segments
 //   2. Process chunks sequentially through the Planning LLM
 //   3. Show ST native toast notifications at each stage
-//   4. Generate: Current Day, forecast/moon phases, initial events,
-//      world conditions, notebook fields, community groupings
-//   5. Does NOT overwrite any field that already contains data
-//   6. Runs once — non-compounding
+//   4. Generate: Current Day, initial events, world conditions,
+//      notebook fields, community groupings
+//   5. Then seed the 7-day forecast and moon phases via Day Advancement LLM
+//   6. Does NOT overwrite any field that already contains data
+//   7. Runs once — non-compounding
 // =============================================================================
 
 import { getChatId, nwstToast } from '../index.js';
@@ -23,6 +25,7 @@ import { getWorldState, saveSnapshot } from '../data/worldState.js';
 import { getAllEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
+import { regenerateForecast } from './dayAdvancement.js';
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -60,13 +63,16 @@ RULES:
  */
 export async function runBatchScan() {
     const chatId = getChatId();
+    console.log(`[NWST BatchScan] runBatchScan called with chatId="${chatId}"`);
     if (!chatId) {
         nwstToast('No active chat detected.', 'error');
         return false;
     }
 
     // Check if batch scan has already been run for this chat
-    if (chatHasData(chatId)) {
+    const hasData = chatHasData(chatId);
+    console.log(`[NWST BatchScan] chatHasData("${chatId}") returned: ${hasData}`);
+    if (hasData) {
         nwstToast('Batch scan has already been run for this chat. Existing data will not be overwritten.', 'warning');
         return false;
     }
@@ -108,14 +114,13 @@ export async function runBatchScan() {
 
             const chunkText = formatChunkForLLM(chunks[i], i + 1, chunks.length, startMsg, endMsg);
 
-            // Call Planning LLM for this chunk
-            const { generateRaw } = SillyTavern.getContext();
+            // Call Planning LLM for this chunk via connection profile
             const messages = [
                 { role: 'system', content: BATCH_SCAN_SYSTEM_PROMPT },
                 { role: 'user', content: chunkText }
             ];
 
-            const response = await generateRaw(messages, null, profile.id, null, false, false);
+            const response = await generateWithProfile(profile, messages);
             if (response) {
                 accumulatedContext += `\n--- Chunk ${i + 1}/${chunks.length} Analysis ---\n${response}\n`;
             }
@@ -269,13 +274,12 @@ Now synthesize the COMPLETE initial world state as a single JSON object. Use thi
 
 Respond with valid JSON ONLY. No markdown, no explanation outside the JSON.`;
 
-    const { generateRaw } = SillyTavern.getContext();
     const messages = [
         { role: 'system', content: BATCH_SCAN_SYSTEM_PROMPT },
         { role: 'user', content: synthesisPrompt }
     ];
 
-    const response = await generateRaw(messages, null, profile.id, null, false, false);
+    const response = await generateWithProfile(profile, messages);
 
     if (!response) {
         nwstToast('Synthesis completed but no structured data was returned. Try running again.', 'warning');
@@ -373,6 +377,18 @@ async function applyBatchResults(chatId, result) {
     const { getAllEvents: getEvents } = await import('../data/events.js');
     const { getNotebook: getNb } = await import('../data/notebook.js');
     saveSnap(chatId, 'batch_scan', getWorldState(chatId), getEvents(chatId), getNb(chatId));
+
+    // Seed the 7-day forecast and moon phases
+    // This uses the Day Advancement LLM profile to generate initial weather data
+    // based on the current day, setting context, and world conditions just created
+    nwstToast('Generating initial 7-day forecast...', 'info');
+    try {
+        await regenerateForecast();
+        nwstToast('7-day forecast complete.', 'info');
+    } catch (forecastErr) {
+        console.warn('[NWST BatchScan] Forecast generation failed (non-fatal):', forecastErr);
+        nwstToast('Forecast generation skipped. Use the Regen button on the Home tab to try again.', 'warning');
+    }
 }
 
 // ── Loading UI ────────────────────────────────────────────────────────────

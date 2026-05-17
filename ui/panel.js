@@ -122,15 +122,6 @@ if (typeof window !== 'undefined') {
     window.nwstRefreshAllUI = refreshAllUI;
 }
 
-// ── Placeholder for tabs not yet built ────────────────────────────────────
-
-function showPlaceholder(tabName, message) {
-    const pane = document.getElementById(`nwst-pane-${tabName}`);
-    if (pane) {
-        pane.innerHTML = `<div class="nwst-placeholder">${message}</div>`;
-    }
-}
-
 // ── Popout (⛶) handler ────────────────────────────────────────────────────
 
 /**
@@ -199,19 +190,3 @@ export function initializeTabs() {
     // builtTabs.settings = true;
 }
 
-// ── Update the onTabSwitched callback in index.js ─────────────────────────
-
-/**
- * Patch the global onTabSwitched that index.js references.
- */
-export function patchIndexCallbacks() {
-    if (typeof window !== 'undefined') {
-        // The index.js references onTabSwitched and refreshAllUI as globals.
-        // This module provides the real implementations.
-        window.onTabSwitched = onTabSwitched;
-        window.refreshAllUI = refreshAllUI;
-    }
-}
-
-// Auto-patch when loaded
-patchIndexCallbacks();

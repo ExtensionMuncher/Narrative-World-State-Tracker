@@ -28,10 +28,11 @@ import {
     updateCurrentDay,
     getForecast,
     getMoonPhases,
-    replaceCurrentDay
+    replaceCurrentDay,
+    replaceMoonPhases
 } from '../data/worldState.js';
 import { getEventsGroupedByTier } from '../data/events.js';
-import { advanceToNextDay, restorePreviousDay } from '../llm/dayAdvancement.js';
+import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases } from '../llm/dayAdvancement.js';
 import { executeTimeSkip } from '../llm/timeskip.js';
 import { synthesizeCurrentDay } from '../llm/currentDaySynth.js';
 
@@ -212,12 +213,52 @@ function wireHomeEvents() {
         cancelBtn.addEventListener('click', () => toggleCurrentDayEdit(false));
     }
 
-    // ── Forecast Regen button ──────────────────────────────────
+    // ── Forecast Regen button with popup ───────────────────────
     const forecastRegen = document.getElementById('nwst-forecast-regen');
     if (forecastRegen) {
         forecastRegen.addEventListener('click', async () => {
-            await synthesizeCurrentDay();
-            refreshHomeUI();
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+
+            const html = `
+                <div style="padding:10px;min-width:300px">
+                    <p style="margin-bottom:14px;font-size:13px">What would you like to regenerate?</p>
+                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                        <input type="radio" name="nwst-regen-mode" value="all" checked
+                            onchange="window._nwstRegenMode=this.value" style="margin:0;flex-shrink:0">
+                        <span>Both (Weather + Moon Phases)</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                        <input type="radio" name="nwst-regen-mode" value="forecast"
+                            onchange="window._nwstRegenMode=this.value" style="margin:0;flex-shrink:0">
+                        <span>Weather Only</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:0;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                        <input type="radio" name="nwst-regen-mode" value="moonPhases"
+                            onchange="window._nwstRegenMode=this.value" style="margin:0;flex-shrink:0">
+                        <span>Moon Phases Only</span>
+                    </label>
+                </div>
+            `;
+
+            // Set default
+            window._nwstRegenMode = 'all';
+
+            const result = await callGenericPopup(html, POPUP_TYPE.TEXT, '', {
+                okButton: 'Regenerate',
+                cancelButton: 'Cancel',
+            });
+
+            if (result) {
+                const mode = window._nwstRegenMode || 'all';
+                if (mode === 'forecast') {
+                    await regenerateForecastOnly();
+                } else if (mode === 'moonPhases') {
+                    await regenerateMoonPhasesOnly();
+                } else {
+                    await regenerateForecast();
+                }
+                refreshHomeUI();
+            }
         });
     }
 
@@ -261,6 +302,8 @@ function toggleCurrentDayEdit(showEdit) {
 function formatCurrentDayForEdit(day) {
     if (!day) return '';
     const lines = [];
+    if (day.dateDisplay) lines.push(`Date: ${day.dateDisplay}`);
+    if (day.dateSub) lines.push(`Sub: ${day.dateSub}`);
     if (day.season) lines.push(`Season: ${day.season}`);
     if (day.weatherToday) lines.push(`Weather today: ${day.weatherToday}`);
     if (day.flora) lines.push(`Flora: ${day.flora}`);
@@ -278,16 +321,34 @@ function saveCurrentDayEdit() {
 
     const chatId = getChatId();
     const text = textarea.value.trim();
-    const day = {};
 
-    // Parse lines like "Season: Late Autumn — Chrysanthemum Month"
+    // ── Snapshot old date before overwriting ──
+    const existingDay = getCurrentDay(chatId);
+    const oldDateDisplay = existingDay?.dateDisplay || '';
+
+    // Start with ALL fields empty so that removed lines explicitly overwrite old values
+    // Preserve lunarAngle — it's managed by the moon phase engine, not user-editable
+    const day = {
+        dateDisplay: '',
+        dateSub: '',
+        season: '',
+        weatherToday: '',
+        flora: '',
+        fauna: '',
+        spiritualClimate: '',
+        lunarAngle: (existingDay && typeof existingDay.lunarAngle === 'number') ? existingDay.lunarAngle : 0
+    };
+
+    // Parse lines like "Date: Chrysanthemum Month · Seventh Day of the Waxing Moon"
     const lines = text.split('\n');
     for (const line of lines) {
         const match = line.match(/^([^:]+):\s*(.*)$/);
         if (match) {
             const key = match[1].trim().toLowerCase();
             const value = match[2].trim();
-            if (key === 'season') day.season = value;
+            if (key === 'date' || key === 'date display') day.dateDisplay = value;
+            else if (key === 'sub' || key === 'sub date' || key === 'date sub') day.dateSub = value;
+            else if (key === 'season') day.season = value;
             else if (key === 'weather today') day.weatherToday = value;
             else if (key === 'flora') day.flora = value;
             else if (key === 'fauna') day.fauna = value;
@@ -296,9 +357,42 @@ function saveCurrentDayEdit() {
     }
 
     updateCurrentDay(chatId, day);
+
+    // ── Recalculate lunar angle if the date changed ──────────────
+    if (day.dateDisplay && day.dateDisplay !== oldDateDisplay) {
+        const estimatedDays = estimateDaysBetweenDates(oldDateDisplay, day.dateDisplay);
+        if (estimatedDays !== 0) {
+            const currentAngle = getLunarAngle(chatId);
+            const newAngle = ((currentAngle + estimatedDays * getDegreesPerDay()) % 360 + 360) % 360;
+            setLunarAngle(chatId, newAngle);
+            const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
+            replaceMoonPhases(chatId, newMoonPhases);
+            nwstToast(`Date changed — moon phases recalculated (~${estimatedDays} day shift).`, 'info');
+        }
+    }
+
     toggleCurrentDayEdit(false);
     refreshCurrentDayDisplay();
+    refreshMoonDisplay();
     nwstToast('Current Day saved.', 'success');
+}
+
+/**
+ * Estimate the number of days between two narrative date strings.
+ * Extracts the first integer from each string and returns the difference.
+ * Falls back to 0 if the dates can't be parsed or haven't changed.
+ * @param {string} oldDate
+ * @param {string} newDate
+ * @returns {number}
+ */
+function estimateDaysBetweenDates(oldDate, newDate) {
+    if (!oldDate || !newDate) return 0;
+    const oldNum = parseInt(oldDate.match(/\d+/)?.[0], 10);
+    const newNum = parseInt(newDate.match(/\d+/)?.[0], 10);
+    if (!isNaN(oldNum) && !isNaN(newNum) && newNum > oldNum) {
+        return newNum - oldNum;
+    }
+    return 0;
 }
 
 // ── UI Refresh ────────────────────────────────────────────────────────────

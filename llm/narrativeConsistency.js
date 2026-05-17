@@ -27,7 +27,7 @@
 
 import { getChatId, nwstToast } from '../index.js';
 import { getNotebook, getAllSecrets, addMysteryBullet, getMysteryField } from '../data/notebook.js';
-import { resolveProfile } from './connections.js';
+import { resolveProfile, generateWithProfile } from './connections.js';
 import { isEnabled, isPaused } from '../settings.js';
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
@@ -188,15 +188,14 @@ export async function runConsistencyCheck() {
         // Build the prompt
         const userPrompt = buildConsistencyPrompt(secrets, recentMessages, sceneCharacters);
 
-        // Call the Narrative Consistency LLM
-        const { generateRaw } = SillyTavern.getContext();
+        // Call the Narrative Consistency LLM via connection profile
         const messages = [
             { role: 'system', content: CONSISTENCY_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
         ];
 
         console.log('[NWST NarrativeConsistency] Running consistency check...');
-        const response = await generateRaw(messages, null, profile.id, null, true, false);
+        const response = await generateWithProfile(profile, messages);
 
         if (!response) return false;
 

@@ -1,4 +1,5 @@
 /* eslint-disable */
+import { generateWithProfile } from './connections.js';
 // =============================================================================
 // NWST Message Scanner — llm/scanner.js
 // =============================================================================
@@ -156,15 +157,14 @@ async function runScan() {
         // Build the scan prompt
         const userPrompt = buildScannerPrompt(recentMessages, worldState, notebook, communities, activeEvents, settingContext);
 
-        // Call Planning LLM via SillyTavern.getContext() — the stable API
-        const { generateRaw } = SillyTavern.getContext();
+        // Call Planning LLM via connection profile
         const messages = [
             { role: 'system', content: SCANNER_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
         ];
 
         console.log('[NWST Scanner] Calling Planning LLM...');
-        const response = await generateRaw(messages, null, profile.id, null, false, false);
+        const response = await generateWithProfile(profile, messages);
 
         if (!response) {
             console.log('[NWST Scanner] Empty response — no updates needed.');

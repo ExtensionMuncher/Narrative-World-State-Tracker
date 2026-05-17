@@ -16,7 +16,7 @@ import {
 } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
 import { getPlannerPrompt } from '../settings.js';
-import { resolveProfile } from './connections.js';
+import { resolveProfile, generateWithProfile } from './connections.js';
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -163,21 +163,12 @@ function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents
 // ── LLM call ──────────────────────────────────────────────────────────────
 
 async function callPlanningLLM(profile, systemPrompt, userPrompt) {
-    const { generateRaw } = SillyTavern.getContext();
-
     const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
     ];
 
-    const result = await generateRaw(
-        messages,
-        null,
-        profile.id,
-        null,
-        false,
-        false
-    );
+    const result = await generateWithProfile(profile, messages);
 
     return result || '';
 }

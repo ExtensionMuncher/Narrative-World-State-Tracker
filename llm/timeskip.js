@@ -25,7 +25,8 @@ import {
 import { getAllEvents, saveAllEvents, addEvent } from '../data/events.js';
 import { getNotebook, saveNotebook } from '../data/notebook.js';
 import { getPlannerPrompt } from '../settings.js';
-import { resolveProfile } from './connections.js';
+import { resolveProfile, generateWithProfile } from './connections.js';
+import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle } from './dayAdvancement.js';
 
 // ── Internal prompt ───────────────────────────────────────────────────────
 
@@ -141,15 +142,14 @@ export async function executeTimeSkip(skipDescription) {
             notebook, settingContext, chatContext
         );
 
-        // ── 4. Call Planning LLM ───────────────────────────────
-        const { generateRaw } = SillyTavern.getContext();
+        // ── 4. Call Planning LLM via connection profile ────────
         const messages = [
             { role: 'system', content: TIMESKIP_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
         ];
 
         console.log('[NWST Timeskip] Calling Planning LLM with full context...');
-        const response = await generateRaw(messages, null, profile.id, null, false, false);
+        const response = await generateWithProfile(profile, messages);
 
         if (!response) {
             throw new Error('Planning LLM returned empty response.');
@@ -185,10 +185,34 @@ export async function executeTimeSkip(skipDescription) {
             nwstToast('Notebook updated.', 'info');
         }
 
-        // ── 6. Generate new forecast/moon via Day Advancement LLM ──
+        // ── 6. Recalculate moon phases based on estimated days skipped ──
         try {
-            const { advanceToNextDay } = await import('./dayAdvancement.js');
-            // Only update forecast/moon, not the full day advancement
+            // Get the old lunar angle (from pre-skip snapshot)
+            const oldDay = preSkipSnapshot.worldState?.currentDay || {};
+            const oldLunarAngle = oldDay.lunarAngle !== undefined ? oldDay.lunarAngle : 0;
+
+            // Estimate days skipped from old vs new date strings
+            const oldDate = oldDay.dateDisplay || '';
+            const newDate = result.currentDay?.dateDisplay || '';
+            const estimatedDays = estimateDaysBetweenDates(oldDate, newDate);
+
+            // Advance lunar angle by the estimated skip duration
+            const newAngle = ((oldLunarAngle + estimatedDays * getDegreesPerDay()) % 360 + 360) % 360;
+            setLunarAngle(chatId, newAngle);
+
+            // Generate new 7-day moon phase strip from the new angle
+            const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
+            replaceMoonPhases(chatId, newMoonPhases);
+
+            nwstToast(`Moon phases recalculated (~${estimatedDays} day skip).`, 'info');
+        } catch (moonErr) {
+            console.warn('[NWST Timeskip] Moon phase recalculation failed (non-fatal):', moonErr);
+        }
+
+        // ── 8. Regenerate weather forecast ──────────────────────────
+        try {
+            const { regenerateForecast } = await import('./dayAdvancement.js');
+            await regenerateForecast('forecast');
             nwstToast('Forecast updated.', 'info');
         } catch (forecastErr) {
             console.warn('[NWST Timeskip] Forecast regeneration failed (non-fatal):', forecastErr);
@@ -216,6 +240,30 @@ export async function executeTimeSkip(skipDescription) {
     } finally {
         showTimeskipLoading(false);
     }
+}
+
+// ── Date estimation helper ─────────────────────────────────────────────────
+
+/**
+ * Estimate the number of days between two freeform date strings.
+ * Extracts the first numeric value from each string and computes the difference.
+ * Falls back to 1 (minimum shift) if dates can't be parsed numerically.
+ *
+ * @param {string} oldDate - Previous dateDisplay string
+ * @param {string} newDate - New dateDisplay string from LLM
+ * @returns {number} Estimated days between the two dates (at least 1)
+ */
+function estimateDaysBetweenDates(oldDate, newDate) {
+    if (!oldDate || !newDate) return 1;
+    const oldNum = parseInt(oldDate.match(/\d+/)?.[0], 10);
+    const newNum = parseInt(newDate.match(/\d+/)?.[0], 10);
+    if (!isNaN(oldNum) && !isNaN(newNum) && newNum > oldNum) {
+        return newNum - oldNum;
+    }
+    // Fallback: if dates contain month names or qualitative indicators,
+    // default to a reasonable skip. Since we can't reliably parse
+    // freeform narrative dates, 1 day is the safest minimum.
+    return 1;
 }
 
 // ── Prompt building ───────────────────────────────────────────────────────

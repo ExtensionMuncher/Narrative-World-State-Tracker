@@ -26,8 +26,9 @@ import {
 } from '../settings.js';
 
 import { getSettingContext, saveSettingContext } from '../data/worldState.js';
-import { getChatId, nwstToast } from '../index.js';
+import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
+import { deleteAllChatData } from '../data/storage.js';
 import { runBatchScan } from '../llm/batchScan.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
@@ -73,6 +74,18 @@ export function buildSettingsTab() {
             <div style="display:flex;align-items:center;gap:8px">
                 <input type="number" id="nwst-setting-scanFrequency" value="20" min="1" max="100" style="width:60px;text-align:center">
                 <span style="font-size:12px;color:#666">messages</span>
+            </div>
+        </div>
+
+        <!-- ── Moon Cycle ──────────────────────────────────────── -->
+        <div class="nwst-lbl">Moon cycle</div>
+        <div class="nwst-card">
+            <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
+                Configure your world's lunar cycle length. The default 29.53 days matches Earth's synodic period. Fantasy worlds can use any value — shorter cycles mean faster moon phase progression, longer cycles mean slower.
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <input type="number" id="nwst-setting-moonCycleDays" value="29.53" min="1" max="999" step="0.01" style="width:80px;text-align:center">
+                <span style="font-size:12px;color:#666">days per cycle</span>
             </div>
         </div>
 
@@ -168,15 +181,16 @@ export function buildSettingsTab() {
             <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
                 Scan your full chat history to generate an initial world state. Creates a current day entry, populates the event horizon, fills active world conditions, seeds the notebook, and groups any detected communities. Runs once — does not overwrite existing data.
             </div>
-            <button class="menu_button nwst-btn" id="nwst-setting-batchScan" style="border-color:#7F77DD;color:#3C3489">Run batch scan</button>
+            <button class="menu_button nwst-btn" id="nwst-setting-batchScan" style="font-size:11px;padding:3px 9px">Run batch scan</button>
             <span id="nwst-batchScan-spinner" style="display:none;margin-left:8px;" class="nwst-spinner"></span>
         </div>
 
-        <!-- ── Data Import / Export ────────────────────────────── -->
+        <!-- ── Data Import / Export / Clear ────────────────────── -->
         <div class="nwst-lbl">Data</div>
         <div class="nwst-btn-row">
             <button class="menu_button nwst-btn" id="nwst-setting-importAll">Import all</button>
             <button class="menu_button nwst-btn" id="nwst-setting-exportAll">Export all</button>
+            <button class="menu_button nwst-btn" id="nwst-setting-clearAll" style="font-size:11px;padding:3px 9px">Clear all</button>
         </div>
 
         <!-- Hidden file input for import -->
@@ -197,6 +211,10 @@ function populateSettingsUI() {
     // Scan frequency
     const freqInput = document.getElementById('nwst-setting-scanFrequency');
     if (freqInput) freqInput.value = getScanFrequency();
+
+    // Moon cycle
+    const moonCycleInput = document.getElementById('nwst-setting-moonCycleDays');
+    if (moonCycleInput) moonCycleInput.value = getSetting('moonCycleDays') || 29.53;
 
     // Setting context (per-chat — load from storage)
     const chatId = getChatId();
@@ -274,10 +292,6 @@ function populateConnectionProfileDropdowns() {
             select.value = currentProfileId;
         }
 
-        // Refresh dropdown on click (in case profiles changed)
-        select.addEventListener('click', () => {
-            populateConnectionProfileDropdowns();
-        });
     }
 }
 
@@ -293,6 +307,12 @@ function wireSettingsEvents() {
     wireInput('nwst-setting-scanFrequency', (val) => {
         const num = parseInt(val, 10);
         if (num >= 1 && num <= 100) setScanFrequency(num);
+    });
+
+    // ── Moon cycle ─────────────────────────────────────────────
+    wireInput('nwst-setting-moonCycleDays', (val) => {
+        const num = parseFloat(val);
+        if (num >= 1 && num <= 999) setSetting('moonCycleDays', num);
     });
 
     // ── Setting context (per-chat) ───────────────────────────────
@@ -397,6 +417,40 @@ function wireSettingsEvents() {
             const json = exportAll(chatId);
             download(json, `nwst-export-${chatId}.json`, 'application/json');
             nwstToast('Settings and chat data exported.', 'info');
+        });
+    }
+
+    // ── Clear All (per-chat) ──────────────────────────────────
+    const clearAllBtn = document.getElementById('nwst-setting-clearAll');
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', async () => {
+            const chatId = getChatId();
+            if (!chatId) {
+                nwstToast('No active chat detected.', 'error');
+                return;
+            }
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+            const confirmed = await callGenericPopup(
+                'This will permanently delete ALL stored NWST data for this chat. Continue?',
+                POPUP_TYPE.CONFIRM,
+                '',
+            );
+            if (!confirmed) return;
+
+            // Preserve the Setting Context — it describes the world and is
+            // manually authored by the user, not auto-generated by the LLM.
+            const preservedContext = getSettingContext(chatId);
+
+            deleteAllChatData(chatId);
+
+            // Restore the Setting Context
+            if (preservedContext) {
+                saveSettingContext(chatId, preservedContext);
+            }
+
+            nwstToast('All NWST data cleared for this chat (Setting Context preserved).', 'success');
+            // Refresh the UI to reflect the cleared state
+            populateSettingsUI();
         });
     }
 }

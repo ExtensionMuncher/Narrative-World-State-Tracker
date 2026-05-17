@@ -111,6 +111,9 @@ const defaultSettings = {
     // Scanner cadence
     scanFrequency: 20,
 
+    // Moon cycle configuration (fantasy worlds can override the 29.53-day cycle)
+    moonCycleDays: 29.53,
+
     // Injection settings
     injection: {
         injectCurrentDay: true,
@@ -172,39 +175,6 @@ function setSetting(key, value) {
 }
 
 export { getSetting, setSetting, defaultSettings };
-
-// ── Per-chat data helpers (chatMetadata) ───────────────────────────────────
-// Per-chat narrative data lives in ST's chatMetadata, not extensionSettings.
-// chatMetadata is automatically scoped to the current chat — no manual
-// namespacing needed beyond a key prefix to avoid conflicts with other extensions.
-//
-// IMPORTANT: Never cache a reference to chatMetadata. Always call
-// SillyTavern.getContext().chatMetadata to get the current chat's metadata,
-// because the reference changes when the chat is switched.
-
-/**
- * Get a per-chat NWST data value.
- * @param {string} key - The data key (will be prefixed with 'nwst:')
- * @param {*} defaultValue - Value to return if key doesn't exist
- * @returns {*}
- */
-function getChatData(key, defaultValue = null) {
-    const { chatMetadata } = SillyTavern.getContext();
-    return chatMetadata[`nwst:${key}`] ?? defaultValue;
-}
-
-/**
- * Set a per-chat NWST data value and save metadata.
- * @param {string} key - The data key (will be prefixed with 'nwst:')
- * @param {*} value - JSON-serializable value to store
- */
-async function setChatData(key, value) {
-    const { chatMetadata, saveMetadata } = SillyTavern.getContext();
-    chatMetadata[`nwst:${key}`] = value;
-    await saveMetadata();
-}
-
-export { getChatData, setChatData };
 
 // ── Panel registration (ST native inline-drawer pattern) ───────────────────
 
@@ -409,16 +379,6 @@ function onChatChanged() {
 }
 
 export { onChatChanged };
-
-// ── Placeholder UI refresh ─────────────────────────────────────────────────
-
-/**
- * Refresh all UI panels with current chat data.
- * Placeholder — will be replaced by ui/panel.js in later build phases.
- */
-function refreshAllUI() {
-    log('refreshAllUI called — UI modules not yet loaded.');
-}
 
 // ── Extension initialization ───────────────────────────────────────────────
 

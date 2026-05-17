@@ -105,20 +105,6 @@ export function replaceForecast(chatId, forecast) {
     saveWorldState(chatId, ws);
 }
 
-/**
- * Update a single forecast entry by index (0 = Today, 1 = Day 2, ... 6 = Day 7).
- * @param {string} chatId
- * @param {number} index - 0-based index into the forecast array
- * @param {object} forecastEntry - Partial forecast entry fields
- */
-export function updateForecastEntry(chatId, index, forecastEntry) {
-    const ws = getWorldState(chatId);
-    if (ws.forecast[index]) {
-        ws.forecast[index] = { ...ws.forecast[index], ...forecastEntry };
-        saveWorldState(chatId, ws);
-    }
-}
-
 // ── Moon Phases ───────────────────────────────────────────────────────────
 
 /**
@@ -293,38 +279,3 @@ export function getLatestSnapshot(chatId) {
     return snapshots[keys[0]];
 }
 
-/**
- * Get the snapshot that covers a specific message number.
- * Used when branching a chat to find the right snapshot to initialize from.
- * @param {string} chatId
- * @param {number} messageNumber - The message number to look up
- * @returns {object|null} The snapshot covering that message, or null
- */
-export function getSnapshotForMessage(chatId, messageNumber) {
-    const snapshots = getSnapshots(chatId);
-    for (const snapshot of Object.values(snapshots)) {
-        if (messageNumber >= snapshot.messageRangeStart && messageNumber <= snapshot.messageRangeEnd) {
-            return snapshot;
-        }
-    }
-    return null;
-}
-
-/**
- * Delete all snapshots for a chat (cleanup).
- * @param {string} chatId
- */
-export function clearSnapshots(chatId) {
-    deleteChatData(chatId, 'snapshots');
-}
-
-// ── Full state reset ──────────────────────────────────────────────────────
-
-/**
- * Reset the entire world state for a chat to defaults.
- * WARNING: Destroys all world state data. Use with caution.
- * @param {string} chatId
- */
-export function resetWorldState(chatId) {
-    deleteChatData(chatId, 'worldState');
-}

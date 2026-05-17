@@ -113,14 +113,6 @@ export function getCurrentChatProfileId() {
 }
 
 /**
- * Get the list of profile names for dropdown display.
- * @returns {string[]} Array of profile names
- */
-export function getProfileNames() {
-    return getAllProfiles().map(p => p.name);
-}
-
-/**
  * Validate that a profile ID is still valid (hasn't been deleted since saved).
  * @param {string} profileId
  * @returns {boolean}
@@ -130,12 +122,67 @@ export function isProfileValid(profileId) {
     return !!getProfileById(profileId);
 }
 
+// ── LLM call via connection profile ────────────────────────────────────────
+
 /**
- * Get the API type string for a profile (e.g., 'openai', 'textgenerationwebui', 'kobold').
- * @param {object} profile - The profile object
- * @returns {string} API type identifier
+ * Call an LLM using a specific connection profile.
+ *
+ * Uses ST's ConnectionManagerRequestService.sendRequest() which handles ALL
+ * profile-specific settings (endpoint, API key, model, preset, etc.) WITHOUT
+ * modifying any global ST state. This is the correct way to call a different
+ * LLM profile than the chat's currently active profile.
+ *
+ * Previously, NWST called generateRaw() with positional arguments, which broke
+ * when ST refactored generateRaw to use a single options object. Additionally,
+ * generateRaw() with api=null falls back to main_api (the chat's active profile),
+ * ignoring the NWST-configured profile entirely.
+ *
+ * This helper fixes both issues by using the connection-manager's dedicated
+ * profile-aware request service.
+ *
+ * @param {object} profile - Connection profile object (from resolveProfile)
+ * @param {Array<{role:string, content:string}>} messages - Message array for the LLM
+ * @param {object} [options] - Optional settings
+ * @param {number} [options.maxTokens] - Max response tokens (undefined = let API decide its default)
+ * @returns {Promise<string>} The LLM response text, or empty string on failure
  */
-export function getProfileApiType(profile) {
-    if (!profile) return 'unknown';
-    return profile.api || profile.mode || 'unknown';
+export async function generateWithProfile(profile, messages, options = {}) {
+    const { maxTokens } = options;
+
+    if (!profile || !profile.id) {
+        console.error('[NWST Connections] generateWithProfile: invalid profile', profile);
+        return '';
+    }
+
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+        console.error('[NWST Connections] generateWithProfile: no messages provided');
+        return '';
+    }
+
+    try {
+        const ctx = SillyTavern.getContext();
+
+        if (!ctx.ConnectionManagerRequestService) {
+            console.error('[NWST Connections] ConnectionManagerRequestService not available — is connection-manager disabled?');
+            return '';
+        }
+
+        console.log(`[NWST Connections] Calling LLM with profile: ${profile.name || profile.id} (${profile.api || 'unknown API'})`);
+
+        const response = await ctx.ConnectionManagerRequestService.sendRequest(
+            profile.id,
+            messages,
+            maxTokens,
+            { extractData: true, includePreset: true, stream: false },
+        );
+
+        const result = response?.content || '';
+        console.log(`[NWST Connections] LLM response received (${result.length} chars)`);
+        return result;
+
+    } catch (err) {
+        console.error('[NWST Connections] LLM call failed:', err);
+        return '';
+    }
 }
+

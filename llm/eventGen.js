@@ -20,7 +20,7 @@ import { getAllEvents, addEvent, getActiveEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { getAllCommunities } from '../data/communities.js';
 import { getPlannerPrompt } from '../settings.js';
-import { resolveProfile } from './connections.js';
+import { resolveProfile, generateWithProfile } from './connections.js';
 
 // ── Internal prompts ──────────────────────────────────────────────────────
 
@@ -88,14 +88,13 @@ export async function regenerateTierEvents(tier) {
         // Build prompt focused on this tier
         const userPrompt = buildEventGenPrompt(context, tier);
 
-        // Call Planning LLM
-        const { generateRaw } = SillyTavern.getContext();
+        // Call Planning LLM via connection profile
         const messages = [
             { role: 'system', content: EVENT_GEN_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
         ];
 
-        const response = await generateRaw(messages, null, profile.id, null, false, false);
+        const response = await generateWithProfile(profile, messages);
         const events = parseEventGenResponse(response);
 
         // Plausibility check
