@@ -18,7 +18,8 @@
 import {
     getChatId,
     nwstToast,
-    openPopout
+    updateStatusLabel,
+    updatePauseButton
 } from '../index.js';
 
 import { isEnabled, setEnabled, isPaused, setPaused } from '../settings.js';
@@ -45,36 +46,14 @@ export function buildHomeTab() {
     }
 
     pane.innerHTML = `
-        <!-- ── Header: Extension name + Enable toggle + Pause button ── -->
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-            <div>
-                <div style="font-size:14px;font-weight:500">Narrative World State Tracker</div>
-                <div style="font-size:11px;color:#999" id="nwst-ext-status">Extension enabled · Scanning active</div>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px">
-                <button id="nwst-pause-btn" style="font-size:11px;padding:4px 10px;border:0.5px solid #ccc;border-radius:8px;background:transparent;color:#666;cursor:pointer;display:flex;align-items:center;gap:5px">
-                    <span id="nwst-pause-icon">⏸</span><span id="nwst-pause-label">Pause</span>
-                </button>
-                <label class="nwst-toggle">
-                    <input type="checkbox" id="nwst-enable-toggle" checked>
-                    <span class="nwst-slider"></span>
-                </label>
-            </div>
-        </div>
-        <div class="nwst-div"></div>
-
         <!-- ── Day Navigation Bar ──────────────────────────────── -->
         <div class="nwst-day-nav">
             <button class="nwst-day-nav-btn" id="nwst-prev-day-btn" title="Previous day">‹</button>
             <div class="nwst-day-label">
                 <div class="nwst-date-main" id="nwst-date-display" contenteditable="true" title="Click to edit"
-                    style="cursor:text;border-radius:4px;padding:1px 4px;outline:none;"
-                    onfocus="this.style.background='var(--SmartThemeChatScrollBarColor, #f8f8f8)'"
-                    onblur="this.style.background='transparent'">—</div>
+                    style="cursor:text;border-radius:4px;padding:1px 4px;outline:none;">—</div>
                 <div class="nwst-date-sub" id="nwst-date-sub" contenteditable="true" title="Click to edit"
-                    style="cursor:text;border-radius:4px;padding:1px 4px;outline:none;"
-                    onfocus="this.style.background='var(--SmartThemeChatScrollBarColor, #f8f8f8)'"
-                    onblur="this.style.background='transparent'">—</div>
+                    style="cursor:text;border-radius:4px;padding:1px 4px;outline:none;">—</div>
             </div>
             <button class="nwst-day-nav-btn" id="nwst-next-day-btn" title="Next day">›</button>
         </div>
@@ -84,7 +63,7 @@ export function buildHomeTab() {
             <div class="nwst-lbl">Time skip</div>
             <div class="nwst-jump-wrap">
                 <input type="text" id="nwst-timeskip-input" placeholder="e.g. Three weeks later, end of harvest season…" style="flex:1">
-                <button class="nwst-btn-regen" id="nwst-timeskip-jump">Jump →</button>
+                <button class="menu_button nwst-btn-regen" id="nwst-timeskip-jump">Jump →</button>
             </div>
         </div>
 
@@ -95,7 +74,7 @@ export function buildHomeTab() {
             <div class="nwst-journal-hdr">
                 <div class="nwst-journal-hdr-title">📅 Current Day</div>
                 <div class="nwst-btn-row">
-                    <button class="nwst-icon-btn" id="nwst-currentday-edit-btn" title="Edit">✎</button>
+                    <button class="menu_button nwst-icon-btn" id="nwst-currentday-edit-btn" title="Edit">✎</button>
                 </div>
             </div>
             <!-- View mode -->
@@ -109,10 +88,10 @@ export function buildHomeTab() {
                 <textarea id="nwst-currentday-textarea" rows="7"
                     placeholder="Season: ...&#10;Weather today: ...&#10;Flora: ...&#10;Fauna: ...&#10;Spiritual Climate: ..."></textarea>
                 <div class="nwst-btn-row" style="padding:8px 12px;border-top:0.5px solid var(--SmartThemeBorderColor, #eee)">
-                    <button class="nwst-btn" id="nwst-currentday-save">Save</button>
-                    <button class="nwst-btn" id="nwst-currentday-cancel">Cancel</button>
-                    <button class="nwst-expand-btn" style="margin-left:4px;font-size:14px;color:#aaa"
-                        id="nwst-currentday-popout" title="Open in popout">⛶</button>
+                    <button class="menu_button nwst-btn" id="nwst-currentday-save">Save</button>
+                    <button class="menu_button nwst-btn" id="nwst-currentday-cancel">Cancel</button>
+                    <button class="editor_maximize nwst-expand-btn" style="margin-left:4px;font-size:14px;color:#aaa"
+                        id="nwst-currentday-popout" data-for="nwst-currentday-textarea" title="Open in popout">⛶</button>
                 </div>
             </div>
         </div>
@@ -122,7 +101,7 @@ export function buildHomeTab() {
             <div class="nwst-journal-hdr">
                 <div class="nwst-journal-hdr-title">🌤 7-Day Forecast</div>
                 <div class="nwst-btn-row">
-                    <button class="nwst-btn-regen" id="nwst-forecast-regen" style="font-size:11px;padding:3px 9px">↺ Regen</button>
+                    <button class="menu_button nwst-btn-regen" id="nwst-forecast-regen" style="font-size:11px;padding:3px 9px">↺ Regen</button>
                 </div>
             </div>
             <div class="nwst-journal-body">
@@ -142,7 +121,7 @@ export function buildHomeTab() {
         <div class="nwst-journal-block">
             <div class="nwst-journal-hdr">
                 <div class="nwst-journal-hdr-title">📋 Upcoming Events</div>
-                <button class="nwst-btn" id="nwst-events-manage-btn" style="font-size:11px;padding:3px 9px">Manage →</button>
+                <button class="menu_button nwst-btn" id="nwst-events-manage-btn" style="font-size:11px;padding:3px 9px">Manage →</button>
             </div>
             <div class="nwst-journal-body">
                 <div class="nwst-md" id="nwst-events-digest">
@@ -160,28 +139,6 @@ export function buildHomeTab() {
 // ── Wire all Home tab UI events ───────────────────────────────────────────
 
 function wireHomeEvents() {
-    // ── Enable toggle ──────────────────────────────────────────
-    const enableToggle = document.getElementById('nwst-enable-toggle');
-    if (enableToggle) {
-        enableToggle.addEventListener('change', function () {
-            setEnabled(this.checked);
-            updateStatusLabel();
-            nwstToast(this.checked ? 'Extension enabled.' : 'Extension disabled.', 'info');
-        });
-    }
-
-    // ── Pause / Resume button ──────────────────────────────────
-    const pauseBtn = document.getElementById('nwst-pause-btn');
-    if (pauseBtn) {
-        pauseBtn.addEventListener('click', function () {
-            const paused = !isPaused();
-            setPaused(paused);
-            updatePauseButton();
-            updateStatusLabel();
-            nwstToast(paused ? 'Scanner paused.' : 'Scanner resumed.', 'info');
-        });
-    }
-
     // ── Previous Day ───────────────────────────────────────────
     const prevDayBtn = document.getElementById('nwst-prev-day-btn');
     if (prevDayBtn) {
@@ -247,20 +204,6 @@ function wireHomeEvents() {
     const cancelBtn = document.getElementById('nwst-currentday-cancel');
     if (cancelBtn) {
         cancelBtn.addEventListener('click', () => toggleCurrentDayEdit(false));
-    }
-
-    // ── Current Day Popout ─────────────────────────────────────
-    const popoutBtn = document.getElementById('nwst-currentday-popout');
-    if (popoutBtn) {
-        popoutBtn.addEventListener('click', () => {
-            const textarea = document.getElementById('nwst-currentday-textarea');
-            if (textarea) {
-                openPopout('Current Day', textarea.value, (newValue) => {
-                    textarea.value = newValue;
-                    saveCurrentDayEdit();
-                });
-            }
-        });
     }
 
     // ── Forecast Regen button ──────────────────────────────────
@@ -364,55 +307,6 @@ export function refreshHomeUI() {
     refreshForecastDisplay();
     refreshMoonDisplay();
     refreshEventsDigest();
-}
-
-// ── Status label + pause button ───────────────────────────────────────────
-
-function updateStatusLabel() {
-    const label = document.getElementById('nwst-ext-status');
-    if (!label) return;
-
-    const enabled = isEnabled();
-    const paused = isPaused();
-
-    if (!enabled) {
-        label.textContent = 'Extension disabled';
-        label.style.color = '#999';
-    } else if (paused) {
-        label.textContent = 'Extension enabled · Scanning paused';
-        label.style.color = '#8a6c00';
-    } else {
-        label.textContent = 'Extension enabled · Scanning active';
-        label.style.color = '#999';
-    }
-}
-
-function updatePauseButton() {
-    const btn = document.getElementById('nwst-pause-btn');
-    const icon = document.getElementById('nwst-pause-icon');
-    const label = document.getElementById('nwst-pause-label');
-    if (!btn || !icon || !label) return;
-
-    const paused = isPaused();
-
-    if (paused) {
-        btn.style.borderColor = '#f0c040';
-        btn.style.color = '#8a6c00';
-        btn.style.background = '#fffbe6';
-        icon.textContent = '▶';
-        label.textContent = 'Resume';
-    } else {
-        btn.style.borderColor = '#ccc';
-        btn.style.color = '#666';
-        btn.style.background = 'transparent';
-        icon.textContent = '⏸';
-        label.textContent = 'Pause';
-    }
-
-    // Disable pause button if extension is off
-    const enabled = isEnabled();
-    btn.style.opacity = enabled ? '1' : '0.4';
-    btn.style.pointerEvents = enabled ? 'auto' : 'none';
 }
 
 // ── Current Day display ───────────────────────────────────────────────────

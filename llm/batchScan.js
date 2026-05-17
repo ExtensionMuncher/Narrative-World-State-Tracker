@@ -23,7 +23,6 @@ import { getWorldState, saveSnapshot } from '../data/worldState.js';
 import { getAllEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
-import { getContext, getMaxContextSize } from '../../../../../script.js';
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -91,7 +90,7 @@ export async function runBatchScan() {
         }
 
         // Calculate chunk size based on context window
-        const maxContext = getMaxContextSize();
+        const maxContext = SillyTavern.getContext().maxContext;
         const chunkSize = Math.floor(maxContext * 0.6); // 60% for input, 40% for output
         const chunks = chunkMessages(allMessages, chunkSize);
 
@@ -110,7 +109,7 @@ export async function runBatchScan() {
             const chunkText = formatChunkForLLM(chunks[i], i + 1, chunks.length, startMsg, endMsg);
 
             // Call Planning LLM for this chunk
-            const { generateRaw } = await import('../../../../../script.js');
+            const { generateRaw } = SillyTavern.getContext();
             const messages = [
                 { role: 'system', content: BATCH_SCAN_SYSTEM_PROMPT },
                 { role: 'user', content: chunkText }
@@ -142,7 +141,7 @@ export async function runBatchScan() {
 
 function getAllMessagesUnfiltered() {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         return ctx.chat || [];
     } catch (e) {
         console.error('[NWST BatchScan] Error accessing chat:', e);
@@ -270,7 +269,7 @@ Now synthesize the COMPLETE initial world state as a single JSON object. Use thi
 
 Respond with valid JSON ONLY. No markdown, no explanation outside the JSON.`;
 
-    const { generateRaw } = await import('../../../../../script.js');
+    const { generateRaw } = SillyTavern.getContext();
     const messages = [
         { role: 'system', content: BATCH_SCAN_SYSTEM_PROMPT },
         { role: 'user', content: synthesisPrompt }

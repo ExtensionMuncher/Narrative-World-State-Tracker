@@ -12,7 +12,7 @@
 //   • Expanded body: description textarea, status selector, Save/Delete/⛶
 // =============================================================================
 
-import { getChatId, nwstToast, openPopout } from '../index.js';
+import { getChatId, nwstToast } from '../index.js';
 import {
     getAllEvents,
     addEvent, updateEvent, deleteEvent, setEventStatus,
@@ -27,8 +27,8 @@ export function buildEventsTab() {
 
     pane.innerHTML = `
         <div class="nwst-btn-row" style="margin-bottom:14px">
-            <button class="nwst-btn" id="nwst-events-add">+ Add event</button>
-            <button class="nwst-btn-regen" id="nwst-events-regenAll">↺ Regenerate all</button>
+            <button class="menu_button nwst-btn" id="nwst-events-add">+ Add event</button>
+            <button class="menu_button nwst-btn-regen" id="nwst-events-regenAll">↺ Regenerate all</button>
         </div>
         <div style="font-size:11px;color:#999;margin-bottom:12px;line-height:1.5">
             Event statuses are updated by the scanner when it detects changes in the chat, or manually by you.
@@ -69,7 +69,7 @@ export function refreshEventsUI() {
         html += `<div class="nwst-event-group-hdr">`;
         html += `<div class="nwst-lbl" style="margin-bottom:0">${tier.label}</div>`;
         if (!tier.noRegen) {
-            html += `<button class="nwst-btn-regen nwst-events-tier-regen" style="font-size:11px;padding:3px 9px" data-tier="${tier.key}">↺ Regen</button>`;
+            html += `<button class="menu_button nwst-btn-regen nwst-events-tier-regen" style="font-size:11px;padding:3px 9px" data-tier="${tier.key}">↺ Regen</button>`;
         } else {
             html += `<div style="font-size:11px;color:#999">Not regenerated — timing is intentional</div>`;
         }
@@ -111,18 +111,18 @@ function buildEventItemHTML(event) {
             <span class="nwst-badge nwst-badge-${event.status}">${statusLabel(event.status)}</span>
         </div>
         <div class="nwst-event-body">
-            <textarea class="nwst-events-desc" rows="2" style="margin-bottom:8px">${escapeHTML(event.description)}</textarea>
+            <textarea class="nwst-events-desc" rows="2" style="margin-bottom:8px" id="nwst-event-desc-${event.id}">${escapeHTML(event.description)}</textarea>
             <div style="font-size:11px;color:#999;margin-bottom:6px">Status</div>
             <div class="nwst-btn-row nwst-events-status-btns" style="margin-bottom:10px">
-                <button class="nwst-btn nwst-events-status" data-status="pending" style="font-size:11px${event.status === 'pending' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Pending</button>
-                <button class="nwst-btn nwst-events-status" data-status="inprogress" style="font-size:11px${event.status === 'inprogress' ? ';border-color:#7F77DD;color:#3C3489' : ''}">In progress</button>
-                <button class="nwst-btn nwst-events-status" data-status="resolved" style="font-size:11px${event.status === 'resolved' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Resolved</button>
-                <button class="nwst-btn nwst-events-status" data-status="missed" style="font-size:11px${event.status === 'missed' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Missed</button>
+                <button class="menu_button nwst-btn nwst-events-status" data-status="pending" style="font-size:11px${event.status === 'pending' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Pending</button>
+                <button class="menu_button nwst-btn nwst-events-status" data-status="inprogress" style="font-size:11px${event.status === 'inprogress' ? ';border-color:#7F77DD;color:#3C3489' : ''}">In progress</button>
+                <button class="menu_button nwst-btn nwst-events-status" data-status="resolved" style="font-size:11px${event.status === 'resolved' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Resolved</button>
+                <button class="menu_button nwst-btn nwst-events-status" data-status="missed" style="font-size:11px${event.status === 'missed' ? ';border-color:#7F77DD;color:#3C3489' : ''}">Missed</button>
             </div>
             <div class="nwst-btn-row">
-                <button class="nwst-btn nwst-events-save">Save</button>
-                <button class="nwst-btn-danger nwst-events-delete">Delete</button>
-                <button class="nwst-expand-btn nwst-events-popout" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                <button class="menu_button nwst-btn nwst-events-save">Save</button>
+                <button class="menu_button nwst-btn-danger nwst-events-delete">Delete</button>
+                <button class="editor_maximize nwst-expand-btn nwst-events-popout" data-for="nwst-event-desc-${event.id}" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
             </div>
         </div>
     </div>`;
@@ -134,21 +134,64 @@ function wireEventItemEvents() {
     const container = document.getElementById('nwst-events-container');
     if (!container) return;
 
-    // ── Add Event button ───────────────────────────────────────
+    // ── Add Event button with popup ─────────────────────────────
     const addBtn = document.getElementById('nwst-events-add');
     if (addBtn) {
-        addBtn.onclick = () => {
+        addBtn.onclick = async () => {
             const chatId = getChatId();
-            const newEvent = addEvent(chatId, {
-                title: 'New event',
-                description: 'Describe this event...',
-                tier: 'undetermined',
-                status: 'pending',
-                isNPC: false,
-                origin: 'detected'
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+
+            const formHtml = `
+                <div style="padding:10px;min-width:320px">
+                    <div style="margin-bottom:14px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Title</label>
+                        <input type="text" class="text_pole" style="width:100%" placeholder="e.g. The King's arrival"
+                            oninput="window._nwstAddEventTitle=this.value">
+                    </div>
+                    <div style="margin-bottom:14px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Description</label>
+                        <textarea class="text_pole" rows="3" style="width:100%" placeholder="Describe the event..."
+                            oninput="window._nwstAddEventDesc=this.value"></textarea>
+                    </div>
+                    <div>
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Category</label>
+                        <select class="text_pole" style="width:100%"
+                            onchange="window._nwstAddEventTier=this.value">
+                            <option value="immediate">Immediate</option>
+                            <option value="week">This week</option>
+                            <option value="month">This month</option>
+                            <option value="undetermined" selected>Undetermined</option>
+                        </select>
+                    </div>
+                </div>
+            `;
+
+            // Reset temp variables
+            window._nwstAddEventTitle = '';
+            window._nwstAddEventDesc = '';
+            window._nwstAddEventTier = 'undetermined';
+
+            const result = await callGenericPopup(formHtml, POPUP_TYPE.TEXT, '', {
+                okButton: 'Add event',
+                cancelButton: 'Cancel',
             });
-            refreshEventsUI();
-            nwstToast('Event added. Edit it to set tier, status, and details.', 'info');
+
+            if (result) {
+                const title = window._nwstAddEventTitle?.trim() || 'New event';
+                const description = window._nwstAddEventDesc?.trim() || 'No description provided.';
+                const tier = window._nwstAddEventTier || 'undetermined';
+
+                const newEvent = addEvent(chatId, {
+                    title: title,
+                    description: description,
+                    tier: tier,
+                    status: 'pending',
+                    isNPC: false,
+                    origin: 'detected'
+                });
+                refreshEventsUI();
+                nwstToast(`Event "${title}" added (${tier}).`, 'success');
+            }
         };
     }
 
@@ -215,24 +258,6 @@ function wireEventItemEvents() {
         };
     });
 
-    // ── Popout button ─────────────────────────────────────────
-    container.querySelectorAll('.nwst-events-popout').forEach(btn => {
-        btn.onclick = function (e) {
-            e.stopPropagation();
-            const item = this.closest('.nwst-event-item');
-            const eventId = item.getAttribute('data-event-id');
-            const descTextarea = item.querySelector('.nwst-events-desc');
-            const title = item.querySelector('.nwst-event-title')?.textContent || 'Edit event';
-            if (descTextarea) {
-                openPopout(`Event: ${title}`, descTextarea.value, (newValue) => {
-                    descTextarea.value = newValue;
-                    const chatId = getChatId();
-                    updateEvent(chatId, eventId, { description: newValue });
-                    nwstToast('Event saved from popout.', 'success');
-                });
-            }
-        };
-    });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

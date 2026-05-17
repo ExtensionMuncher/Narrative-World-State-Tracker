@@ -22,19 +22,6 @@ import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
 import { getPlannerPrompt, getScanFrequency } from '../settings.js';
 
-// ── ST API imports (used by generateRaw) ──────────────────────────────────
-// Note: generateRaw and related utilities are imported at call time to avoid
-// circular dependency issues with index.js.
-async function getSTAPI() {
-    const scriptJS = await import('../../../../../script.js');
-    const extJS = await import('../../../../extensions.js');
-    return {
-        generateRaw: scriptJS.generateRaw,
-        getContext: scriptJS.getContext,
-        extension_prompt_roles: scriptJS.extension_prompt_roles,
-        extension_prompt_types: scriptJS.extension_prompt_types
-    };
-}
 
 // ── Internal prompts (NOT user-editable) ──────────────────────────────────
 
@@ -245,7 +232,7 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast, moonPha
 // ── LLM call ──────────────────────────────────────────────────────────────
 
 async function callLLM(profile, systemPrompt, userPrompt) {
-    const { generateRaw, getContext, extension_prompt_roles } = await getSTAPI();
+    const { generateRaw } = SillyTavern.getContext();
 
     // Build a minimal message array for the LLM call
     const messages = [

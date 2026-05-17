@@ -163,7 +163,7 @@ function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents
 // ── LLM call ──────────────────────────────────────────────────────────────
 
 async function callPlanningLLM(profile, systemPrompt, userPrompt) {
-    const { generateRaw } = await import('../../../../../script.js');
+    const { generateRaw } = SillyTavern.getContext();
 
     const messages = [
         { role: 'system', content: systemPrompt },

@@ -6,18 +6,38 @@
 // Every read and write to extension data flows through this module.
 //
 // Storage architecture:
-//   - Global settings (user preferences): extension_settings.nwst
-//   - Per-chat data (narrative state): extension_settings.nwst.chatData[chatId][dataType]
+//   - Global settings (user preferences): extensionSettings.nwst (via context)
+//   - Per-chat data (narrative state): extensionSettings.nwst.chatData[chatId][dataType]
 //
-// Key pattern: extension_settings.nwst.chatData["char_5"]["worldState"]
+// Key pattern: extensionSettings.nwst.chatData["char_5"]["worldState"]
 // This ensures COMPLETE data isolation between chats. Zero crossover.
 //
 // All other NWST modules (worldState.js, events.js, notebook.js, communities.js)
-// call into this module. They never touch extension_settings directly.
+// call into this module. They never touch extensionSettings directly.
+//
+// IMPORTANT: All ST APIs accessed via SillyTavern.getContext() — NOT direct
+// imports from script.js. This is the stable API that won't break with ST updates.
 // =============================================================================
 
-import { extension_settings, saveMetadataDebounced } from '../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../script.js';
+// ── Context accessors ─────────────────────────────────────────────────────
+// These replace direct imports from script.js/extensions.js.
+// Using SillyTavern.getContext() as recommended by ST docs.
+
+/**
+ * Get the extensionSettings object from ST context.
+ * This is a live reference — mutations to it persist.
+ * @returns {object} The extensionSettings object
+ */
+function getExtSettings() {
+    return SillyTavern.getContext().extensionSettings;
+}
+
+/**
+ * Persist extension settings to ST's storage using debounced save.
+ */
+function persistSettings() {
+    SillyTavern.getContext().saveSettingsDebounced();
+}
 
 // ── Module name (must match index.js) ─────────────────────────────────────
 const MODULE_NAME = 'nwst';
@@ -105,16 +125,17 @@ const DEFAULTS = {
 // ── Internal helpers ──────────────────────────────────────────────────────
 
 /**
- * Ensure the NWST extension_settings structure exists.
+ * Ensure the NWST extensionSettings structure exists.
  * Called automatically on every storage operation — safe to call repeatedly.
  */
 function ensureNWSTStorage() {
-    if (!extension_settings[MODULE_NAME]) {
-        console.warn('[NWST Storage] extension_settings.nwst not found. Initializing...');
-        extension_settings[MODULE_NAME] = {};
+    const ext = getExtSettings();
+    if (!ext[MODULE_NAME]) {
+        console.warn('[NWST Storage] extensionSettings.nwst not found. Initializing...');
+        ext[MODULE_NAME] = {};
     }
-    if (!extension_settings[MODULE_NAME].chatData) {
-        extension_settings[MODULE_NAME].chatData = {};
+    if (!ext[MODULE_NAME].chatData) {
+        ext[MODULE_NAME].chatData = {};
     }
 }
 
@@ -126,10 +147,11 @@ function ensureNWSTStorage() {
  */
 function getChatBucket(chatId) {
     ensureNWSTStorage();
-    if (!extension_settings[MODULE_NAME].chatData[chatId]) {
-        extension_settings[MODULE_NAME].chatData[chatId] = {};
+    const ext = getExtSettings();
+    if (!ext[MODULE_NAME].chatData[chatId]) {
+        ext[MODULE_NAME].chatData[chatId] = {};
     }
-    return extension_settings[MODULE_NAME].chatData[chatId];
+    return ext[MODULE_NAME].chatData[chatId];
 }
 
 /**
@@ -140,14 +162,6 @@ function getChatBucket(chatId) {
  */
 function deepClone(obj) {
     return JSON.parse(JSON.stringify(obj));
-}
-
-/**
- * Save all extension settings to ST's persistent storage.
- * Uses debounced save to avoid excessive writes.
- */
-function persistSettings() {
-    saveSettingsDebounced();
 }
 
 // ── Public API ────────────────────────────────────────────────────────────
@@ -225,7 +239,7 @@ function deleteChatData(chatId, dataType) {
 function chatDataExists(chatId, dataType) {
     if (!chatId) return false;
     ensureNWSTStorage();
-    const chatData = extension_settings[MODULE_NAME].chatData;
+    const chatData = getExtSettings()[MODULE_NAME].chatData;
     return !!(chatData[chatId] && chatData[chatId][dataType] !== undefined);
 }
 
@@ -273,7 +287,7 @@ function setAllChatData(chatId, dataBundle) {
 function deleteAllChatData(chatId) {
     if (!chatId) return;
     ensureNWSTStorage();
-    delete extension_settings[MODULE_NAME].chatData[chatId];
+    delete getExtSettings()[MODULE_NAME].chatData[chatId];
     persistSettings();
 }
 
@@ -285,7 +299,7 @@ function deleteAllChatData(chatId) {
  */
 function listAllChats() {
     ensureNWSTStorage();
-    return Object.keys(extension_settings[MODULE_NAME].chatData);
+    return Object.keys(getExtSettings()[MODULE_NAME].chatData);
 }
 
 /**
@@ -298,7 +312,7 @@ function listAllChats() {
 function chatHasData(chatId) {
     if (!chatId) return false;
     ensureNWSTStorage();
-    const chatData = extension_settings[MODULE_NAME].chatData;
+    const chatData = getExtSettings()[MODULE_NAME].chatData;
     return !!(chatData[chatId] && Object.keys(chatData[chatId]).length > 0);
 }
 

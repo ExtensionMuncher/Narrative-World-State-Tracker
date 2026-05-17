@@ -16,7 +16,7 @@
     border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
     border-radius: 12px;
     overflow: hidden;
-    background: var(--SmartThemeBlurTintColor, #fff);
+    background: transparent;
     max-width: 700px;
     font-family: var(--SmartThemeBodyFont, system-ui, sans-serif);
     font-size: 13px;
@@ -27,7 +27,7 @@
 .nwst-tabs {
     display: flex;
     border-bottom: 0.5px solid var(--SmartThemeBorderColor, #ddd);
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    background: transparent;
     overflow-x: auto;
 }
 
@@ -86,31 +86,27 @@
     margin: 13px 0;
 }
 
-/* ── Buttons ─────────────────────────────────────────────────────────────── */
+/* ── Button overrides (base styling from ST's .menu_button) ─────────────── */
+/* These only override spacing/sizing; .menu_button provides background/border */
 .nwst-btn {
     font-size: 12px;
     padding: 5px 11px;
-    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--SmartThemeBodyColor, #111);
     cursor: pointer;
     font-family: inherit;
-}
-
-.nwst-btn:hover {
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .nwst-btn-regen {
     font-size: 12px;
     padding: 5px 11px;
-    border: 0.5px solid #AFA9EC;
-    border-radius: 8px;
-    background: transparent;
-    color: #3C3489;
+    border-color: #AFA9EC;
     cursor: pointer;
     font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .nwst-btn-regen:hover {
@@ -120,12 +116,12 @@
 .nwst-btn-danger {
     font-size: 12px;
     padding: 5px 11px;
-    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
-    border-radius: 8px;
-    background: transparent;
     color: #993C1D;
     cursor: pointer;
     font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .nwst-btn-danger:hover {
@@ -139,52 +135,50 @@
     align-items: center;
 }
 
-/* ── Icon Buttons ────────────────────────────────────────────────────────── */
+/* ── Icon Buttons (use .menu_button for background/border/color) ──────────── */
 .nwst-icon-btn {
     width: 28px;
     height: 28px;
-    border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
-    border-radius: 8px;
-    background: transparent;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 13px;
-    color: #666;
     flex-shrink: 0;
 }
 
 .nwst-icon-btn:hover {
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    background: var(--white30a);
 }
 
 .nwst-icon-btn.nwst-active {
     border-color: #7F77DD;
-    color: #3C3489;
     background: #EEEDFE;
 }
 
 /* ── Form Elements ───────────────────────────────────────────────────────── */
-.nwst-panel textarea,
-.nwst-panel select,
-.nwst-panel input[type="text"],
-.nwst-panel input[type="number"] {
+/* ALL text-input fields, contenteditable elements, textareas — transparent bg */
+.nwst-shell textarea,
+.nwst-shell select,
+.nwst-shell input[type="text"],
+.nwst-shell input[type="number"],
+.nwst-shell [contenteditable="true"],
+.nwst-shell .nwst-nb-bullet-text {
     width: 100%;
     font-size: 13px;
     padding: 6px 10px;
     border: 0.5px solid var(--SmartThemeBorderColor, #ccc);
     border-radius: 8px;
-    background: var(--SmartThemeBlurTintColor, #fff);
+    background: transparent !important;
     color: var(--SmartThemeBodyColor, #111);
     font-family: inherit;
 }
 
-.nwst-panel input[type="number"] {
+.nwst-shell input[type="number"] {
     width: auto;
 }
 
-.nwst-panel textarea {
+.nwst-shell textarea {
     resize: vertical;
     line-height: 1.5;
 }
@@ -235,13 +229,14 @@
 
 /* ── Info Box ────────────────────────────────────────────────────────────── */
 .nwst-info-box {
-    background: #EEEDFE;
+    background: transparent;
     border-radius: 8px;
     padding: 10px 12px;
     font-size: 12px;
-    color: #3C3489;
+    color: var(--SmartThemeBodyColor, #111);
     margin-bottom: 14px;
     line-height: 1.5;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
 }
 
 /* ── Setting Row (used in Settings tab) ──────────────────────────────────── */
@@ -270,7 +265,7 @@
 
 /* ── Card ────────────────────────────────────────────────────────────────── */
 .nwst-card {
-    background: var(--SmartThemeBlurTintColor, #fff);
+    background: transparent;
     border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
     border-radius: 8px;
     padding: 12px;
@@ -317,8 +312,9 @@
 
 .nwst-date-sub {
     font-size: 11px;
-    color: #999;
+    color: var(--SmartThemeBodyColor, #111);
     margin-top: 1px;
+    opacity: 0.65;
 }
 
 /* ── Time Skip / Jump ────────────────────────────────────────────────────── */
@@ -353,14 +349,14 @@
     align-items: center;
     justify-content: space-between;
     padding: 9px 12px;
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
     border-bottom: 0.5px solid var(--SmartThemeBorderColor, #eee);
 }
 
 .nwst-journal-hdr-title {
-    font-size: 12px;
-    font-weight: 500;
-    color: #444;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--SmartThemeBodyColor, #111);
 }
 
 .nwst-journal-body {
@@ -388,7 +384,7 @@
 .nwst-md h3 {
     font-size: 12px;
     font-weight: 600;
-    color: #444;
+    color: var(--SmartThemeBodyColor, #111);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin: 10px 0 5px;
@@ -406,7 +402,7 @@
 .nwst-md ul li {
     padding: 2px 0;
     font-size: 13px;
-    color: #333;
+    color: var(--SmartThemeBodyColor, #111);
 }
 
 .nwst-md ul li::before {
@@ -578,7 +574,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    padding: 4px 6px;
     margin-bottom: 6px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
+    border-radius: 6px;
+    opacity: 0.85;
 }
 
 .nwst-event-item {
@@ -718,19 +718,20 @@
     align-items: center;
     gap: 8px;
     padding: 9px 12px;
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
 }
 
 .nwst-condition-label {
     flex: 1;
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--SmartThemeBodyColor, #111);
 }
 
 .nwst-condition-body {
     padding: 10px 12px;
     font-size: 13px;
-    color: #333;
+    color: var(--SmartThemeBodyColor, #111);
     line-height: 1.6;
     display: none;
 }
@@ -758,6 +759,7 @@
     gap: 8px;
     padding: 9px 12px;
     cursor: pointer;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
 }
 
 .nwst-community-hdr:hover {
@@ -769,7 +771,7 @@
     border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
     display: none;
     font-size: 13px;
-    color: #333;
+    color: var(--SmartThemeBodyColor, #111);
     line-height: 1.6;
 }
 
@@ -804,7 +806,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 9px 12px;
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
     cursor: pointer;
     border-bottom: 0.5px solid transparent;
 }
@@ -814,13 +816,13 @@
 }
 
 .nwst-nb-section-hdr:hover {
-    background: #f0f0f0;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 30%, transparent);
 }
 
 .nwst-nb-section-title {
-    font-size: 12px;
+    font-size: 14px;
     font-weight: 600;
-    color: #444;
+    color: var(--SmartThemeBodyColor, #111);
 }
 
 .nwst-nb-section-body {
@@ -845,17 +847,18 @@
 }
 
 .nwst-nb-field-label {
-    font-size: 11px;
-    font-weight: 500;
-    color: #999;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--SmartThemeBodyColor, #111);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     padding: 7px 10px;
-    background: #fafafa;
-    border-bottom: 0.5px solid #f0f0f0;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 15%, transparent);
+    border-bottom: 0.5px solid var(--SmartThemeBorderColor, #eee);
     display: flex;
     align-items: center;
     justify-content: space-between;
+    opacity: 0.85;
 }
 
 /* Notebook bullets */
@@ -900,10 +903,6 @@
     color: var(--SmartThemeBodyColor, #111);
 }
 
-.nwst-nb-bullet-text:focus {
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
-}
-
 .nwst-nb-bullet-del {
     width: 18px;
     height: 18px;
@@ -925,18 +924,18 @@
 /* Notebook add row */
 .nwst-nb-add-row {
     padding: 6px 10px;
-    background: #fafafa;
+    background: transparent;
 }
 
 .nwst-nb-add-input {
     width: 100%;
     font-size: 12px;
     padding: 5px 8px;
-    border: 0.5px solid #ddd;
+    border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
     border-radius: 6px;
     color: var(--SmartThemeBodyColor, #111);
     font-family: inherit;
-    background: var(--SmartThemeBlurTintColor, #fff);
+    background: transparent;
 }
 
 .nwst-nb-add-input::placeholder {
@@ -965,7 +964,7 @@
     gap: 8px;
     padding: 9px 12px;
     cursor: pointer;
-    background: var(--SmartThemeBlurTintColor, #fff);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
 }
 
 .nwst-secret-hdr:hover {
@@ -1021,15 +1020,16 @@
 }
 
 .nwst-secret-field-label {
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 600;
-    color: #999;
+    color: var(--SmartThemeBodyColor, #111);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-bottom: 3px;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    opacity: 0.85;
 }
 
 /* ── Popout Expand Button & Modal ────────────────────────────────────────── */
@@ -1048,66 +1048,6 @@
 
 .nwst-expand-btn:hover {
     color: #7F77DD;
-}
-
-/* Popout overlay */
-.nwst-popout-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.45);
-    z-index: 10000;
-    align-items: center;
-    justify-content: center;
-}
-
-.nwst-popout-overlay.nwst-popout-open {
-    display: flex;
-}
-
-.nwst-popout-modal {
-    background: var(--SmartThemeBlurTintColor, #fff);
-    border-radius: 12px;
-    border: 0.5px solid #ccc;
-    width: 90%;
-    max-width: 560px;
-    max-height: 80vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-
-.nwst-popout-modal-hdr {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 14px;
-    border-bottom: 0.5px solid var(--SmartThemeBorderColor, #eee);
-    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
-}
-
-.nwst-popout-modal-title {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--SmartThemeBodyColor, #111);
-}
-
-.nwst-popout-modal-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px 14px;
-}
-
-.nwst-popout-modal-body textarea {
-    min-height: 200px;
-    width: 100%;
-}
-
-.nwst-popout-modal-footer {
-    padding: 10px 14px;
-    border-top: 0.5px solid var(--SmartThemeBorderColor, #eee);
-    display: flex;
-    gap: 8px;
 }
 
 /* ── Spinner / Loading State ─────────────────────────────────────────────── */
@@ -1172,4 +1112,53 @@
 
 .nwst-mb-14 {
     margin-bottom: 14px;
+}
+
+/* ── Extension Header Row (enable toggle + pause button) ─────────────────── */
+.nwst-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+}
+
+.nwst-header-text {
+    flex: 1;
+}
+
+.nwst-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--SmartThemeBodyColor, #111);
+}
+
+.nwst-status-label {
+    font-size: 11px;
+    color: #999;
+    margin-top: 2px;
+}
+
+.nwst-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.nwst-pause-btn {
+    font-size: 11px;
+    padding: 4px 10px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+/* Remove the old .nwst-panel rule that referenced #movingDivs */
+.nwst-extension-drawer {
+    width: 100%;
+}
+
+.nwst-extension-drawer .inline-drawer-content {
+    padding: 0;
+    overflow: visible;
 }

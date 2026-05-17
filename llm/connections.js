@@ -11,7 +11,6 @@
 // Each profile has: { id, name, api, mode, preset, ... }
 // =============================================================================
 
-import { getContext } from '../../../../../script.js';
 import { getConnectionProfile } from '../settings.js';
 import { nwstToast } from '../index.js';
 
@@ -24,7 +23,7 @@ import { nwstToast } from '../index.js';
  */
 export function areConnectionProfilesAvailable() {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         if (!ctx || !ctx.extensionSettings) return false;
         const disabledExtensions = ctx.extensionSettings.disabledExtensions || [];
         if (disabledExtensions.includes('connection-manager')) return false;
@@ -41,7 +40,7 @@ export function areConnectionProfilesAvailable() {
  */
 export function getAllProfiles() {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         return ctx.extensionSettings?.connectionManager?.profiles || [];
     } catch (e) {
         console.error('[NWST Connections] Error getting profiles:', e);
@@ -83,7 +82,7 @@ export function resolveProfile(profileKey) {
 
     // Fall back to the currently selected chat profile
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         const currentProfileId = ctx.extensionSettings?.connectionManager?.selectedProfile;
         if (currentProfileId) {
             const fallbackProfile = getProfileById(currentProfileId);
@@ -106,7 +105,7 @@ export function resolveProfile(profileKey) {
  */
 export function getCurrentChatProfileId() {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         return ctx.extensionSettings?.connectionManager?.selectedProfile || null;
     } catch (e) {
         return null;

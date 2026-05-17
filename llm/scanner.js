@@ -19,7 +19,6 @@ import { getActiveEvents, addEvent } from '../data/events.js';
 import { getNotebook, addCoreBullet, addMysteryBullet } from '../data/notebook.js';
 import { getAllCommunities, updateCommunitySummary } from '../data/communities.js';
 import { resolveProfile } from './connections.js';
-import { getContext } from '../../../../../script.js';
 
 // ── Scanner state ─────────────────────────────────────────────────────────
 
@@ -65,7 +64,8 @@ IMPORTANT RULES:
 
 /**
  * Start the background scanner. Runs on a message-count-based cadence.
- * Checks every few seconds whether enough new messages have been sent.
+ * Listens for ST's native MESSAGE_SENT and MESSAGE_RECEIVED events instead
+ * of polling — no setInterval needed.
  */
 export function startScanner() {
     if (scanTimer) {
@@ -76,23 +76,31 @@ export function startScanner() {
     console.log(`[NWST Scanner] Starting scanner (frequency: every ${getScanFrequency()} messages)...`);
     messageCountAtLastScan = getCurrentMessageCount();
 
-    // Poll every 5 seconds to check if enough messages have accumulated
-    scanTimer = setInterval(() => {
-        checkAndScan();
-    }, 5000);
+    // Listen for ST's native message events instead of polling
+    const { eventSource, event_types } = SillyTavern.getContext();
+    eventSource.on(event_types.MESSAGE_SENT, checkAndScan);
+    eventSource.on(event_types.MESSAGE_RECEIVED, checkAndScan);
+    scanTimer = 'event-driven'; // marker that scanner is running
 
-    console.log('[NWST Scanner] Scanner started.');
+    console.log('[NWST Scanner] Scanner started (event-driven).');
 }
 
 /**
  * Stop the background scanner.
  */
 export function stopScanner() {
-    if (scanTimer) {
-        clearInterval(scanTimer);
-        scanTimer = null;
-        console.log('[NWST Scanner] Scanner stopped.');
+    if (!scanTimer) return;
+
+    try {
+        const { eventSource, event_types } = SillyTavern.getContext();
+        eventSource.removeListener(event_types.MESSAGE_SENT, checkAndScan);
+        eventSource.removeListener(event_types.MESSAGE_RECEIVED, checkAndScan);
+    } catch (e) {
+        console.warn('[NWST Scanner] Error detaching event listeners:', e);
     }
+
+    scanTimer = null;
+    console.log('[NWST Scanner] Scanner stopped.');
 }
 
 /**
@@ -147,8 +155,8 @@ async function runScan() {
         // Build the scan prompt
         const userPrompt = buildScannerPrompt(recentMessages, worldState, notebook, communities, activeEvents, settingContext);
 
-        // Call Planning LLM
-        const { generateRaw } = await import('../../../../../script.js');
+        // Call Planning LLM via SillyTavern.getContext() — the stable API
+        const { generateRaw } = SillyTavern.getContext();
         const messages = [
             { role: 'system', content: SCANNER_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
@@ -186,7 +194,7 @@ async function runScan() {
 
 function getCurrentMessageCount() {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         return ctx.chat?.length || 0;
     } catch (e) {
         return 0;
@@ -195,7 +203,7 @@ function getCurrentMessageCount() {
 
 function getRecentMessages(count) {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
         // Get the most recent N messages, respecting visibility flags
         const start = Math.max(0, chat.length - count);

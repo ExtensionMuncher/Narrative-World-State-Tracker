@@ -27,9 +27,7 @@ import {
 
 import { getSettingContext, saveSettingContext } from '../data/worldState.js';
 import { getChatId, nwstToast } from '../index.js';
-import { download, parseJsonFile } from '../../../../utils.js';
-import { getContext } from '../../../../../script.js';
-import { extension_settings } from '../../../../extensions.js';
+import { download } from '../../../../utils.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
 
@@ -86,7 +84,7 @@ export function buildSettingsTab() {
             <textarea id="nwst-setting-context" rows="4" style="margin-bottom:8px"
                 placeholder="e.g. Feudal Japan, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
             <div class="nwst-btn-row">
-                <button class="nwst-btn" id="nwst-setting-saveContext">Save</button>
+                <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
             </div>
         </div>
 
@@ -157,9 +155,9 @@ export function buildSettingsTab() {
             </div>
             <textarea id="nwst-setting-plannerPrompt" rows="4" style="margin-bottom:8px"></textarea>
             <div class="nwst-btn-row">
-                <button class="nwst-btn" id="nwst-setting-importPrompt">Import</button>
-                <button class="nwst-btn" id="nwst-setting-exportPrompt">Export</button>
-                <button class="nwst-btn" id="nwst-setting-resetPrompt">Reset to default</button>
+                <button class="menu_button nwst-btn" id="nwst-setting-importPrompt">Import</button>
+                <button class="menu_button nwst-btn" id="nwst-setting-exportPrompt">Export</button>
+                <button class="menu_button nwst-btn" id="nwst-setting-resetPrompt">Reset to default</button>
             </div>
         </div>
 
@@ -169,15 +167,15 @@ export function buildSettingsTab() {
             <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
                 Scan your full chat history to generate an initial world state. Creates a current day entry, populates the event horizon, fills active world conditions, seeds the notebook, and groups any detected communities. Runs once — does not overwrite existing data.
             </div>
-            <button class="nwst-btn" id="nwst-setting-batchScan" style="border-color:#7F77DD;color:#3C3489">Run batch scan</button>
+            <button class="menu_button nwst-btn" id="nwst-setting-batchScan" style="border-color:#7F77DD;color:#3C3489">Run batch scan</button>
             <span id="nwst-batchScan-spinner" style="display:none;margin-left:8px;" class="nwst-spinner"></span>
         </div>
 
         <!-- ── Data Import / Export ────────────────────────────── -->
         <div class="nwst-lbl">Data</div>
         <div class="nwst-btn-row">
-            <button class="nwst-btn" id="nwst-setting-importAll">Import all</button>
-            <button class="nwst-btn" id="nwst-setting-exportAll">Export all</button>
+            <button class="menu_button nwst-btn" id="nwst-setting-importAll">Import all</button>
+            <button class="menu_button nwst-btn" id="nwst-setting-exportAll">Export all</button>
         </div>
 
         <!-- Hidden file input for import -->
@@ -245,7 +243,7 @@ function populateConnectionProfileDropdowns() {
     // Get connection profiles from ST's connection manager
     let profiles = [];
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         // Check if connection-manager extension is active
         if (ctx.extensionSettings?.connectionManager?.profiles) {
             profiles = ctx.extensionSettings.connectionManager.profiles;

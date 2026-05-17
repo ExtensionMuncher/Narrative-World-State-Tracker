@@ -1,0 +1,88 @@
+<!-- =============================================================================
+     Narrative World State Tracker (NWST) — Panel HTML
+     =============================================================================
+     This panel is injected into #movingDivs by registerPanel() in index.js.
+     It follows SillyTavern's inline-drawer conventions exactly.
+     ============================================================================= -->
+
+<div class="inline-drawer nwst-extension-drawer">
+
+    <!-- ── Drawer header (visible in the extensions dropdown) ── -->
+    <div class="inline-drawer-toggle inline-drawer-header" id="nwst-drawer-toggle">
+        <b>Narrative World State Tracker</b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+
+    <!-- ── Drawer body (the full NWST panel) ── -->
+    <div class="inline-drawer-content" id="nwst-drawer-content">
+
+        <!-- ── NWST tab shell ── -->
+        <div class="nwst-shell">
+
+            <!-- Enable toggle + pause button -->
+            <div class="nwst-header-row">
+                <div class="nwst-header-text">
+                    <div class="nwst-title">Narrative World State Tracker</div>
+                    <div class="nwst-status-label" id="nwst-status-label">Extension enabled · Scanning active</div>
+                </div>
+                <div class="nwst-header-controls">
+                    <button id="nwst-pause-btn" class="menu_button nwst-btn nwst-pause-btn" title="Pause/resume message scanning">
+                        <span id="nwst-pause-icon">⏸</span>
+                        <span id="nwst-pause-label">Pause</span>
+                    </button>
+                    <label class="nwst-toggle" title="Enable or disable the extension">
+                        <input type="checkbox" id="nwst-enable-toggle" checked>
+                        <span class="nwst-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Tab bar -->
+            <div class="nwst-tabs">
+                <div class="nwst-tab nwst-tab-on" data-nwst-tab="home">Home</div>
+                <div class="nwst-tab" data-nwst-tab="events">Events</div>
+                <div class="nwst-tab" data-nwst-tab="world">World State</div>
+                <div class="nwst-tab" data-nwst-tab="notebook">Notebook</div>
+                <div class="nwst-tab" data-nwst-tab="settings">Settings</div>
+            </div>
+
+            <!-- Home tab pane -->
+            <div id="nwst-pane-home" class="nwst-pane nwst-pane-on">
+                <div class="nwst-placeholder">
+                    <i class="fa-solid fa-spinner fa-spin"></i> Loading world state...
+                </div>
+            </div>
+
+            <!-- Events tab pane -->
+            <div id="nwst-pane-events" class="nwst-pane">
+                <div class="nwst-placeholder">
+                    <i class="fa-solid fa-spinner fa-spin"></i> Loading events...
+                </div>
+            </div>
+
+            <!-- World State tab pane -->
+            <div id="nwst-pane-world" class="nwst-pane">
+                <div class="nwst-placeholder">
+                    <i class="fa-solid fa-spinner fa-spin"></i> Loading world state...
+                </div>
+            </div>
+
+            <!-- Notebook tab pane -->
+            <div id="nwst-pane-notebook" class="nwst-pane">
+                <div class="nwst-placeholder">
+                    <i class="fa-solid fa-spinner fa-spin"></i> Loading notebook...
+                </div>
+            </div>
+
+            <!-- Settings tab pane -->
+            <div id="nwst-pane-settings" class="nwst-pane">
+                <div class="nwst-placeholder">
+                    <i class="fa-solid fa-spinner fa-spin"></i> Loading settings...
+                </div>
+            </div>
+
+        </div><!-- end .nwst-shell -->
+
+    </div><!-- end .inline-drawer-content -->
+
+</div><!-- end .inline-drawer -->

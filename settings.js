@@ -25,7 +25,7 @@ import {
     getSetting,
     setSetting,
     defaultSettings
-} from '../index.js';
+} from './index.js';
 
 import {
     getAllChatData,

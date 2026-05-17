@@ -11,7 +11,7 @@
 //   • Secrets: structured field entries (type, title, secret, whoKnows, whoDoesNotKnow, etc.)
 // =============================================================================
 
-import { getChatId, nwstToast, openPopout } from '../index.js';
+import { getChatId, nwstToast } from '../index.js';
 import {
     getNotebook,
     getCoreFields, addCoreBullet, updateCoreBullet, deleteCoreBullet,
@@ -89,13 +89,13 @@ export function buildNotebookTab() {
                     <strong style="color:#333">Who knows / who does not know</strong> is the most critical field.
                 </div>
                 <div id="nwst-nb-secrets-container"></div>
-                <button class="nwst-btn nwst-nb-add-secret" style="margin-top:4px">+ Add secret</button>
+                <button class="menu_button nwst-btn nwst-nb-add-secret" style="margin-top:4px">+ Add secret</button>
             </div>
         </div>
 
         <!-- Clear all -->
         <div style="margin-top:10px" class="nwst-btn-row">
-            <button class="nwst-btn-danger" id="nwst-nb-clearAll">Clear all</button>
+            <button class="menu_button nwst-btn-danger" id="nwst-nb-clearAll">Clear all</button>
         </div>
     `;
 
@@ -133,7 +133,7 @@ function refreshCoreSection() {
             for (let i = 0; i < bullets.length; i++) {
                 html += `
                 <li class="nwst-nb-bullet" data-index="${i}">
-                    <span class="nwst-nb-bullet-text" contenteditable="true">${escapeHTML(bullets[i])}</span>
+                    <span class="nwst-nb-bullet-text" contenteditable="true" id="nwst-nb-bullet-core-${field.key}-${i}">${escapeHTML(bullets[i])}</span>
                     <button class="nwst-nb-bullet-del nwst-bullet-delete">✕</button>
                 </li>`;
             }
@@ -172,7 +172,7 @@ function refreshMysterySection() {
             for (let i = 0; i < bullets.length; i++) {
                 html += `
                 <li class="nwst-nb-bullet" data-index="${i}">
-                    <span class="nwst-nb-bullet-text" contenteditable="true">${escapeHTML(bullets[i])}</span>
+                    <span class="nwst-nb-bullet-text" contenteditable="true" id="nwst-nb-bullet-mystery-${field.key}-${i}">${escapeHTML(bullets[i])}</span>
                     <button class="nwst-nb-bullet-del nwst-bullet-delete">✕</button>
                 </li>`;
             }
@@ -266,17 +266,14 @@ function wireBulletEvents(container) {
             if (existing) existing.remove();
 
             const popoutBtn = document.createElement('button');
-            popoutBtn.className = 'nwst-nb-bullet-expand nwst-expand-btn';
+            popoutBtn.className = 'nwst-nb-bullet-expand nwst-expand-btn editor_maximize';
             popoutBtn.title = 'Open in popout';
             popoutBtn.textContent = '⛶';
             popoutBtn.style.cssText = 'font-size:13px;color:#aaa;margin-top:1px;';
+            popoutBtn.setAttribute('data-for', this.id);
+            // Prevent blur from the contenteditable span when clicking the button
             popoutBtn.onmousedown = function (ev) {
                 ev.preventDefault();
-                openPopout('Edit note', span.textContent.trim(), (newValue) => {
-                    span.textContent = newValue;
-                    span.blur();
-                    span.focus();
-                });
             };
             bullet.insertBefore(popoutBtn, bullet.querySelector('.nwst-nb-bullet-del'));
         });
@@ -386,7 +383,7 @@ function refreshSecretsSection() {
                     <select class="nwst-secret-type-select" style="width:auto;font-size:11px;padding:3px 6px">
                         ${SECRET_TYPES.map(t => `<option value="${t.value}"${secret.type === t.value ? ' selected' : ''}>${t.label}</option>`).join('')}
                     </select>
-                    <button class="nwst-btn-danger nwst-secret-delete" style="font-size:11px;padding:3px 9px;margin-left:auto">Delete secret</button>
+                    <button class="menu_button nwst-btn-danger nwst-secret-delete" style="font-size:11px;padding:3px 9px;margin-left:auto">Delete secret</button>
                 </div>
             </div>
         </div>`;

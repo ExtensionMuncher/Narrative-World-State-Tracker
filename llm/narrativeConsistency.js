@@ -28,7 +28,6 @@
 import { getChatId, nwstToast } from '../index.js';
 import { getNotebook, getAllSecrets, addMysteryBullet, getMysteryField } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
-import { getContext } from '../../../../../script.js';
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -131,7 +130,7 @@ export function getSelectiveSecretInjection(chatId) {
  */
 function detectSceneCharacters() {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
         // Look at the last 8 messages as "scene context"
         const recentCount = Math.min(8, chat.length);
@@ -185,7 +184,7 @@ export async function runConsistencyCheck() {
         const userPrompt = buildConsistencyPrompt(secrets, recentMessages, sceneCharacters);
 
         // Call the Narrative Consistency LLM
-        const { generateRaw } = await import('../../../../../script.js');
+        const { generateRaw } = SillyTavern.getContext();
         const messages = [
             { role: 'system', content: CONSISTENCY_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
@@ -220,7 +219,7 @@ export async function runConsistencyCheck() {
 
 function getRecentSceneMessages() {
     try {
-        const ctx = getContext();
+        const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
         // Get last 15 messages for the consistency check
         const start = Math.max(0, chat.length - 15);

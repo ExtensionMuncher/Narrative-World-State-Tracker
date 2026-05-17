@@ -21,7 +21,6 @@ import { getNotebook } from '../data/notebook.js';
 import { getAllCommunities } from '../data/communities.js';
 import { getPlannerPrompt } from '../settings.js';
 import { resolveProfile } from './connections.js';
-import { getContext } from '../../../../../script.js';
 
 // ── Internal prompts ──────────────────────────────────────────────────────
 
@@ -90,7 +89,7 @@ export async function regenerateTierEvents(tier) {
         const userPrompt = buildEventGenPrompt(context, tier);
 
         // Call Planning LLM
-        const { generateRaw } = await import('../../../../../script.js');
+        const { generateRaw } = SillyTavern.getContext();
         const messages = [
             { role: 'system', content: EVENT_GEN_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }

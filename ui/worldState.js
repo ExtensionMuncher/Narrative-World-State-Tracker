@@ -12,7 +12,7 @@
 //   • Community summaries section with avatar entries
 // =============================================================================
 
-import { getChatId, nwstToast, openPopout } from '../index.js';
+import { getChatId, nwstToast } from '../index.js';
 import {
     getConditions,
     updateConditionContent,
@@ -62,7 +62,7 @@ export function buildWorldStateTab() {
         <div class="nwst-lbl">Community summaries</div>
         <div id="nwst-communities-container"></div>
         <div style="margin-top:6px">
-            <button class="nwst-btn" id="nwst-community-add">+ Add community</button>
+            <button class="menu_button nwst-btn" id="nwst-community-add">+ Add community</button>
         </div>
     `;
 
@@ -102,8 +102,8 @@ function refreshConditionsUI() {
                     ${def.optional ? '<span style="font-size:10px;font-weight:400;color:#aaa"> — optional</span>' : ''}
                 </div>
                 <div class="nwst-btn-row">
-                    <button class="nwst-icon-btn nwst-cond-eye${eyeActiveClass}" data-cond="${def.key}" title="Toggle tracking">👁</button>
-                    <button class="nwst-icon-btn nwst-cond-edit" data-cond="${def.key}" title="Edit">✎</button>
+                    <button class="menu_button nwst-icon-btn nwst-cond-eye${eyeActiveClass}" data-cond="${def.key}" title="Toggle tracking">👁</button>
+                    <button class="menu_button nwst-icon-btn nwst-cond-edit" data-cond="${def.key}" title="Edit">✎</button>
                 </div>
             </div>
             <!-- View mode -->
@@ -111,7 +111,7 @@ function refreshConditionsUI() {
                 ${condition.content
                     ? `<div>${escapeHTML(condition.content)}</div>
                        <div class="nwst-btn-row" style="margin-top:8px">
-                           <button class="nwst-btn nwst-cond-edit-btn" data-cond="${def.key}">Edit</button>
+                           <button class="menu_button nwst-btn nwst-cond-edit-btn" data-cond="${def.key}">Edit</button>
                        </div>`
                     : '<div class="nwst-nb-empty">No content yet. Click ✎ to add.</div>'}
             </div>
@@ -119,9 +119,9 @@ function refreshConditionsUI() {
             <div class="nwst-condition-body" id="nwst-cond-${def.key}-edit" style="display:none">
                 <textarea id="nwst-cond-${def.key}-textarea" rows="4" style="margin-bottom:8px">${escapeHTML(condition.content)}</textarea>
                 <div class="nwst-btn-row">
-                    <button class="nwst-btn nwst-cond-save" data-cond="${def.key}">Save</button>
-                    <button class="nwst-btn nwst-cond-cancel" data-cond="${def.key}">Cancel</button>
-                    <button class="nwst-expand-btn nwst-cond-popout" data-cond="${def.key}" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                    <button class="menu_button nwst-btn nwst-cond-save" data-cond="${def.key}">Save</button>
+                    <button class="menu_button nwst-btn nwst-cond-cancel" data-cond="${def.key}">Cancel</button>
+                    <button class="editor_maximize nwst-expand-btn nwst-cond-popout" data-for="nwst-cond-${def.key}-textarea" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
                 </div>
             </div>
         </div>`;
@@ -179,24 +179,6 @@ function wireConditionEvents() {
         };
     });
 
-    // ── Popout ────────────────────────────────────────────────
-    document.querySelectorAll('.nwst-cond-popout').forEach(btn => {
-        btn.onclick = function () {
-            const condKey = this.getAttribute('data-cond');
-            const textarea = document.getElementById(`nwst-cond-${condKey}-textarea`);
-            const label = CONDITION_DEFS.find(d => d.key === condKey)?.label || condKey;
-            if (textarea) {
-                openPopout(`World condition: ${label}`, textarea.value, (newValue) => {
-                    textarea.value = newValue;
-                    const chatId = getChatId();
-                    updateConditionContent(chatId, condKey, newValue);
-                    toggleConditionEdit(condKey, false);
-                    refreshConditionsUI();
-                    nwstToast(`${label} saved from popout.`, 'success');
-                });
-            }
-        };
-    });
 }
 
 function toggleConditionEdit(condKey, showEdit) {
@@ -237,16 +219,16 @@ function refreshCommunitiesUI() {
             <div class="nwst-community-body">
                 <div class="nwst-community-summary-text">${escapeHTML(com.summary || 'No summary yet.')}</div>
                 <div class="nwst-community-edit-area" style="display:none;margin-top:8px">
-                    <textarea class="nwst-community-textarea" rows="3" style="margin-bottom:8px">${escapeHTML(com.summary || '')}</textarea>
+                    <textarea class="nwst-community-textarea" rows="3" style="margin-bottom:8px" id="nwst-community-textarea-${com.id}">${escapeHTML(com.summary || '')}</textarea>
                     <div class="nwst-btn-row">
-                        <button class="nwst-btn nwst-community-save">Save</button>
-                        <button class="nwst-btn nwst-community-cancel">Cancel</button>
-                        <button class="nwst-btn-danger nwst-community-delete">Delete</button>
-                        <button class="nwst-expand-btn nwst-community-popout" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                        <button class="menu_button nwst-btn nwst-community-save">Save</button>
+                        <button class="menu_button nwst-btn nwst-community-cancel">Cancel</button>
+                        <button class="menu_button nwst-btn-danger nwst-community-delete">Delete</button>
+                        <button class="editor_maximize nwst-expand-btn nwst-community-popout" data-for="nwst-community-textarea-${com.id}" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
                     </div>
                 </div>
                 <div class="nwst-btn-row" style="margin-top:8px">
-                    <button class="nwst-btn nwst-community-edit-btn">Edit</button>
+                    <button class="menu_button nwst-btn nwst-community-edit-btn">Edit</button>
                 </div>
             </div>
         </div>`;
@@ -316,20 +298,6 @@ function wireCommunityEvents() {
         };
     });
 
-    // ── Popout ────────────────────────────────────────────────
-    document.querySelectorAll('.nwst-community-popout').forEach(btn => {
-        btn.onclick = function (e) {
-            e.stopPropagation();
-            const entry = this.closest('.nwst-community-entry');
-            const textarea = entry.querySelector('.nwst-community-textarea');
-            const name = entry.querySelector('.nwst-community-av')?.textContent || 'Community';
-            if (textarea) {
-                openPopout(`Community summary: ${name}`, textarea.value, (newValue) => {
-                    textarea.value = newValue;
-                });
-            }
-        };
-    });
 }
 
 function wireWorldStateEvents() {

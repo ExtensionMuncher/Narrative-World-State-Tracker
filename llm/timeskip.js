@@ -142,7 +142,7 @@ export async function executeTimeSkip(skipDescription) {
         );
 
         // ── 4. Call Planning LLM ───────────────────────────────
-        const { generateRaw } = await import('../../../../../script.js');
+        const { generateRaw } = SillyTavern.getContext();
         const messages = [
             { role: 'system', content: TIMESKIP_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
@@ -275,13 +275,8 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
 // ── Chat context ──────────────────────────────────────────────────────────
 
 function getVisibleChatContext() {
-    try {
-        const { getContext } = require('../../../../../script.js');
-        // The batch scan exception does NOT apply here — time skip respects visibility
-        return ''; // Placeholder — refined during integration
-    } catch (e) {
-        return '';
-    }
+    // Placeholder — refined during integration
+    return '';
 }
 
 // ── Response parsing ──────────────────────────────────────────────────────
