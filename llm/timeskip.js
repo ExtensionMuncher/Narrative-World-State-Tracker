@@ -20,13 +20,13 @@ import {
     getWorldState, saveWorldState, getCurrentDay, replaceCurrentDay,
     getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
     getConditions, updateConditionContent, getSettingContext,
-    saveSnapshot
+    saveSnapshot, getSeasonConfig
 } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, addEvent } from '../data/events.js';
 import { getNotebook, saveNotebook } from '../data/notebook.js';
 import { getPlannerPrompt } from '../settings.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
-import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle } from './dayAdvancement.js';
+import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle, computeLunarAngleFromDate, getMoonPhaseForAngle, computeSeason } from './dayAdvancement.js';
 
 // ── Internal prompt ───────────────────────────────────────────────────────
 
@@ -35,16 +35,25 @@ const TIMESKIP_SYSTEM_PROMPT = `You are a time skip assistant for a narrative ro
 You will receive:
 - The time skip description (what the user wants to skip)
 - The current world state (date, season, weather, conditions)
+- The current moon phase
 - All active events
 - The full notebook
 - Visible chat context
 
 You must update ALL of the following:
 
-1. CURRENT DAY BLOCK: New date, new season, new weather appropriate to the new time period
+1. CURRENT DAY BLOCK: New date, new season, new weather, new moon phase appropriate to the new time period
 2. ALL EVENTS: Mark past-due events as resolved or missed. Update surviving events to correct tiers. Generate new events where the skip context warrants them. Adjust NPC events based on what would plausibly have occurred.
 3. WORLD CONDITIONS: Update political, social, spiritual, and environmental conditions to reflect what the skip duration and reason imply.
 4. NOTEBOOK: Update planted details, character whereabouts, offscreen pressures as appropriate for elapsed time. Remove items that would have resolved.
+
+IMPORTANT — Moon Phase: You must determine the correct moon phase at the new date after the time skip. Consider:
+- The current moon phase (provided in the context)
+- The skip duration and description (e.g., "three weeks" = ~21 days, "a fortnight" = ~14 days, "a month" = ~29.5 days)
+- Each day advances the moon by ~12.19° through the 29.53-day cycle
+- The 8 standard phases in order: New Moon (0°) → Waxing Crescent (45°) → First Quarter (85.3°) → Waxing Gibbous (135°) → Full Moon (180°) → Waning Gibbous (225°) → Last Quarter (265.3°) → Waning Crescent (315°) → back to New Moon
+
+Include "moonPhaseName" in the currentDay output to set the exact phase for the new date.
 
 Respond with a JSON object:
 {
@@ -55,7 +64,8 @@ Respond with a JSON object:
     "weatherToday": "weather at the new time",
     "flora": "seasonal flora description",
     "fauna": "seasonal fauna description",
-    "spiritualClimate": "if applicable"
+    "spiritualClimate": "if applicable",
+    "moonPhaseName": "exact moon phase name at the new date (e.g. 'Waning Crescent', 'First Quarter', 'Full Moon')"
   },
   "eventUpdates": {
     "resolved": ["event_id_1", ...],
@@ -137,9 +147,15 @@ export async function executeTimeSkip(skipDescription) {
         // Get visible chat context for the LLM
         const chatContext = getVisibleChatContext();
 
+        // Compute the current season from the pre-skip dayCount so the LLM
+        // receives accurate seasonal context for the skip description.
+        const currentComputedSeason = (currentDay && typeof currentDay.dayCount === 'number')
+            ? computeSeason(currentDay.dayCount, getSeasonConfig(chatId))
+            : null;
+
         const userPrompt = buildTimeskipPrompt(
             skipDescription, currentDay, conditions, events,
-            notebook, settingContext, chatContext
+            notebook, settingContext, chatContext, currentComputedSeason
         );
 
         // ── 4. Call Planning LLM via connection profile ────────
@@ -162,9 +178,24 @@ export async function executeTimeSkip(skipDescription) {
         }
 
         // Apply Current Day updates
+        //   - The LLM generates a full new currentDay including season
+        //   - When the seasonal engine is active, the computed season OVERRIDES
+        //     the LLM's season — the engine is the authority on what season it is
+        //   - dayCount is PRESERVED through timeskip (no reliable estimate of
+        //     skip duration yet; user can edit via UI if needed)
         if (result.currentDay) {
             nwstToast('Current Day updated.', 'info');
-            replaceCurrentDay(chatId, result.currentDay);
+
+            const oldDayCount = preSkipSnapshot.worldState?.currentDay?.dayCount ?? 0;
+            const seasonConfig = getSeasonConfig(chatId);
+            const computedSeason = computeSeason(oldDayCount, seasonConfig);
+            const finalSeason = computedSeason !== null ? computedSeason : (result.currentDay.season || '');
+
+            replaceCurrentDay(chatId, {
+                ...result.currentDay,
+                season: finalSeason,
+                dayCount: oldDayCount
+            });
         }
 
         // Apply event updates
@@ -185,26 +216,60 @@ export async function executeTimeSkip(skipDescription) {
             nwstToast('Notebook updated.', 'info');
         }
 
-        // ── 6. Recalculate moon phases based on estimated days skipped ──
+        // ── 6. Recalculate moon phases ───────────────────────────────
+        // Priority 1: Use LLM-provided moonPhaseName (exact, no estimation)
+        // Priority 2: Use computeLunarAngleFromDate on new dateDisplay
+        // Priority 3: Fall back to estimateDaysBetweenDates advancement
         try {
-            // Get the old lunar angle (from pre-skip snapshot)
-            const oldDay = preSkipSnapshot.worldState?.currentDay || {};
-            const oldLunarAngle = oldDay.lunarAngle !== undefined ? oldDay.lunarAngle : 0;
+            let newAngle = 0;
+            let phaseSource = '';
 
-            // Estimate days skipped from old vs new date strings
-            const oldDate = oldDay.dateDisplay || '';
-            const newDate = result.currentDay?.dateDisplay || '';
-            const estimatedDays = estimateDaysBetweenDates(oldDate, newDate);
+            // Priority 1: LLM directly specified the moon phase
+            const llmPhaseName = result.currentDay?.moonPhaseName;
+            if (llmPhaseName && typeof llmPhaseName === 'string' && llmPhaseName.trim()) {
+                const phaseAngle = getPhaseAngle(llmPhaseName.trim());
+                // getPhaseAngle returns 0 for unknown phases, but valid phases
+                // always return a positive center angle (New Moon = 11.25°)
+                if (phaseAngle !== 0) {
+                    newAngle = phaseAngle;
+                    phaseSource = `LLM-specified phase "${llmPhaseName}"`;
+                } else {
+                    console.warn(`[NWST Timeskip] LLM provided unknown moonPhaseName "${llmPhaseName}" — falling back to date parsing.`);
+                }
+            }
 
-            // Advance lunar angle by the estimated skip duration
-            const newAngle = ((oldLunarAngle + estimatedDays * getDegreesPerDay()) % 360 + 360) % 360;
+            // Priority 2: Parse the new date text from LLM's dateDisplay
+            if (!phaseSource) {
+                const newDate = result.currentDay?.dateDisplay || '';
+                if (newDate) {
+                    newAngle = computeLunarAngleFromDate(newDate);
+                    if (newAngle !== 0) {
+                        phaseSource = `date-parsed from "${newDate}"`;
+                    }
+                }
+            }
+
+            // Priority 3: Fall back to estimating days between old and new dates
+            if (!phaseSource) {
+                const oldDay = preSkipSnapshot.worldState?.currentDay || {};
+                const oldLunarAngle = oldDay.lunarAngle !== undefined ? oldDay.lunarAngle : 0;
+                const oldDate = oldDay.dateDisplay || '';
+                const newDate = result.currentDay?.dateDisplay || '';
+                const estimatedDays = estimateDaysBetweenDates(oldDate, newDate);
+                newAngle = ((oldLunarAngle + estimatedDays * getDegreesPerDay()) % 360 + 360) % 360;
+                phaseSource = `estimated ${estimatedDays}d from stored angle`;
+            }
+
+            // Normalize and store
+            newAngle = ((newAngle % 360) + 360) % 360;
             setLunarAngle(chatId, newAngle);
 
             // Generate new 7-day moon phase strip from the new angle
             const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
             replaceMoonPhases(chatId, newMoonPhases);
 
-            nwstToast(`Moon phases recalculated (~${estimatedDays} day skip).`, 'info');
+            const phaseInfo = getMoonPhaseForAngle(newAngle);
+            nwstToast(`Moon phases recalculated (${phaseSource}). Anchored as "${phaseInfo.phaseName}" (${newAngle.toFixed(1)}°).`, 'info');
         } catch (moonErr) {
             console.warn('[NWST Timeskip] Moon phase recalculation failed (non-fatal):', moonErr);
         }
@@ -268,7 +333,7 @@ function estimateDaysBetweenDates(oldDate, newDate) {
 
 // ── Prompt building ───────────────────────────────────────────────────────
 
-function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook, settingContext, chatContext) {
+function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook, settingContext, chatContext, computedSeason) {
     let prompt = '';
 
     prompt += `TIME SKIP DESCRIPTION:\n"${skipDesc}"\n\n`;
@@ -277,10 +342,28 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     prompt += `Date: ${currentDay.dateDisplay || '(not set)'}\n`;
     prompt += `Sub-Date: ${currentDay.dateSub || ''}\n`;
     prompt += `Season: ${currentDay.season || '(not set)'}\n`;
+    if (computedSeason) {
+        prompt += `System-computed current season: ${computedSeason}\n`;
+    }
     prompt += `Weather: ${currentDay.weatherToday || '(not set)'}\n`;
     prompt += `Flora: ${currentDay.flora || ''}\n`;
     prompt += `Fauna: ${currentDay.fauna || ''}\n`;
-    prompt += `Spiritual Climate: ${currentDay.spiritualClimate || ''}\n\n`;
+    prompt += `Spiritual Climate: ${currentDay.spiritualClimate || ''}\n`;
+
+    // Get current moon phase info for LLM context
+    const chatId = getChatId();
+    let moonPhaseName = '(not tracked)';
+    let moonPhaseAngle = 0;
+    let moonDay = 0;
+    try {
+        moonPhaseAngle = getLunarAngle(chatId);
+        const phaseInfo = getMoonPhaseForAngle(moonPhaseAngle);
+        moonPhaseName = phaseInfo.phaseName;
+        moonDay = Math.round((moonPhaseAngle / 360) * 29.53);
+    } catch (e) {
+        // ignore
+    }
+    prompt += `Moon Phase: ${moonPhaseName} (${moonPhaseAngle.toFixed(1)}°, approximately Day ${moonDay} of the lunar cycle)\n\n`;
 
     // Conditions
     prompt += `=== WORLD CONDITIONS ===\n`;

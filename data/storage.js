@@ -57,7 +57,8 @@ const DEFAULT_WORLD_STATE = {
         flora: '',
         fauna: '',
         spiritualClimate: '',     // Only populated if Spiritual/Supernatural condition is enabled
-        lunarAngle: 0             // Absolute angle (0-360) in the lunar cycle; 0 = New Moon
+        lunarAngle: 0,            // Absolute angle (0-360) in the lunar cycle; 0 = New Moon
+        dayCount: 0               // Absolute elapsed days since epoch start; increments +1 per day advancement
     },
     forecast: [],                 // 7 forecast entries (see worldState.js for structure)
     moonPhases: [],               // 7 moon phase entries
@@ -107,6 +108,26 @@ const DEFAULT_COMMUNITIES = [];
 const DEFAULT_SETTING_CONTEXT = '';
 
 /**
+ * Default season configuration (per-chat).
+ * mode: 'auto' | 'static' | 'disabled'
+ *   - auto:     seasons cycle based on dayCount and the configured season map
+ *   - static:   always the first season in the list (for timeless settings)
+ *   - disabled: seasons are entirely LLM-controlled (legacy behavior)
+ * yearLength: total days in a full seasonal cycle (typically 365 for Earth-like)
+ * seasons: array of { name, startDay, endDay } defining the seasonal bands
+ */
+const DEFAULT_SEASON_CONFIG = {
+    mode: 'auto',
+    yearLength: 365,
+    seasons: [
+        { name: 'Spring', startDay: 0,   endDay: 91   },
+        { name: 'Summer', startDay: 92,  endDay: 185  },
+        { name: 'Autumn', startDay: 186, endDay: 275  },
+        { name: 'Winter', startDay: 276, endDay: 364  }
+    ]
+};
+
+/**
  * Default (empty) snapshots object.
  * Snapshots are keyed by message range (e.g., "1-20", "21-40").
  */
@@ -120,6 +141,7 @@ const DEFAULTS = {
     notebook: DEFAULT_NOTEBOOK,
     communities: DEFAULT_COMMUNITIES,
     settingContext: DEFAULT_SETTING_CONTEXT,
+    seasonConfig: DEFAULT_SEASON_CONFIG,
     snapshots: DEFAULT_SNAPSHOTS
 };
 
@@ -358,6 +380,7 @@ export {
     DEFAULT_NOTEBOOK,
     DEFAULT_COMMUNITIES,
     DEFAULT_SETTING_CONTEXT,
+    DEFAULT_SEASON_CONFIG,
     DEFAULT_SNAPSHOTS,
     DEFAULTS
 };

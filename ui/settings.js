@@ -25,7 +25,7 @@ import {
     exportAll, importAll
 } from '../settings.js';
 
-import { getSettingContext, saveSettingContext } from '../data/worldState.js';
+import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCurrentDay, updateCurrentDay } from '../data/worldState.js';
 import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData } from '../data/storage.js';
@@ -77,16 +77,63 @@ export function buildSettingsTab() {
             </div>
         </div>
 
-        <!-- ── Moon Cycle ──────────────────────────────────────── -->
-        <div class="nwst-lbl">Moon cycle</div>
+        <!-- ── World Climate / Atmosphere ───────────────────────── -->
+        <div class="nwst-lbl">World climate / atmosphere</div>
         <div class="nwst-card">
-            <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
-                Configure your world's lunar cycle length. The default 29.53 days matches Earth's synodic period. Fantasy worlds can use any value — shorter cycles mean faster moon phase progression, longer cycles mean slower.
+            <!-- Enable/disable moons entirely -->
+            <div class="nwst-setting-row" style="margin-bottom:10px">
+                <div>
+                    <div class="nwst-setting-label">Enable moons</div>
+                    <div class="nwst-setting-sub">Disable to hide the moon phase system entirely</div>
+                </div>
+                <label class="nwst-toggle">
+                    <input type="checkbox" id="nwst-setting-enableMoons" checked>
+                    <span class="nwst-slider"></span>
+                </label>
             </div>
-            <div style="display:flex;align-items:center;gap:8px">
+
+            <!-- Primary moon cycle length (legacy/fallback) -->
+            <div style="font-size:12px;color:#666;margin-bottom:4px">Default cycle length</div>
+            <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                The default lunar cycle length (29.53 days for Earth). Used as fallback when no moons are configured.
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
                 <input type="number" id="nwst-setting-moonCycleDays" value="29.53" min="1" max="999" step="0.01" style="width:80px;text-align:center">
                 <span style="font-size:12px;color:#666">days per cycle</span>
             </div>
+
+            <!-- Enable/disable moon phenomena -->
+            <div class="nwst-setting-row" style="margin-bottom:10px">
+                <div>
+                    <div class="nwst-setting-label">Enable moon phenomena</div>
+                    <div class="nwst-setting-sub">Eclipses, blue moons, super moons, blood moons — rare natural events that appear alongside normal phases</div>
+                </div>
+                <label class="nwst-toggle">
+                    <input type="checkbox" id="nwst-setting-enableMoonPhenomena" checked>
+                    <span class="nwst-slider"></span>
+                </label>
+            </div>
+
+            <!-- Multi-moon list -->
+            <div style="font-size:12px;color:#666;margin-bottom:4px">Configured moons</div>
+            <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                Add multiple moons or remove all for a moonless world. Each moon has its own cycle length. Any enabled moon appears in the forecast strip individually.
+            </div>
+            <div id="nwst-moons-list" style="margin-bottom:8px"></div>
+            <div class="nwst-btn-row">
+                <button class="menu_button nwst-btn" id="nwst-setting-addMoon" style="font-size:11px;padding:3px 9px">+ Add Moon</button>
+            </div>
+
+            <!-- Hidden template for moon entry -->
+            <template id="nwst-moon-entry-tpl">
+                <div class="nwst-moon-entry" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:4px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                    <input type="checkbox" class="nwst-moon-enabled" checked style="margin:0;flex-shrink:0" title="Enable this moon">
+                    <input type="text" class="nwst-moon-name" value="The Moon" placeholder="Name" style="flex:1;min-width:80px">
+                    <input type="number" class="nwst-moon-cycle" value="29.53" min="1" max="999" step="0.01" style="width:60px;text-align:center" title="Cycle length (days)">
+                    <span style="font-size:11px;color:#888;white-space:nowrap">days</span>
+                    <button class="menu_button nwst-moon-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this moon">✕</button>
+                </div>
+            </template>
         </div>
 
         <!-- ── Setting Context (per-chat) ─────────────────────── -->
@@ -100,6 +147,68 @@ export function buildSettingsTab() {
             <div class="nwst-btn-row">
                 <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
             </div>
+        </div>
+
+        <!-- ── Season Configuration (per-chat) ────────────────── -->
+        <div class="nwst-lbl">Season configuration</div>
+        <div class="nwst-card">
+            <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
+                Configure how seasons are determined for this chat. <strong>This is saved per-chat</strong> — each roleplay can have different seasonal patterns. When enabled (mode: Auto or Static), the computed season overrides whatever the LLM writes for the season field. The LLM still writes evocative seasonal prose, but the engine is the authority on which season it is.
+            </div>
+
+            <!-- Mode selector -->
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                <div style="font-size:12px;color:#666;white-space:nowrap">Mode</div>
+                <select id="nwst-setting-seasonMode" style="flex:1">
+                    <option value="auto">Auto — seasons cycle based on day count</option>
+                    <option value="static">Static — always the first season</option>
+                    <option value="disabled">Disabled — LLM controls seasons (legacy)</option>
+                </select>
+            </div>
+
+            <!-- Year length (only relevant for auto mode) -->
+            <div id="nwst-season-yearLength-row" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <div style="font-size:12px;color:#666;white-space:nowrap">Year length</div>
+                <input type="number" id="nwst-setting-seasonYearLength" value="365" min="1" max="9999" style="width:70px;text-align:center">
+                <span style="font-size:11px;color:#888">days in a full seasonal cycle</span>
+            </div>
+
+            <!-- Season bands editor -->
+            <div id="nwst-season-bands-section">
+                <div style="font-size:12px;color:#666;margin-bottom:6px">Season bands</div>
+                <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">
+                    Each band defines a season's name and its day range within the year (0-based). Bands are checked in order — the first matching band is used.
+                </div>
+                <div id="nwst-season-bands-list"></div>
+                <div class="nwst-btn-row" style="margin-top:6px">
+                    <button class="menu_button nwst-btn" id="nwst-setting-addSeasonBand" style="font-size:11px;padding:3px 9px">+ Add Season Band</button>
+                </div>
+            </div>
+
+            <!-- Editable day count (per-chat) -->
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-top:8px;border-top:1px solid rgba(128,128,128,0.2)">
+                <div style="font-size:12px;color:#666;white-space:nowrap">Current day count</div>
+                <input type="number" id="nwst-setting-dayCount" value="0" min="0" style="width:70px;text-align:center">
+                <span style="font-size:11px;color:#888">absolute elapsed days (controls season cycling)</span>
+                <button class="menu_button nwst-btn" id="nwst-setting-saveDayCount" style="font-size:11px;padding:2px 7px;margin-left:auto">Update</button>
+            </div>
+
+            <!-- Save button -->
+            <div class="nwst-btn-row" style="margin-top:4px">
+                <button class="menu_button nwst-btn" id="nwst-setting-saveSeasonConfig">Save Season Config</button>
+            </div>
+
+            <!-- Hidden template for season band entry -->
+            <template id="nwst-season-band-tpl">
+                <div class="nwst-season-band-entry" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:4px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                    <input type="text" class="nwst-season-band-name" value="Spring" placeholder="Name" style="flex:1;min-width:80px">
+                    <span style="font-size:11px;color:#888">from day</span>
+                    <input type="number" class="nwst-season-band-start" value="0" min="0" max="9999" style="width:55px;text-align:center">
+                    <span style="font-size:11px;color:#888">to day</span>
+                    <input type="number" class="nwst-season-band-end" value="91" min="0" max="9999" style="width:55px;text-align:center">
+                    <button class="menu_button nwst-season-band-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this season band">✕</button>
+                </div>
+            </template>
         </div>
 
         <!-- ── Injection Settings ──────────────────────────────── -->
@@ -202,6 +311,99 @@ export function buildSettingsTab() {
     wireSettingsEvents();
 }
 
+// ── Season Configuration UI ────────────────────────────────────────────────
+
+/**
+ * Populate the season config UI controls from the stored per-chat config.
+ */
+function populateSeasonConfigUI() {
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const config = getSeasonConfig(chatId);
+
+    const modeSelect = document.getElementById('nwst-setting-seasonMode');
+    if (modeSelect) modeSelect.value = config.mode || 'auto';
+
+    const yearLengthInput = document.getElementById('nwst-setting-seasonYearLength');
+    if (yearLengthInput) yearLengthInput.value = config.yearLength || 365;
+
+    // Show/hide year length and bands based on mode
+    const yearLengthRow = document.getElementById('nwst-season-yearLength-row');
+    const bandsSection = document.getElementById('nwst-season-bands-section');
+    const isAuto = config.mode === 'auto';
+    if (yearLengthRow) yearLengthRow.style.display = isAuto ? 'flex' : 'none';
+    if (bandsSection) bandsSection.style.display = isAuto ? 'block' : 'none';
+
+    // Populate dayCount from currentDay
+    const dayCountInput = document.getElementById('nwst-setting-dayCount');
+    if (dayCountInput) {
+        const currentDay = getCurrentDay(chatId);
+        dayCountInput.value = (currentDay && typeof currentDay.dayCount === 'number') ? currentDay.dayCount : 0;
+    }
+
+    renderSeasonBandsList();
+}
+
+/**
+ * Render the season bands editor list from stored config.
+ */
+function renderSeasonBandsList() {
+    const container = document.getElementById('nwst-season-bands-list');
+    if (!container) return;
+
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const config = getSeasonConfig(chatId);
+    const seasons = config.seasons || [];
+    const template = document.getElementById('nwst-season-band-tpl');
+    if (!template) return;
+
+    container.innerHTML = '';
+
+    for (let i = 0; i < seasons.length; i++) {
+        const s = seasons[i];
+        const clone = template.content.cloneNode(true);
+
+        const nameInput = clone.querySelector('.nwst-season-band-name');
+        const startInput = clone.querySelector('.nwst-season-band-start');
+        const endInput = clone.querySelector('.nwst-season-band-end');
+        const removeBtn = clone.querySelector('.nwst-season-band-remove');
+
+        nameInput.value = s.name || 'Season';
+        startInput.value = s.startDay !== undefined ? s.startDay : 0;
+        endInput.value = s.endDay !== undefined ? s.endDay : 0;
+
+        // Wire inline changes to storage
+        const updateBand = () => {
+            const cfg = getSeasonConfig(chatId);
+            if (cfg.seasons[i]) {
+                cfg.seasons[i].name = nameInput.value.trim() || 'Season';
+                cfg.seasons[i].startDay = parseInt(startInput.value, 10) || 0;
+                cfg.seasons[i].endDay = parseInt(endInput.value, 10) || 0;
+                // We don't auto-save — user clicks "Save Season Config"
+            }
+        };
+        nameInput.addEventListener('change', updateBand);
+        startInput.addEventListener('change', updateBand);
+        endInput.addEventListener('change', updateBand);
+
+        removeBtn.addEventListener('click', () => {
+            const cfg = getSeasonConfig(chatId);
+            if (cfg.seasons.length <= 1) {
+                nwstToast('Cannot remove the last season band.', 'warning');
+                return;
+            }
+            cfg.seasons.splice(i, 1);
+            saveSeasonConfig(chatId, cfg);
+            renderSeasonBandsList();
+        });
+
+        container.appendChild(clone);
+    }
+}
+
 // ── Populate UI with current settings values ──────────────────────────────
 
 function populateSettingsUI() {
@@ -215,6 +417,9 @@ function populateSettingsUI() {
     // Moon cycle
     const moonCycleInput = document.getElementById('nwst-setting-moonCycleDays');
     if (moonCycleInput) moonCycleInput.value = getSetting('moonCycleDays') || 29.53;
+    setCheckbox('nwst-setting-enableMoons', getSetting('enableMoons') !== false);
+    setCheckbox('nwst-setting-enableMoonPhenomena', getSetting('enableMoonPhenomena') !== false);
+    renderMoonsList();
 
     // Setting context (per-chat — load from storage)
     const chatId = getChatId();
@@ -244,6 +449,64 @@ function populateSettingsUI() {
     // Planner prompt
     const promptTextarea = document.getElementById('nwst-setting-plannerPrompt');
     if (promptTextarea) promptTextarea.value = getPlannerPrompt();
+
+    // Season configuration (per-chat)
+    populateSeasonConfigUI();
+}
+
+/**
+ * Render the multi-moon list from settings and wire up add/remove events.
+ */
+function renderMoonsList() {
+    const container = document.getElementById('nwst-moons-list');
+    if (!container) return;
+
+    const moons = getSetting('moons') || [];
+    const template = document.getElementById('nwst-moon-entry-tpl');
+    if (!template) return;
+
+    container.innerHTML = '';
+
+    for (let i = 0; i < moons.length; i++) {
+        const moon = moons[i];
+        const clone = template.content.cloneNode(true);
+
+        const cb = clone.querySelector('.nwst-moon-enabled');
+        const nameInput = clone.querySelector('.nwst-moon-name');
+        const cycleInput = clone.querySelector('.nwst-moon-cycle');
+        const removeBtn = clone.querySelector('.nwst-moon-remove');
+
+        cb.checked = moon.enabled !== false;
+        nameInput.value = moon.name || 'The Moon';
+        cycleInput.value = moon.cycleDays || 29.53;
+
+        // Wire events
+        const updateMoon = () => {
+            const m = getSetting('moons') || [];
+            if (m[i]) {
+                m[i].enabled = cb.checked;
+                m[i].name = nameInput.value.trim() || 'The Moon';
+                m[i].cycleDays = parseFloat(cycleInput.value) || 29.53;
+                setSetting('moons', m);
+            }
+        };
+        cb.addEventListener('change', updateMoon);
+        nameInput.addEventListener('change', updateMoon);
+        cycleInput.addEventListener('change', updateMoon);
+
+        removeBtn.addEventListener('click', () => {
+            const m = getSetting('moons') || [];
+            if (m.length <= 1) {
+                nwstToast('Cannot remove the last moon. Set its cycle length to 0 or disable moons entirely.', 'warning');
+                return;
+            }
+            m.splice(i, 1);
+            setSetting('moons', m);
+            renderMoonsList();
+        });
+
+        container.appendChild(clone);
+    }
 }
 
 // ── Connection profile dropdowns ──────────────────────────────────────────
@@ -314,6 +577,20 @@ function wireSettingsEvents() {
         const num = parseFloat(val);
         if (num >= 1 && num <= 999) setSetting('moonCycleDays', num);
     });
+    wireCheckbox('nwst-setting-enableMoons', (checked) => setSetting('enableMoons', checked));
+    wireCheckbox('nwst-setting-enableMoonPhenomena', (checked) => setSetting('enableMoonPhenomena', checked));
+
+    // ── Add Moon button ────────────────────────────────────────
+    const addMoonBtn = document.getElementById('nwst-setting-addMoon');
+    if (addMoonBtn) {
+        addMoonBtn.addEventListener('click', () => {
+            const moons = getSetting('moons') || [];
+            const newId = 'moon_' + Date.now();
+            moons.push({ id: newId, name: 'New Moon', cycleDays: 29.53, enabled: true });
+            setSetting('moons', moons);
+            renderMoonsList();
+        });
+    }
 
     // ── Setting context (per-chat) ───────────────────────────────
     const saveContextBtn = document.getElementById('nwst-setting-saveContext');
@@ -345,6 +622,96 @@ function wireSettingsEvents() {
         if (num >= 0 && num <= 99) setInjectionSetting('depth', num);
     });
     wireSelect('nwst-setting-depthRole', (val) => setInjectionSetting('depthRole', val));
+
+    // ── Season Configuration ─────────────────────────────────────
+    // Mode selector — show/hide year length and bands based on mode
+    const seasonModeSelect = document.getElementById('nwst-setting-seasonMode');
+    if (seasonModeSelect) {
+        seasonModeSelect.addEventListener('change', () => {
+            const yearLengthRow = document.getElementById('nwst-season-yearLength-row');
+            const bandsSection = document.getElementById('nwst-season-bands-section');
+            const isAuto = seasonModeSelect.value === 'auto';
+            if (yearLengthRow) yearLengthRow.style.display = isAuto ? 'flex' : 'none';
+            if (bandsSection) bandsSection.style.display = isAuto ? 'block' : 'none';
+            // Don't save until "Save" is clicked
+        });
+    }
+
+    // Add season band button
+    const addBandBtn = document.getElementById('nwst-setting-addSeasonBand');
+    if (addBandBtn) {
+        addBandBtn.addEventListener('click', () => {
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const config = getSeasonConfig(chatId);
+            // Find a reasonable default start day (after the last band's end + 1)
+            let defaultStart = 0;
+            let defaultEnd = 30;
+            if (config.seasons.length > 0) {
+                const last = config.seasons[config.seasons.length - 1];
+                defaultStart = (last.endDay || 0) + 1;
+                defaultEnd = defaultStart + 30;
+            }
+            config.seasons.push({ name: 'New Season', startDay: defaultStart, endDay: defaultEnd });
+            saveSeasonConfig(chatId, config);
+            renderSeasonBandsList();
+        });
+    }
+
+    // Save season config button
+    const saveSeasonBtn = document.getElementById('nwst-setting-saveSeasonConfig');
+    if (saveSeasonBtn) {
+        saveSeasonBtn.addEventListener('click', () => {
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+
+            const modeSelect = document.getElementById('nwst-setting-seasonMode');
+            const yearLengthInput = document.getElementById('nwst-setting-seasonYearLength');
+
+            // Read current band values from the DOM
+            const bandEntries = document.querySelectorAll('#nwst-season-bands-list .nwst-season-band-entry');
+            const seasons = [];
+            bandEntries.forEach(entry => {
+                const nameInput = entry.querySelector('.nwst-season-band-name');
+                const startInput = entry.querySelector('.nwst-season-band-start');
+                const endInput = entry.querySelector('.nwst-season-band-end');
+                if (nameInput) {
+                    seasons.push({
+                        name: nameInput.value.trim() || 'Season',
+                        startDay: parseInt(startInput?.value, 10) || 0,
+                        endDay: parseInt(endInput?.value, 10) || 0
+                    });
+                }
+            });
+
+            const config = {
+                mode: modeSelect ? modeSelect.value : 'auto',
+                yearLength: parseInt(yearLengthInput?.value, 10) || 365,
+                seasons: seasons.length > 0 ? seasons : [{ name: 'Spring', startDay: 0, endDay: 91 }]
+            };
+
+            saveSeasonConfig(chatId, config);
+            nwstToast('Season configuration saved.', 'success');
+        });
+    }
+
+    // ── Day Count (update instantly on button click) ──────────────
+    const saveDayCountBtn = document.getElementById('nwst-setting-saveDayCount');
+    if (saveDayCountBtn) {
+        saveDayCountBtn.addEventListener('click', () => {
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const dayCountInput = document.getElementById('nwst-setting-dayCount');
+            if (!dayCountInput) return;
+            const newCount = parseInt(dayCountInput.value, 10);
+            if (isNaN(newCount) || newCount < 0) {
+                nwstToast('Day count must be a non-negative integer.', 'warning');
+                return;
+            }
+            updateCurrentDay(chatId, { dayCount: newCount });
+            nwstToast('Day count updated to ' + newCount + '.', 'success');
+        });
+    }
 
     // ── Planner prompt ───────────────────────────────────────────
     wireTextarea('nwst-setting-plannerPrompt', (val) => setPlannerPrompt(val));

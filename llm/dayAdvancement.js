@@ -16,7 +16,8 @@
 import { getChatId, nwstToast, getSetting } from '../index.js';
 import { getSettingContext, getCurrentDay, replaceCurrentDay, updateCurrentDay,
          getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
-         saveSnapshot, getLatestSnapshot, getWorldState } from '../data/worldState.js';
+         saveSnapshot, getLatestSnapshot, getWorldState,
+         getSeasonConfig } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
@@ -92,7 +93,7 @@ export function getPhaseAngle(phaseName) {
  * @param {number} angle - Angle in degrees (0-360)
  * @returns {{ phaseName: string, icon: string }}
  */
-function getMoonPhaseForAngle(angle) {
+export function getMoonPhaseForAngle(angle) {
     const normalized = ((angle % 360) + 360) % 360;
     const phase = MOON_PHASES.find(p => normalized >= p.minAngle && normalized < p.maxAngle);
     if (phase) return { phaseName: phase.name, icon: phase.icon };
@@ -127,6 +128,378 @@ export function generateMoonPhases(anchorAngle, numDays = 7, startOffset = 0) {
     }
 
     return phases;
+}
+
+/**
+ * Compute a lunar angle from a narrative date string by scanning for
+ * explicit phase names, partial phase clues, or numeric day-of-month values.
+ *
+ * This is the key fix for "Regen always starts from New Moon" — instead of
+ * defaulting to 0 (New Moon), we try to extract a meaningful position from
+ * whatever date text the user or LLM has set.
+ *
+ * Detection order (first match wins):
+ *   1. Explicit phase name (e.g. "Full Moon", "Waning Gibbous")
+ *   2. Partial phase clues (e.g. "Waxing" → mid-waxing, "Crescent" → ~45°)
+ *   3. "Day {N}" or "Date {N}" patterns — treated as day-of-cycle
+ *   4. Numeric dates parsed as month/day/year → uses day-of-month component
+ *   5. Any first integer found → mapped through the cycle length
+ *   6. Fallback: 0° (New Moon) if nothing can be parsed
+ *
+ * @param {string} dateDisplay - The narrative date string (e.g. "Chrysanthemum Month · Seventh Day of the Waxing Moon")
+ * @returns {number} Angle in degrees (0-360), 0 = New Moon
+ */
+export function computeLunarAngleFromDate(dateDisplay) {
+    if (!dateDisplay) return 0;
+
+    const text = dateDisplay.toLowerCase().trim();
+    const cycleDays = getSetting('moonCycleDays') || 29.53058867;
+
+    // ── 1. Explicit phase name (highest priority) ────────────────
+    // Build patterns from the MOON_PHASES array for future-proofing
+    for (const phase of MOON_PHASES) {
+        const phrase = phase.name.toLowerCase();
+        if (text.includes(phrase)) {
+            return (phase.minAngle + phase.maxAngle) / 2;
+        }
+    }
+
+    // ── 2. Partial phase clues ───────────────────────────────────
+    const partials = [
+        { regex: /\bwaxing\b/,     angle: 45 },   // Mid-waxing crescent
+        { regex: /\bwaning\b/,     angle: 225 },  // Mid-waning gibbous
+        { regex: /\bcrescent\b/,   angle: 45 },   // Waxing crescent
+        { regex: /\bgibbous\b/,    angle: 135 },  // Waxing gibbous
+        { regex: /\bquarter\b/,    angle: 90 },   // First quarter
+        { regex: /\bhalf\s*moon\b/, angle: 90 },  // Half moon = quarter
+    ];
+    for (const { regex, angle } of partials) {
+        if (regex.test(text)) return angle;
+    }
+
+    // ── 3. "Day {N}" or "Date {N}" pattern ──────────────────────
+    // e.g. "Day 7 of the Waxing Moon" → day 7 of cycle → ~85°
+    const dayMatch = text.match(/(?:^|\s)(?:day|date)\s*(\d+)/);
+    if (dayMatch) {
+        const dayNum = parseInt(dayMatch[1], 10);
+        if (dayNum >= 1 && dayNum <= 999) {
+            return ((dayNum / cycleDays) * 360) % 360;
+        }
+    }
+
+    // ── 4. Ordinal date patterns ("Seventh Day", "15th") ────────
+    // Common in fantasy date formats
+    const ordinals = {
+        'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5,
+        'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10,
+        'eleventh': 11, 'twelfth': 12, 'thirteenth': 13, 'fourteenth': 14,
+        'fifteenth': 15, 'sixteenth': 16, 'seventeenth': 17, 'eighteenth': 18,
+        'nineteenth': 19, 'twentieth': 20, 'twenty-first': 21, 'twenty-second': 22,
+        'twenty-third': 23, 'twenty-fourth': 24, 'twenty-fifth': 25,
+        'twenty-sixth': 26, 'twenty-seventh': 27, 'twenty-eighth': 28,
+        'twenty-ninth': 29, 'thirtieth': 30, 'thirty-first': 31,
+    };
+    for (const [word, num] of Object.entries(ordinals)) {
+        if (text.includes(word) && text.includes('day')) {
+            return ((num / cycleDays) * 360) % 360;
+        }
+    }
+
+    // ── 5. Structured numeric dates (month/day/year, day/month/year) ──
+    // Try to extract a day-of-month component and map through the cycle
+    const datePatterns = [
+        // 11/7/1125 or 11-7-1125 — month/day/year or day/month/year
+        /(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})\s*[\/\-\.]\s*(\d{2,4})/,
+        // "Month 3, Day 14" format
+        /(?:month|moon)\s*(\d+)[,\s]+(?:day|date)\s*(\d+)/i,
+    ];
+
+    for (const pattern of datePatterns) {
+        const m = text.match(pattern);
+        if (m) {
+            // For month/day/year, day is group 2; for "Month X, Day Y" it's group 2
+            const dayOfMonth = parseInt(m[2], 10);
+            if (dayOfMonth >= 1 && dayOfMonth <= 31) {
+                return ((dayOfMonth / cycleDays) * 360) % 360;
+            }
+        }
+    }
+
+    // ── 6. Any first integer found in the text ───────────────────
+    // Broad fallback — treats the first number as a cycle position
+    const anyNum = text.match(/\d+/);
+    if (anyNum) {
+        const num = parseInt(anyNum[0], 10);
+        if (num >= 1 && num <= 999) {
+            return ((num / cycleDays) * 360) % 360;
+        }
+    }
+
+    // ── 7. Fallback: New Moon ───────────────────────────────────
+    // If nothing matched, return 0 (New Moon position)
+    return 0;
+}
+
+// ── Seasonal Engine ───────────────────────────────────────────────────────
+
+/**
+ * Compute the current season name from an elapsed day count and season config.
+ *
+ * Modes:
+ *   'auto'     — cycles through the configured season map based on dayCount % yearLength
+ *   'static'   — always returns the first season name (for timeless settings)
+ *   'disabled' — returns null (seasons are entirely LLM-controlled, legacy behavior)
+ *
+ * @param {number} dayCount - Absolute elapsed days since epoch start
+ * @param {object} seasonConfig - Per-chat season configuration { mode, yearLength, seasons[] }
+ * @returns {string|null} The computed season name, or null if disabled
+ */
+export function computeSeason(dayCount, seasonConfig) {
+    if (!seasonConfig || seasonConfig.mode === 'disabled') return null;
+    if (seasonConfig.mode === 'static') {
+        return seasonConfig.seasons?.[0]?.name || null;
+    }
+    // auto mode: compute day-of-year and find matching season band
+    const yearLength = seasonConfig.yearLength || 365;
+    const dayOfYear = ((dayCount % yearLength) + yearLength) % yearLength;
+    const seasons = seasonConfig.seasons || [];
+    for (const s of seasons) {
+        if (dayOfYear >= s.startDay && dayOfYear <= s.endDay) return s.name;
+    }
+    return seasons[0]?.name || null;
+}
+
+/**
+ * Convenience: get the computed season for a chat by reading dayCount + seasonConfig.
+ * @param {string} chatId
+ * @returns {string|null} The computed season name, or null if disabled
+ */
+export function getComputedSeason(chatId) {
+    const day = getCurrentDay(chatId);
+    const dayCount = (day && typeof day.dayCount === 'number') ? day.dayCount : 0;
+    const seasonConfig = getSeasonConfig(chatId);
+    return computeSeason(dayCount, seasonConfig);
+}
+
+/**
+ * Get configured moons from settings (array of moon definitions).
+ * Falls back to a single default moon if no configuration exists.
+ * @returns {Array<{id: string, name: string, cycleDays: number, enabled: boolean}>}
+ */
+export function getConfiguredMoons() {
+    const enableMoons = getSetting('enableMoons');
+    if (enableMoons === false) return []; // Moons disabled entirely
+
+    const moons = getSetting('moons');
+    if (moons && moons.length > 0) {
+        return moons.filter(m => m.enabled !== false);
+    }
+
+    // Fallback: return default single moon using the legacy cycle length
+    return [{
+        id: 'primary',
+        name: 'The Moon',
+        cycleDays: getSetting('moonCycleDays') || 29.53058867,
+        enabled: true
+    }];
+}
+
+/**
+ * Detect naturally occurring moon phenomena for a given lunar angle and day.
+ *
+ * Phenomena are rare, special events that appear as tags alongside normal phases:
+ *   - 🌟 Solar Eclipse: Occurs near New Moon (~0°), very rare (~1% chance per cycle)
+ *   - 🌟 Lunar Eclipse: Occurs near Full Moon (~180°), very rare (~1% chance per cycle)
+ *   - 🌟 Blue Moon: Second Full Moon occurrence flagged manually (detected at generation time)
+ *   - 🌟 Super Moon: Full Moon within 5° of perigee-simulated position (~1 in 6 chance)
+ *   - 🌟 Blood Moon: Full Moon during eclipse season (~1 in 10 chance for Full Moons)
+ *
+ * @param {number} angle - Lunar angle in degrees
+ * @param {number} dayIndex - Position in the generated phase array (0 = today)
+ * @param {number} cycleDays - Cycle length for this moon
+ * @returns {string[]} Array of phenomenon tags (empty if none apply)
+ */
+/**
+ * Detect moon phenomena (eclipses, super/blood moons, etc.) for a given angle.
+ * Phenomena are determined using deterministic seeding — stable across refreshes.
+ *
+ * @param {number} angle - Lunar angle in degrees (0-360)
+ * @param {number} dayIndex - Relative day index (0 = today, for seeding)
+ * @param {number} cycleDays - Length of the lunar cycle in days
+ * @param {object} [options] - Optional context for weather/season-dependent phenomena
+ * @param {string} [options.season] - Current season name (e.g. "Autumn", "Spring")
+ * @param {string} [options.weatherToday] - Current weather description text
+ * @returns {string[]} Array of detected phenomenon labels (may be empty)
+ */
+export function getMoonPhenomena(angle, dayIndex, cycleDays, options = {}) {
+    const enabled = getSetting('enableMoonPhenomena');
+    if (!enabled) return [];
+
+    const normalized = ((angle % 360) + 360) % 360;
+    const phenomena = [];
+    const isFullMoon = normalized >= 157.5 && normalized <= 202.5;
+    const isNewMoon = normalized < 22.5 || normalized >= 337.5;
+
+    // ── Full Moon phenomena (mutually exclusive primary category) ──────
+    if (isFullMoon) {
+        // Deterministic seed for primary Full Moon categorization
+        const seed = (Math.abs(angle * 7 + dayIndex * 13) % 100) / 100;
+
+        if (seed < 0.17) {
+            phenomena.push('🌕 Super Moon');       // 17% — perigee full moon
+        } else if (seed < 0.27) {
+            phenomena.push('🌕 Blood Moon');        // 10% — eclipsed/ruddy full moon
+        } else {
+            // Micro Moon: Full Moon at apogee (appears smaller)
+            // Uses a separate prime combination to avoid shifting existing probabilities
+            const microSeed = (Math.abs(angle * 31 + dayIndex * 37) % 100) / 100;
+            if (microSeed < 0.17) {
+                phenomena.push('🌕 Micro Moon');     // ~12% overall (17% of the 73% remainder)
+            }
+        }
+
+        // ── Seasonal Full Moon naming ─────────────────────────────
+        // Harvest Moon = Full Moon in autumn; Hunter Moon = subsequent one
+        // Since we generate 7-day strips without tracking equinoxes, we use
+        // a heuristic: if season suggests autumn, assign Harvest or Hunter.
+        const season = (options.season || '').toLowerCase();
+        if (season.includes('autumn') || season.includes('fall')) {
+            const seasonSeed = (Math.abs(angle * 41 + dayIndex * 43) % 100) / 100;
+            if (seasonSeed < 0.5) {
+                phenomena.push('🌾 Harvest Moon');
+            } else {
+                phenomena.push('🏹 Hunter Moon');
+            }
+        }
+    }
+
+    // ── Eclipses (can stack with other phenomena) ─────────────────
+    // Solar Eclipse: rare event near New Moon
+    if (isNewMoon) {
+        const seed = (Math.abs(angle * 11 + dayIndex * 17) % 100) / 100;
+        if (seed < 0.04) phenomena.push('☀️ Solar Eclipse');
+    }
+
+    // Lunar Eclipse: rare event near Full Moon
+    if (isFullMoon) {
+        const seed = (Math.abs(angle * 19 + dayIndex * 23) % 100) / 100;
+        if (seed < 0.04) phenomena.push('🌑 Lunar Eclipse');
+    }
+
+    // ── Weather-dependent phenomena ───────────────────────────────
+    // These require a bright moon AND specific atmospheric conditions.
+    // The moon is "bright enough" from Waxing Gibbous through Waning Gibbous
+    // (~112.5° to ~247.5°), covering ~37% of the cycle.
+    const isBrightMoon = normalized >= 112.5 && normalized <= 247.5;
+
+    if (isBrightMoon && options.weatherToday) {
+        const weather = options.weatherToday.toLowerCase();
+
+        // Moonbow (Lunar Rainbow): requires rain/mist + bright moon
+        // Rain droplets refract moonlight, creating a faint night rainbow.
+        // Rare and magical — requires both moon phase and weather alignment.
+        const moonbowKeywords = ['rain', 'shower', 'drizzle', 'mist', 'fog', 'storm', 'thunder', 'humid', 'wet'];
+        const hasMoonbowWeather = moonbowKeywords.some(kw => weather.includes(kw));
+        if (hasMoonbowWeather) {
+            const moonbowSeed = (Math.abs(angle * 53 + dayIndex * 59) % 100) / 100;
+            if (moonbowSeed < 0.20) {
+                phenomena.push('🌌 Moonbow');
+            }
+        }
+
+        // Lunar Ring (22° Halo): requires high thin cirrus clouds + bright moon
+        // Ice crystals in the upper atmosphere refract moonlight into a ring.
+        // Visible on clear/cold nights with high cloud cover.
+        const ringKeywords = ['clear', 'cloud', 'cirrus', 'cold', 'crisp', 'frost', 'ice', 'high', 'fair', 'partly'];
+        const hasRingWeather = ringKeywords.some(kw => weather.includes(kw));
+        if (hasRingWeather) {
+            const ringSeed = (Math.abs(angle * 61 + dayIndex * 67) % 100) / 100;
+            if (ringSeed < 0.20) {
+                phenomena.push('🌙 Lunar Ring');
+            }
+        }
+    }
+
+    return phenomena;
+}
+
+/**
+ * Manually set the moon phase anchor to a specific phase name.
+ * This lets the user pin the moon to e.g. "Full Moon" regardless of date.
+ * The lunarAngle is set to the center angle of the chosen phase,
+ * then moon phases are regenerated from that anchor.
+ *
+ * @param {string} chatId
+ * @param {string} phaseName - One of the 8 standard phases
+ * @returns {boolean} True on success
+ */
+export function setMoonPhaseAnchor(chatId, phaseName) {
+    if (!chatId || !phaseName) return false;
+
+    const angle = getPhaseAngle(phaseName);
+    setLunarAngle(chatId, angle);
+
+    const newMoonPhases = generateMoonPhases(angle, 7, 0);
+    replaceMoonPhases(chatId, newMoonPhases);
+
+    return true;
+}
+
+/**
+ * Regenerate moon phases from the current date display text.
+ * This computes the lunar angle by parsing the date string semantically,
+ * then generates a fresh 7-day phase sequence from that position.
+ *
+ * This is the "Regen from current date" fix — instead of defaulting
+ * to New Moon (angle=0), it reads the date display and computes a
+ * meaningful starting position.
+ *
+ * @param {string} chatId
+ * @returns {boolean} True on success
+ */
+/**
+ * Regenerate moon phases from a date text input.
+ * If dateText is provided, parses that text. Otherwise falls back to currentDay.dateDisplay.
+ * This lets the user type any date/phase text in the regen popup instead of relying
+ * on the existing date display (which may contain ambiguous era names).
+ *
+ * @param {string} chatId
+ * @param {string} [dateText] - Optional custom date text. If omitted, reads from currentDay.dateDisplay.
+ * @returns {boolean} True on success
+ */
+export function regenerateMoonPhasesFromDate(chatId, dateText) {
+    if (!chatId) return false;
+
+    // Use provided text, or fall back to the stored date display
+    const text = dateText || getCurrentDay(chatId)?.dateDisplay || '';
+
+    if (!text) {
+        nwstToast('No date text provided. Using stored angle.', 'warning');
+        regenerateMoonPhasesOnly();
+        return false;
+    }
+
+    // Compute angle from date text
+    const angle = computeLunarAngleFromDate(text);
+    setLunarAngle(chatId, angle);
+
+    // Generate new phases from this position
+    const newMoonPhases = generateMoonPhases(angle, 7, 0);
+    replaceMoonPhases(chatId, newMoonPhases);
+
+    const phaseName = getMoonPhaseForAngle(angle).phaseName;
+    nwstToast(`Moon phases regenerated from "${text}". Anchored as "${phaseName}" (${angle.toFixed(1)}°).`, 'success');
+
+    return true;
+}
+
+/**
+ * Get the available moon phase names (from the MOON_PHASES array).
+ * Useful for building phase picker dropdowns in the UI.
+ * @returns {string[]}
+ */
+export function getMoonPhaseNames() {
+    return MOON_PHASES.map(p => p.name);
 }
 
 
@@ -252,18 +625,32 @@ export async function regenerateForecast(mode = 'all') {
 
         // ── Moon phases are ALWAYS calculated programmatically ──────────
         if (mode === 'moonPhases' || mode === 'all') {
-            // Read the stored lunar angle (absolute position in the cycle)
-            let anchorAngle = getLunarAngle(chatId);
+            let anchorAngle;
 
-            // Migration: if lunarAngle is 0 but existing moon phases have a named phase,
-            // compute the angle from the existing Day 0 phase name
+            // PRIORITY 1: Compute angle from the date display text (semantic parsing)
+            // This is the "Regen from date" fix — reads "Seventh Day of the Waxing Moon"
+            // or "11/7/1125" and computes a meaningful angle instead of defaulting to 0 (New Moon).
+            if (currentDay?.dateDisplay) {
+                anchorAngle = computeLunarAngleFromDate(currentDay.dateDisplay);
+            }
+
+            // PRIORITY 2: If date parsing returned 0 (no phase clues found),
+            // fall back to the stored lunar angle
+            if (anchorAngle === 0 || anchorAngle === undefined) {
+                anchorAngle = getLunarAngle(chatId);
+            }
+
+            // PRIORITY 3: If stored angle is 0, try migrating from existing phase names
             if (anchorAngle === 0 && currentMoonPhases && currentMoonPhases.length > 0) {
                 const computedAngle = getPhaseAngle(currentMoonPhases[0].phaseName);
                 if (computedAngle !== 0) {
                     anchorAngle = computedAngle;
-                    setLunarAngle(chatId, anchorAngle);
                 }
             }
+
+            // Normalize and store the computed angle
+            anchorAngle = ((anchorAngle % 360) + 360) % 360;
+            setLunarAngle(chatId, anchorAngle);
 
             const newMoonPhases = generateMoonPhases(anchorAngle, 7, 0);
             replaceMoonPhases(chatId, newMoonPhases);
@@ -279,7 +666,9 @@ export async function regenerateForecast(mode = 'all') {
             const systemPrompt = (mode === 'forecast')
                 ? FORECAST_ONLY_SYSTEM_PROMPT
                 : FORECAST_REGEN_SYSTEM_PROMPT;
-            const userPrompt = buildForecastOnlyPrompt(currentDay, settingContext, currentForecast);
+            // Pass computed season so the LLM knows what season the system has determined
+            const computedSeason = getComputedSeason(chatId);
+            const userPrompt = buildForecastOnlyPrompt(currentDay, settingContext, currentForecast, computedSeason);
 
             const response = await callLLM(profile, systemPrompt, userPrompt);
             if (!response) {
@@ -355,14 +744,26 @@ export async function advanceToNextDay() {
             throw new Error('No Day Advancement LLM connection profile configured. Set one in Settings.');
         }
 
-        // 2. Gather current data
+        // 2. Gather current data AND save snapshot BEFORE any mutations.
+        //    This preserves the pre-advancement state (forecast, moon phases,
+        //    events with 'pending' status) so Restore Previous Day works correctly.
         const currentDay = getCurrentDay(chatId);
         const settingContext = getSettingContext(chatId);
         const currentForecast = getForecast(chatId);
         const currentMoonPhases = getMoonPhases(chatId);
 
+        // ★ SNAPSHOT FIRST — capture pre-mutation state before anything changes
+        saveDayBoundarySnapshot(chatId);
+
+        // Compute the next season (for the day we're advancing TO) so we can
+        // inform the Day Advancement LLM what season the system has determined.
+        // The LLM can then write weather/date context appropriate to that season.
+        const nextDayCount = (currentDay.dayCount || 0) + 1;
+        const seasonConfig = getSeasonConfig(chatId);
+        const nextComputedSeason = computeSeason(nextDayCount, seasonConfig);
+
         // 3. Build the LLM prompt (moon phases excluded — calculated programmatically)
-        const userPrompt = buildDayAdvancementPrompt(currentDay, settingContext, currentForecast);
+        const userPrompt = buildDayAdvancementPrompt(currentDay, settingContext, currentForecast, nextComputedSeason);
 
         // 4. Call the Day Advancement LLM
         const response = await callLLM(profile, DAY_ADVANCEMENT_SYSTEM_PROMPT, userPrompt);
@@ -374,12 +775,29 @@ export async function advanceToNextDay() {
         }
 
         // 6. Save the results (date + forecast from LLM)
+        //    When the seasonal engine is active (mode 'auto' or 'static'), the
+        //    computed season OVERRIDES whatever the LLM wrote for the season field.
+        //    The LLM receives the computed season as context and writes evocative
+        //    prose *about* that season — the engine is the authority.
+        const newDayCount = (currentDay.dayCount || 0) + 1;
+        // seasonConfig was already declared above — reuse it
+        const computedSeason = computeSeason(newDayCount, seasonConfig);
+        const finalSeason = computedSeason !== null ? computedSeason : (result.season || '');
+
         updateCurrentDay(chatId, {
             dateDisplay: result.dateDisplay,
             dateSub: result.dateSub,
-            season: result.season
+            season: finalSeason,
+            dayCount: newDayCount
         });
-        replaceForecast(chatId, result.forecast);
+
+        // ★ PRESERVE EXISTING FORECAST if LLM returned empty/invalid
+        if (result.forecast && result.forecast.length > 0) {
+            replaceForecast(chatId, result.forecast);
+        } else {
+            console.warn('[NWST DayAdvancement] LLM returned empty/invalid forecast — preserving existing forecast');
+            // keep existing forecast (snapshot already saved above)
+        }
 
         // 7. Calculate moon phases programmatically
         //    Advance the stored lunar angle by one day's progression,
@@ -392,20 +810,21 @@ export async function advanceToNextDay() {
 
         nwstToast('Forecast updated. Moon phases recalculated from lunar cycle.', 'success');
 
-        // 7. Trigger Current Day synthesis (via Planning LLM)
+        // 8. Trigger Current Day synthesis (via its own Planning LLM profile)
         nwstToast('Updating current day...', 'info');
         try {
             const { synthesizeCurrentDay } = await import('./currentDaySynth.js');
-            await synthesizeCurrentDay(chatId, profile);
+            // Do NOT pass profile — let synthesizeCurrentDay() use its own
+            // default Planning LLM profile, which has the correct system prompt
+            // for the markdown/JSON output format.
+            await synthesizeCurrentDay(chatId);
         } catch (synthErr) {
             console.warn('[NWST DayAdvancement] Current Day synthesis failed (non-fatal):', synthErr);
         }
 
-        // 8. Roll event horizon forward (mark missed, adjust tiers)
+        // 9. Roll event horizon forward (mark missed, adjust tiers)
+        //    This runs AFTER snapshot, so the saved snapshot still has 'pending' events.
         rollEventHorizonForward(chatId);
-
-        // 9. Save a snapshot at this day boundary
-        saveDayBoundarySnapshot(chatId);
 
         nwstToast('Day advanced successfully.', 'success');
         return true;
@@ -469,12 +888,16 @@ export async function restorePreviousDay() {
 
 // ── Prompt building ───────────────────────────────────────────────────────
 
-function buildDayAdvancementPrompt(currentDay, settingContext, forecast) {
+function buildDayAdvancementPrompt(currentDay, settingContext, forecast, computedSeason) {
     let prompt = '';
 
     prompt += `Current Date Display: ${currentDay.dateDisplay || '(not set)'}\n`;
     prompt += `Sub-Date: ${currentDay.dateSub || '(not set)'}\n`;
-    prompt += `Current Season: ${currentDay.season || '(not set)'}\n\n`;
+    prompt += `Current Season: ${currentDay.season || '(not set)'}\n`;
+    if (computedSeason) {
+        prompt += `System-computed season for the next day: ${computedSeason}\n`;
+    }
+    prompt += '\n';
 
     if (settingContext) {
         prompt += `Setting Context (world climate/geography):\n${settingContext}\n\n`;
@@ -498,12 +921,16 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast) {
  * Build a prompt for regenerating ONLY the weather forecast.
  * Excludes moon phase data entirely.
  */
-function buildForecastOnlyPrompt(currentDay, settingContext, forecast) {
+function buildForecastOnlyPrompt(currentDay, settingContext, forecast, computedSeason) {
     let prompt = '';
 
     prompt += `Current Date Display: ${currentDay.dateDisplay || '(not set)'}\n`;
     prompt += `Sub-Date: ${currentDay.dateSub || '(not set)'}\n`;
-    prompt += `Current Season: ${currentDay.season || '(not set)'}\n\n`;
+    prompt += `Current Season: ${currentDay.season || '(not set)'}\n`;
+    if (computedSeason) {
+        prompt += `System-computed current season: ${computedSeason}\n`;
+    }
+    prompt += '\n';
 
     if (settingContext) {
         prompt += `Setting Context (world climate/geography):\n${settingContext}\n\n`;

@@ -26,11 +26,12 @@ import {
     getInjectionPlacement, getInjectionDepth, getInjectionDepthRole,
     isEnabled, isPaused
 } from '../settings.js';
-import { getChatId } from '../index.js';
+import { getChatId, getSetting } from '../index.js';
 // Selective secret injection runs on EVERY message — no API call needed.
 // It checks which characters are in the current scene and injects only
 // the secrets whose whoKnows characters are scene-present.
 import { getSelectiveSecretInjection } from '../llm/narrativeConsistency.js';
+import { getLunarAngle, getDegreesPerDay, getMoonPhenomena } from '../llm/dayAdvancement.js';
 
 // ── Build the injection block ─────────────────────────────────────────────
 
@@ -49,17 +50,17 @@ export function buildInjectionBlock(chatId) {
     const parts = [];
 
     // ── Current Day ────────────────────────────────────────────
-    if (isInjectCurrentDay()) {
-        const day = getCurrentDay(chatId);
+    const day = isInjectCurrentDay() ? getCurrentDay(chatId) : null;
+    if (day) {
         const dayBlock = buildCurrentDayBlock(day, chatId);
         if (dayBlock) parts.push(dayBlock);
     }
 
-    // ── Forecast + Moon Phases ─────────────────────────────────
-    if (isInjectCurrentDay()) {
+    // ── Forecast + Moon Phases (with phenomena) ────────────────
+    if (day) {
         const forecast = getForecast(chatId);
         const moonPhases = getMoonPhases(chatId);
-        const weatherBlock = buildWeatherBlock(forecast, moonPhases);
+        const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day);
         if (weatherBlock) parts.push(weatherBlock);
     }
 
@@ -98,6 +99,7 @@ function buildCurrentDayBlock(day, chatId) {
 
     let block = '';
     if (day.dateDisplay) block += `Date: ${day.dateDisplay}\n`;
+    if (day.dateSub) block += `Era: ${day.dateSub}\n`;
     if (day.season) block += `Season: ${day.season}\n`;
     if (day.weatherToday) block += `Weather: ${day.weatherToday}\n`;
     if (day.flora) block += `Flora: ${day.flora}\n`;
@@ -114,7 +116,7 @@ function buildCurrentDayBlock(day, chatId) {
     return block.trim();
 }
 
-function buildWeatherBlock(forecast, moonPhases) {
+function buildWeatherBlock(forecast, moonPhases, chatId, currentDay) {
     let block = '';
 
     if (forecast && forecast.length > 0) {
@@ -127,8 +129,26 @@ function buildWeatherBlock(forecast, moonPhases) {
     if (moonPhases && moonPhases.length > 0) {
         if (block) block += '\n';
         block += 'Moon Phases:\n';
-        for (const moon of moonPhases) {
-            block += `  ${moon.label}: ${moon.phaseName} ${moon.icon}\n`;
+
+        // Gather context for phenomena detection
+        const lunarAngle = getLunarAngle(chatId);
+        const cycleDays = getSetting('moonCycleDays') || 29.53;
+        const degPerDay = 360 / cycleDays;
+        const phenomenaOptions = {
+            season: currentDay?.season || '',
+            weatherToday: currentDay?.weatherToday || ''
+        };
+
+        for (let i = 0; i < moonPhases.length; i++) {
+            const moon = moonPhases[i];
+            const dayAngle = (lunarAngle + i * degPerDay) % 360;
+            const phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenomenaOptions);
+
+            let line = `  ${moon.label}: ${moon.phaseName} ${moon.icon}`;
+            if (phenomena.length > 0) {
+                line += `\n         ⚡ ${phenomena.join(' | ')}`;
+            }
+            block += line + '\n';
         }
     }
 
@@ -210,7 +230,7 @@ function buildInjectionBlockWithState(chatId) {
 
             const forecast = getForecast(chatId);
             const moonPhases = getMoonPhases(chatId);
-            const weatherBlock = buildWeatherBlock(forecast, moonPhases);
+            const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day);
             if (weatherBlock) parts.push(weatherBlock);
         }
 

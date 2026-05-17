@@ -114,6 +114,18 @@ const defaultSettings = {
     // Moon cycle configuration (fantasy worlds can override the 29.53-day cycle)
     moonCycleDays: 29.53,
 
+    // ── Multi-Moon Configuration ──────────────────────────────────────────
+    // Master toggle: disable moons entirely
+    enableMoons: true,
+    // Array of moon definitions — each moon has its own cycle length and phase names
+    // Users can add fantasy moons (e.g. "The Crimson Eye", "Twin Sisters") or remove all for a moonless world
+    moons: [
+        { id: 'primary', name: 'The Moon', cycleDays: 29.53, enabled: true }
+    ],
+    // Natural moon phenomena toggle
+    enableMoonPhenomena: true,
+    // ──────────────────────────────────────────────────────────────────────
+
     // Injection settings
     injection: {
         injectCurrentDay: true,

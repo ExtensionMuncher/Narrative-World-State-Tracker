@@ -26,7 +26,8 @@ import {
     getChatData,
     setChatData,
     deleteChatData,
-    DEFAULT_WORLD_STATE
+    DEFAULT_WORLD_STATE,
+    DEFAULT_SEASON_CONFIG
 } from './storage.js';
 
 // ── Current Day ───────────────────────────────────────────────────────────
@@ -228,6 +229,38 @@ export function getSettingContext(chatId) {
  */
 export function saveSettingContext(chatId, context) {
     setChatData(chatId, 'settingContext', context);
+}
+
+// ── Season Configuration (per-chat) ───────────────────────────────────────
+
+/**
+ * Get the season configuration for a chat.
+ * NOTE: seasonConfig is stored per-chat, not globally.
+ * @param {string} chatId
+ * @returns {object} Season config object { mode, yearLength, seasons }
+ */
+export function getSeasonConfig(chatId) {
+    const stored = getChatData(chatId, 'seasonConfig');
+    if (stored && typeof stored === 'object') {
+        // Ensure fallback structure if partially saved
+        return {
+            mode: stored.mode || 'auto',
+            yearLength: stored.yearLength || 365,
+            seasons: Array.isArray(stored.seasons) && stored.seasons.length > 0
+                ? stored.seasons
+                : DEFAULT_SEASON_CONFIG.seasons
+        };
+    }
+    return { ...DEFAULT_SEASON_CONFIG, seasons: [...DEFAULT_SEASON_CONFIG.seasons] };
+}
+
+/**
+ * Save the season configuration for a chat.
+ * @param {string} chatId
+ * @param {object} config - Season config object { mode, yearLength, seasons }
+ */
+export function saveSeasonConfig(chatId, config) {
+    setChatData(chatId, 'seasonConfig', config);
 }
 
 // ── Snapshots ─────────────────────────────────────────────────────────────

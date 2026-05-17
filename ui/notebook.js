@@ -417,22 +417,29 @@ function wireNotebookEvents() {
     }
 
     // ── Add secret button ──────────────────────────────────────
-    const addSecretBtn = document.querySelector('.nwst-nb-add-secret');
-    if (addSecretBtn) {
-        addSecretBtn.onclick = () => {
-            const chatId = getChatId();
-            addSecret(chatId, {
-                title: 'New secret',
-                type: 'character',
-                secret: '',
-                whoKnows: [],
-                whoDoesNotKnow: []
-            });
-            refreshSecretsSection();
-            wireNotebookEvents();
-            nwstToast('Secret added.', 'info');
-        };
+    // Use event delegation so this survives re-renders without re-wiring
+    const secretsBody = document.getElementById('nwst-nb-secrets-body');
+    if (secretsBody && !secretsBody._nwstAddSecretWired) {
+        secretsBody._nwstAddSecretWired = true;
+        secretsBody.addEventListener('click', (e) => {
+            if (e.target.classList.contains('nwst-nb-add-secret')) {
+                const chatId = getChatId();
+                addSecret(chatId, {
+                    title: 'New secret',
+                    type: 'character',
+                    secret: '',
+                    whoKnows: [],
+                    whoDoesNotKnow: []
+                });
+                refreshSecretsSection();
+                wireSecretEvents();
+                nwstToast('Secret added.', 'info');
+            }
+        });
     }
+
+    // Always re-wire secret events after notebook events are wired
+    wireSecretEvents();
 }
 
 // ── Wire secret-specific events ───────────────────────────────────────────

@@ -7,9 +7,12 @@
 // Layout:
 //   • Four world condition rows with eye toggles (Political, Social,
 //     Spiritual/Supernatural, Environmental)
-//   • Each condition: icon, label, eye toggle, edit pencil, expandable body
+//   • Each condition: icon, label, eye toggle, edit pencil, expandable body,
+//     and a Regen button that calls the Planning LLM to regenerate content
 //   • Eye-off = muted row, no tracking, not injected
 //   • Community summaries section with avatar entries
+//   • Each community: name, members list, summary text, Edit button,
+//     Regen button, editable name/members/summary fields
 // =============================================================================
 
 import { getChatId, nwstToast } from '../index.js';
@@ -25,6 +28,42 @@ import {
     updateCommunitySummary
 } from '../data/communities.js';
 import { isInjectWorldConditions } from '../settings.js';
+import { resolveProfile, generateWithProfile } from '../llm/connections.js';
+
+// ── Dedicated system prompt for single-condition regeneration ──────────────
+// This is a focused, lighter version of the scanner's condition prompt.
+// It asks the LLM to regenerate a single world condition's atmospheric narrative
+// based on recent chat messages and current world context.
+
+const CONDITION_REGEN_SYSTEM_PROMPT = `You are a narrative world state analyst for an ongoing roleplay. Your task is to regenerate the content for ONE specific world condition based on recent chat messages.
+
+A world condition is an ATMOSPHERIC NARRATIVE — it describes the current mood, subtext, and implications of a particular aspect of the world. It is NOT a factual summary or character action list.
+
+Guidelines:
+- Describe the condition's CURRENT MOOD, SUBTEXT, and IMPLICATIONS — not just facts
+- Read the space between what is stated and what is left unsaid
+- Convey tension, movement, or stasis with specificity and texture
+- Sound like a thoughtful narrator interpreting the world, not a journalist listing events
+- NEVER mention specific named characters. World conditions describe the macro state of the world.
+- Be concise but evocative — 2-4 sentences typically
+
+Respond with ONLY the condition content text. Do NOT include JSON, markdown fences, labels, or extra commentary. Just the atmospheric narrative text.`;
+
+// ── Dedicated system prompt for single-community summary regeneration ──────
+// Focuses the LLM on producing a rich, analytical summary for one community.
+
+const COMMUNITY_REGEN_SYSTEM_PROMPT = `You are a community analyst for a narrative roleplay. Your task is to regenerate the summary for ONE specific community based on recent chat messages.
+
+Your summaries are not plot recaps. They are analytical portraits of a group — what the characters are maneuvering around, what they want and can't say, how they relate to each other beneath the surface.
+
+Guidelines:
+- Surface the SUBTEXT, not just the events
+- Identify POWER DYNAMICS — who holds leverage, who is vulnerable
+- Note SPECIFIC DETAILS that carry symbolic or narrative weight
+- Describe INTERNAL TENSIONS within the group
+- Be dense with insight — 3-5 sentences typically
+
+Respond with ONLY the summary text. Do NOT include JSON, markdown fences, labels, or extra commentary. Just the analytical summary.`;
 
 // ── Condition definitions ─────────────────────────────────────────────────
 
@@ -101,6 +140,7 @@ function refreshConditionsUI() {
                     ${def.label}
                     ${def.optional ? '<span style="font-size:10px;font-weight:400;color:#aaa"> — optional</span>' : ''}
                 </div>
+                <span style="font-size:11px;color:#999;margin-left:-4px;margin-right:4px">▾</span>
                 <div class="nwst-btn-row">
                     <button class="menu_button nwst-icon-btn nwst-cond-eye${eyeActiveClass}" data-cond="${def.key}" title="Toggle tracking">👁</button>
                     <button class="menu_button nwst-icon-btn nwst-cond-edit" data-cond="${def.key}" title="Edit">✎</button>
@@ -111,9 +151,9 @@ function refreshConditionsUI() {
                 ${condition.content
                     ? `<div>${escapeHTML(condition.content)}</div>
                        <div class="nwst-btn-row" style="margin-top:8px">
-                           <button class="menu_button nwst-btn nwst-cond-edit-btn" data-cond="${def.key}">Edit</button>
+                           <button class="menu_button nwst-btn-regen nwst-cond-regen" data-cond="${def.key}" title="Regenerate with Planning LLM">↺ Regen</button>
                        </div>`
-                    : '<div class="nwst-nb-empty">No content yet. Click ✎ to add.</div>'}
+                    : '<div class="nwst-nb-empty">No content yet. Click ✎ to add or use ↺ Regen.</div>'}
             </div>
             <!-- Edit mode (hidden) -->
             <div class="nwst-condition-body" id="nwst-cond-${def.key}-edit" style="display:none">
@@ -136,7 +176,8 @@ function refreshConditionsUI() {
 function wireConditionEvents() {
     // ── Eye toggle ─────────────────────────────────────────────
     document.querySelectorAll('.nwst-cond-eye').forEach(btn => {
-        btn.onclick = function () {
+        btn.onclick = function (e) {
+            e.stopPropagation();
             const condKey = this.getAttribute('data-cond');
             const chatId = getChatId();
             const nowEnabled = toggleConditionEnabled(chatId, condKey);
@@ -148,8 +189,9 @@ function wireConditionEvents() {
     });
 
     // ── Edit pencil ────────────────────────────────────────────
-    document.querySelectorAll('.nwst-cond-edit, .nwst-cond-edit-btn').forEach(btn => {
-        btn.onclick = function () {
+    document.querySelectorAll('.nwst-cond-edit').forEach(btn => {
+        btn.onclick = function (e) {
+            e.stopPropagation();
             const condKey = this.getAttribute('data-cond');
             toggleConditionEdit(condKey, true);
         };
@@ -179,6 +221,119 @@ function wireConditionEvents() {
         };
     });
 
+    // ── Condition Regen ───────────────────────────────────────
+    document.querySelectorAll('.nwst-cond-regen').forEach(btn => {
+        btn.onclick = async function () {
+            const condKey = this.getAttribute('data-cond');
+            const def = CONDITION_DEFS.find(d => d.key === condKey);
+            if (!def) return;
+            await regenCondition(condKey, def.label);
+        };
+    });
+
+    // ── Accordion collapse/expand toggle ─────────────────────
+    document.querySelectorAll('.nwst-condition-hdr').forEach(hdr => {
+        hdr.onclick = function () {
+            const row = this.closest('.nwst-condition-row');
+            if (row) row.classList.toggle('nwst-open');
+        };
+    });
+
+}
+
+// ── Condition Regeneration via LLM ─────────────────────────────────────────
+
+/**
+ * Call the Planning LLM to regenerate a single world condition's content.
+ * @param {string} condKey - 'political' | 'social' | 'spiritual' | 'environmental'
+ * @param {string} condLabel - Human-readable label (e.g. 'Political')
+ */
+async function regenCondition(condKey, condLabel) {
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    // Resolve planning LLM profile
+    const profile = resolveProfile('planningLLM');
+    if (!profile) {
+        nwstToast('No Planning LLM profile configured. Set one in Settings > Connections.', 'warning');
+        return;
+    }
+
+    // Gather context
+    const conditions = getConditions(chatId);
+    const currentContent = conditions[condKey]?.content || '';
+    const settingContext = getSettingContext(chatId);
+    const recentMessages = getRecentChatMessages(10);
+
+    // Build user prompt
+    let userPrompt = `Regenerate the "${condLabel}" world condition.\n\n`;
+    userPrompt += `=== CONDITION TO REGENERATE ===\n`;
+    userPrompt += `Key: ${condKey}\n`;
+    userPrompt += `Label: ${condLabel}\n`;
+    userPrompt += `Current content: ${currentContent || '(empty)'}\n\n`;
+
+    if (settingContext) {
+        userPrompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
+    }
+
+    if (recentMessages.length > 0) {
+        userPrompt += `=== RECENT CHAT MESSAGES ===\n`;
+        for (const msg of recentMessages) {
+            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            userPrompt += `[${sender}]: ${msg.mes}\n`;
+        }
+        userPrompt += '\n';
+    }
+
+    userPrompt += `Write a compelling atmospheric narrative for the "${condLabel}" condition based on the recent events. Remember: no named characters, just the macro state of the world.`;
+
+    // Show loading state
+    const row = document.getElementById(`nwst-cond-${condKey}`);
+    if (row) row.classList.add('nwst-loading');
+
+    try {
+        const messages = [
+            { role: 'system', content: CONDITION_REGEN_SYSTEM_PROMPT },
+            { role: 'user', content: userPrompt }
+        ];
+
+        const response = await generateWithProfile(profile, messages);
+        if (!response || !response.trim()) {
+            nwstToast('LLM returned empty response for condition regen.', 'error');
+            return;
+        }
+
+        const newContent = response.trim();
+        updateConditionContent(chatId, condKey, newContent);
+        refreshConditionsUI();
+        nwstToast(`${condLabel} condition regenerated.`, 'success');
+
+    } catch (err) {
+        console.error(`[NWST] Condition regen failed for ${condKey}:`, err);
+        nwstToast(`Failed to regenerate ${condLabel} condition.`, 'error');
+    } finally {
+        if (row) row.classList.remove('nwst-loading');
+    }
+}
+
+/**
+ * Get the N most recent non-system chat messages.
+ * @param {number} count
+ * @returns {object[]}
+ */
+function getRecentChatMessages(count) {
+    try {
+        const ctx = SillyTavern.getContext();
+        const chat = ctx.chat || [];
+        const visible = chat.filter(msg => {
+            if (msg.is_system && msg.extra?.hidden) return false;
+            if (msg.extra?.display === 'none') return false;
+            return true;
+        });
+        return visible.slice(-count);
+    } catch (e) {
+        return [];
+    }
 }
 
 function toggleConditionEdit(condKey, showEdit) {
@@ -219,16 +374,29 @@ function refreshCommunitiesUI() {
             <div class="nwst-community-body">
                 <div class="nwst-community-summary-text">${escapeHTML(com.summary || 'No summary yet.')}</div>
                 <div class="nwst-community-edit-area" style="display:none;margin-top:8px">
-                    <textarea class="nwst-community-textarea" rows="3" style="margin-bottom:8px" id="nwst-community-textarea-${com.id}">${escapeHTML(com.summary || '')}</textarea>
+                    <div style="margin-bottom:8px">
+                        <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Community name</label>
+                        <input type="text" class="text_pole nwst-community-name-input" style="width:100%" value="${escapeHTML(com.name)}"
+                            placeholder="e.g. The King's Court">
+                    </div>
+                    <div style="margin-bottom:8px">
+                        <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Members (comma-separated character names)</label>
+                        <input type="text" class="text_pole nwst-community-members-input" style="width:100%" value="${escapeHTML(com.members)}"
+                            placeholder="e.g. Sukuna, Uraume, Kenjaku">
+                    </div>
+                    <div style="margin-bottom:8px">
+                        <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Summary</label>
+                        <textarea class="nwst-community-textarea" rows="3" style="width:100%" id="nwst-community-textarea-${com.id}">${escapeHTML(com.summary || '')}</textarea>
+                    </div>
                     <div class="nwst-btn-row">
                         <button class="menu_button nwst-btn nwst-community-save">Save</button>
                         <button class="menu_button nwst-btn nwst-community-cancel">Cancel</button>
                         <button class="menu_button nwst-btn-danger nwst-community-delete">Delete</button>
-                        <button class="editor_maximize nwst-expand-btn nwst-community-popout" data-for="nwst-community-textarea-${com.id}" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
                     </div>
                 </div>
                 <div class="nwst-btn-row" style="margin-top:8px">
                     <button class="menu_button nwst-btn nwst-community-edit-btn">Edit</button>
+                    <button class="menu_button nwst-btn-regen nwst-community-regen" data-community-id="${com.id}" title="Regenerate summary with Planning LLM">↺ Regen</button>
                 </div>
             </div>
         </div>`;
@@ -267,12 +435,19 @@ function wireCommunityEvents() {
             e.stopPropagation();
             const entry = this.closest('.nwst-community-entry');
             const comId = entry.getAttribute('data-community-id');
+            const nameInput = entry.querySelector('.nwst-community-name-input');
+            const membersInput = entry.querySelector('.nwst-community-members-input');
             const textarea = entry.querySelector('.nwst-community-textarea');
-            if (textarea) {
+            if (textarea && comId) {
                 const chatId = getChatId();
-                updateCommunitySummary(chatId, comId, textarea.value);
+                const updates = {
+                    summary: textarea.value
+                };
+                if (nameInput) updates.name = nameInput.value;
+                if (membersInput) updates.members = membersInput.value;
+                updateCommunity(chatId, comId, updates);
                 refreshCommunitiesUI();
-                nwstToast('Community summary saved.', 'success');
+                nwstToast('Community saved.', 'success');
             }
         };
     });
@@ -298,6 +473,93 @@ function wireCommunityEvents() {
         };
     });
 
+    // ── Community Regen ───────────────────────────────────────
+    document.querySelectorAll('.nwst-community-regen').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const comId = this.getAttribute('data-community-id');
+            if (!comId) return;
+            await regenCommunitySummary(comId);
+        };
+    });
+
+}
+
+// ── Community Summary Regeneration via LLM ─────────────────────────────────
+
+/**
+ * Call the Planning LLM to regenerate a single community's summary.
+ * @param {string} communityId
+ */
+async function regenCommunitySummary(communityId) {
+    const chatId = getChatId();
+    if (!chatId || !communityId) return;
+
+    const profile = resolveProfile('planningLLM');
+    if (!profile) {
+        nwstToast('No Planning LLM profile configured. Set one in Settings > Connections.', 'warning');
+        return;
+    }
+
+    const communities = getAllCommunities(chatId);
+    const community = communities.find(c => c.id === communityId);
+    if (!community) {
+        nwstToast('Community not found.', 'error');
+        return;
+    }
+
+    const settingContext = getSettingContext(chatId);
+    const recentMessages = getRecentChatMessages(10);
+
+    // Build user prompt
+    let userPrompt = `Regenerate the community summary for "${community.name}".\n\n`;
+    userPrompt += `=== COMMUNITY ===\n`;
+    userPrompt += `Name: ${community.name}\n`;
+    userPrompt += `Members: ${community.members || 'none listed'}\n`;
+    userPrompt += `Current summary: ${community.summary || '(empty)'}\n\n`;
+
+    if (settingContext) {
+        userPrompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
+    }
+
+    if (recentMessages.length > 0) {
+        userPrompt += `=== RECENT CHAT MESSAGES ===\n`;
+        for (const msg of recentMessages) {
+            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            userPrompt += `[${sender}]: ${msg.mes}\n`;
+        }
+        userPrompt += '\n';
+    }
+
+    userPrompt += `Write a rich, analytical summary for "${community.name}" based on the recent events. Surface subtext, power dynamics, and internal tensions.`;
+
+    // Show loading
+    const entry = document.querySelector(`.nwst-community-entry[data-community-id="${communityId}"]`);
+    if (entry) entry.classList.add('nwst-loading');
+
+    try {
+        const messages = [
+            { role: 'system', content: COMMUNITY_REGEN_SYSTEM_PROMPT },
+            { role: 'user', content: userPrompt }
+        ];
+
+        const response = await generateWithProfile(profile, messages);
+        if (!response || !response.trim()) {
+            nwstToast('LLM returned empty response for community regen.', 'error');
+            return;
+        }
+
+        const newSummary = response.trim();
+        updateCommunitySummary(chatId, communityId, newSummary);
+        refreshCommunitiesUI();
+        nwstToast(`Summary for "${community.name}" regenerated.`, 'success');
+
+    } catch (err) {
+        console.error(`[NWST] Community regen failed for ${communityId}:`, err);
+        nwstToast(`Failed to regenerate summary for "${community.name}".`, 'error');
+    } finally {
+        if (entry) entry.classList.remove('nwst-loading');
+    }
 }
 
 function wireWorldStateEvents() {

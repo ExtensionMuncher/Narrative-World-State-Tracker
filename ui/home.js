@@ -18,6 +18,7 @@
 import {
     getChatId,
     nwstToast,
+    getSetting,
     updateStatusLabel,
     updatePauseButton
 } from '../index.js';
@@ -32,7 +33,7 @@ import {
     replaceMoonPhases
 } from '../data/worldState.js';
 import { getEventsGroupedByTier } from '../data/events.js';
-import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases } from '../llm/dayAdvancement.js';
+import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getMoonPhenomena, getMoonPhaseNames, getMoonPhaseForAngle } from '../llm/dayAdvancement.js';
 import { executeTimeSkip } from '../llm/timeskip.js';
 import { synthesizeCurrentDay } from '../llm/currentDaySynth.js';
 
@@ -218,30 +219,66 @@ function wireHomeEvents() {
     if (forecastRegen) {
         forecastRegen.addEventListener('click', async () => {
             const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+            const phaseNames = getMoonPhaseNames();
 
             const html = `
-                <div style="padding:10px;min-width:300px">
+                <div style="padding:10px;min-width:320px">
                     <p style="margin-bottom:14px;font-size:13px">What would you like to regenerate?</p>
-                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
-                        <input type="radio" name="nwst-regen-mode" value="all" checked
-                            onchange="window._nwstRegenMode=this.value" style="margin:0;flex-shrink:0">
+
+                    <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Scope</div>
+                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                        <input type="radio" name="nwst-regen-scope" value="all" checked
+                            onchange="window._nwstRegenScope=this.value" style="margin:0;flex-shrink:0">
                         <span>Both (Weather + Moon Phases)</span>
                     </label>
-                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
-                        <input type="radio" name="nwst-regen-mode" value="forecast"
-                            onchange="window._nwstRegenMode=this.value" style="margin:0;flex-shrink:0">
+                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                        <input type="radio" name="nwst-regen-scope" value="forecast"
+                            onchange="window._nwstRegenScope=this.value" style="margin:0;flex-shrink:0">
                         <span>Weather Only</span>
                     </label>
-                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:0;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
-                        <input type="radio" name="nwst-regen-mode" value="moonPhases"
-                            onchange="window._nwstRegenMode=this.value" style="margin:0;flex-shrink:0">
+                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                        <input type="radio" name="nwst-regen-scope" value="moonPhases"
+                            onchange="window._nwstRegenScope=this.value" style="margin:0;flex-shrink:0">
                         <span>Moon Phases Only</span>
                     </label>
+
+                    <div style="border-top:1px solid var(--SmartThemeBorderColor,#eee);margin-top:10px;padding-top:10px">
+                        <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Moon phase source</div>
+                        <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">Determines how the starting phase is chosen. Only applies when Moon Phases or Both is selected.</div>
+
+                        <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                            <input type="radio" name="nwst-regen-source" value="stored" checked
+                                onchange="window._nwstRegenSource=this.value" style="margin:0;flex-shrink:0">
+                            <span>Use stored angle</span>
+                        </label>
+                        <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                            <input type="radio" name="nwst-regen-source" value="date"
+                                onchange="window._nwstRegenSource=this.value" style="margin:0;flex-shrink:0">
+                            <span>Recalculate from date text</span>
+                        </label>
+                        <div style="padding-left:26px;margin-bottom:8px">
+                            <input type="text" id="nwst-regen-date-input" placeholder="e.g. Day 7, Full Moon, 11/7/1125, Seventh Day of the Waxing Moon"
+                                style="width:100%;padding:5px 7px;font-size:12px;border:1px solid var(--SmartThemeBorderColor,#ccc);border-radius:4px;background:var(--dark2,rgba(0,0,0,0.06));color:inherit;box-sizing:border-box"
+                                oninput="window._nwstRegenDateText=this.value">
+                            <div style="font-size:10px;color:#999;margin-top:3px;line-height:1.3">Type a phase name, day number, or date. Uses semantic parsing — "Day 7" → First Quarter, "Full Moon" → 180°.</div>
+                        </div>
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                            <input type="radio" name="nwst-regen-source" value="manual"
+                                onchange="window._nwstRegenSource=this.value;window._nwstRegenPhase=document.getElementById('nwst-regen-phase-select').value" style="margin:0;flex-shrink:0">
+                            <span style="white-space:nowrap">Set to specific phase:</span>
+                            <select id="nwst-regen-phase-select" style="flex:1;min-width:80px"
+                                onchange="window._nwstRegenPhase=this.value">
+                                ${phaseNames.map(p => `<option value="${p}">${p}</option>`).join('')}
+                            </select>
+                        </label>
+                    </div>
                 </div>
             `;
 
-            // Set default
-            window._nwstRegenMode = 'all';
+            // Set defaults
+            window._nwstRegenScope = 'all';
+            window._nwstRegenSource = 'stored';
+            window._nwstRegenPhase = phaseNames[0] || 'New Moon';
 
             const result = await callGenericPopup(html, POPUP_TYPE.TEXT, '', {
                 okButton: 'Regenerate',
@@ -249,13 +286,44 @@ function wireHomeEvents() {
             });
 
             if (result) {
-                const mode = window._nwstRegenMode || 'all';
-                if (mode === 'forecast') {
+                const scope = window._nwstRegenScope || 'all';
+                const source = window._nwstRegenSource || 'stored';
+                const chatId = getChatId();
+
+                // Helper: regenerate moon phases based on selected source
+                const doMoonPhaseRegen = () => {
+                    if (source === 'date') {
+                        // Read from the text input the user typed — avoids ambiguous
+                        // automatic parsing of the existing date display text
+                        const userText = window._nwstRegenDateText || '';
+                        if (userText) {
+                            regenerateMoonPhasesFromDate(chatId, userText);
+                        } else {
+                            nwstToast('No date text entered. Using stored angle.', 'warning');
+                            const storedAngle = getLunarAngle(chatId);
+                            const newMoonPhases = generateMoonPhases(storedAngle, 7, 0);
+                            replaceMoonPhases(chatId, newMoonPhases);
+                        }
+                    } else if (source === 'manual') {
+                        const selectedPhase = window._nwstRegenPhase || phaseNames[0];
+                        setMoonPhaseAnchor(chatId, selectedPhase);
+                        nwstToast(`Moon phase set to "${selectedPhase}".`, 'success');
+                    } else {
+                        // 'stored' — use the direct stored angle without date parsing
+                        const storedAngle = getLunarAngle(chatId);
+                        const newMoonPhases = generateMoonPhases(storedAngle, 7, 0);
+                        replaceMoonPhases(chatId, newMoonPhases);
+                    }
+                };
+
+                if (scope === 'forecast') {
                     await regenerateForecastOnly();
-                } else if (mode === 'moonPhases') {
-                    await regenerateMoonPhasesOnly();
+                } else if (scope === 'moonPhases') {
+                    doMoonPhaseRegen();
                 } else {
-                    await regenerateForecast();
+                    // 'all' — regen moon phases first, then weather
+                    doMoonPhaseRegen();
+                    await regenerateForecastOnly();
                 }
                 refreshHomeUI();
             }
@@ -359,40 +427,23 @@ function saveCurrentDayEdit() {
     updateCurrentDay(chatId, day);
 
     // ── Recalculate lunar angle if the date changed ──────────────
+    // Instead of estimating day difference, we now parse the date text
+    // semantically to compute a meaningful lunar angle from scratch.
+    // This handles narrative dates like "Seventh Day of the Waxing Moon",
+    // "Full Moon Festival", "11/7/1125", "Day 14", etc.
     if (day.dateDisplay && day.dateDisplay !== oldDateDisplay) {
-        const estimatedDays = estimateDaysBetweenDates(oldDateDisplay, day.dateDisplay);
-        if (estimatedDays !== 0) {
-            const currentAngle = getLunarAngle(chatId);
-            const newAngle = ((currentAngle + estimatedDays * getDegreesPerDay()) % 360 + 360) % 360;
-            setLunarAngle(chatId, newAngle);
-            const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
-            replaceMoonPhases(chatId, newMoonPhases);
-            nwstToast(`Date changed — moon phases recalculated (~${estimatedDays} day shift).`, 'info');
-        }
+        const newAngle = computeLunarAngleFromDate(day.dateDisplay);
+        const phaseInfo = getMoonPhaseForAngle(newAngle);
+        setLunarAngle(chatId, newAngle);
+        const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
+        replaceMoonPhases(chatId, newMoonPhases);
+        nwstToast(`Date changed — moon phases recalculated from date text. Anchored as "${phaseInfo.phaseName}" (${newAngle.toFixed(1)}°).`, 'info');
     }
 
     toggleCurrentDayEdit(false);
     refreshCurrentDayDisplay();
     refreshMoonDisplay();
     nwstToast('Current Day saved.', 'success');
-}
-
-/**
- * Estimate the number of days between two narrative date strings.
- * Extracts the first integer from each string and returns the difference.
- * Falls back to 0 if the dates can't be parsed or haven't changed.
- * @param {string} oldDate
- * @param {string} newDate
- * @returns {number}
- */
-function estimateDaysBetweenDates(oldDate, newDate) {
-    if (!oldDate || !newDate) return 0;
-    const oldNum = parseInt(oldDate.match(/\d+/)?.[0], 10);
-    const newNum = parseInt(newDate.match(/\d+/)?.[0], 10);
-    if (!isNaN(oldNum) && !isNaN(newNum) && newNum > oldNum) {
-        return newNum - oldNum;
-    }
-    return 0;
 }
 
 // ── UI Refresh ────────────────────────────────────────────────────────────
@@ -523,11 +574,30 @@ function refreshMoonDisplay() {
 
     const chatId = getChatId();
     const moonPhases = getMoonPhases(chatId);
+    const enableMoons = getSetting('enableMoons');
+
+    if (enableMoons === false) {
+        strip.innerHTML = '<div class="nwst-nb-empty" style="color:#999">🌙 Moons are disabled. Enable them in Settings.</div>';
+        return;
+    }
 
     if (!moonPhases || moonPhases.length === 0) {
         strip.innerHTML = '<div class="nwst-nb-empty">No moon phase data yet.</div>';
         return;
     }
+
+    // Calculate base angle for phenomena detection
+    const day = getCurrentDay(chatId);
+    const lunarAngle = getLunarAngle(chatId);
+    const cycleDays = getSetting('moonCycleDays') || 29.53;
+    const degPerDay = 360 / cycleDays;
+
+    // Gather weather/season context for weather-dependent phenomena
+    // (Moonbows need rain, Lunar Rings need high clouds)
+    const phenomenaOptions = {
+        season: day.season || '',
+        weatherToday: day.weatherToday || ''
+    };
 
     let html = '';
     for (let i = 0; i < moonPhases.length; i++) {
@@ -535,11 +605,22 @@ function refreshMoonDisplay() {
         const isToday = i === 0;
         const todayClass = isToday ? ' nwst-today' : '';
 
+        // Get phenomena for this day's phase
+        const dayAngle = (lunarAngle + i * degPerDay) % 360;
+        const phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenomenaOptions);
+
+        // Build phenomena tags
+        let phenHtml = '';
+        if (phenomena.length > 0) {
+            phenHtml = `<div class="nwst-mn-phenomena">${phenomena.map(p => `<span class="nwst-phen-tag">${escapeHTML(p)}</span>`).join('')}</div>`;
+        }
+
         html += `
         <div class="nwst-moon-day${todayClass}">
             <div class="nwst-mn-name">${escapeHTML(moon.label || `Day ${i + 1}`)}</div>
             <div class="nwst-mn-icon">${escapeHTML(moon.icon || '—')}</div>
             <div class="nwst-mn-label">${escapeHTML(moon.phaseName || '')}</div>
+            ${phenHtml}
         </div>`;
     }
 

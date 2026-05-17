@@ -562,6 +562,33 @@
     color: #3C3489;
 }
 
+/* ── Moon Phenomena Tags ─────────────────────────────────────────────────── */
+
+.nwst-mn-phenomena {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    justify-content: center;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 0.5px solid var(--SmartThemeBorderColor, #ddd);
+}
+
+.nwst-phen-tag {
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--dark30, rgba(0,0,0,0.04));
+    color: #888;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+
+.nwst-phen-tag:hover {
+    background: rgba(127, 119, 221, 0.12);
+    color: #7F77DD;
+}
+
 /* ── Event Horizon ───────────────────────────────────────────────────────── */
 .nwst-event-group {
     margin-bottom: 12px;
@@ -716,6 +743,12 @@
     gap: 8px;
     padding: 9px 12px;
     background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
+    cursor: pointer;
+    user-select: none;
+}
+
+.nwst-condition-hdr:hover {
+    background: var(--SmartThemeChatScrollBarColor, #f8f8f8);
 }
 
 .nwst-condition-label {

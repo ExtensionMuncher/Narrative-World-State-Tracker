@@ -21,43 +21,132 @@ import { generateWithProfile } from './connections.js';
 
 import { getChatId, nwstToast } from '../index.js';
 import { chatHasData } from '../data/storage.js';
-import { getWorldState, saveSnapshot } from '../data/worldState.js';
+import { getWorldState, saveSnapshot, getSettingContext } from '../data/worldState.js';
 import { getAllEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
 import { regenerateForecast } from './dayAdvancement.js';
 
-// ── Internal prompt (NOT user-editable) ───────────────────────────────────
+// ── Date computation helper ─────────────────────────────────────────────────
 
-const BATCH_SCAN_SYSTEM_PROMPT = `You are a narrative world state generator. You are reading the FULL history of a roleplay chat and must generate a complete initial world state from it.
+/**
+ * Compute day-of-year from a date string like "Monday, April 15th, 2024".
+ * Used as a client-side fallback when the LLM doesn't provide dayCount.
+ * @param {string} dateStr
+ * @returns {number|null} Day of year (1-366), or null if unparseable
+ */
+function computeDayOfYearFromDate(dateStr) {
+    if (!dateStr || typeof dateStr !== 'string') return null;
+    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december'];
+    const monthMap = {};
+    monthNames.forEach((name, i) => { monthMap[name] = i; });
 
-You will receive the chat history in chunks. Process each chunk and accumulate your understanding. After the final chunk, generate:
+    // Strip ordinal suffixes (st, nd, rd, th) so "15th" becomes "15"
+    const cleaned = dateStr.replace(/(\d+)(st|nd|rd|th)/gi, '$1');
 
-1. CURRENT DAY BLOCK: The current date, season, weather, flora, fauna, and spiritual climate (if applicable)
-2. INITIAL EVENTS: Upcoming events across all tiers (immediate, this week, this month, undetermined) that are implied or explicitly mentioned
-3. WORLD CONDITIONS: Political, social, spiritual/supernatural, and environmental conditions
-4. NOTEBOOK SEEDING: Unresolved details, promises/threats/deadlines, offscreen pressures, important facts, planted details, character whereabouts, current tone/atmosphere
-5. COMMUNITY GROUPINGS: Character clusters and their dynamics
+    // Match "Month Day, Year" pattern — e.g. "April 15, 2024" or "April 15 2024"
+    const dateMatch = cleaned.match(/([A-Za-z]+)\s+(\d{1,2}),?\s*(\d{4})/);
+    if (dateMatch) {
+        const monthName = dateMatch[1].toLowerCase();
+        const day = parseInt(dateMatch[2], 10);
+        const year = parseInt(dateMatch[3], 10);
+        const month = monthMap[monthName];
+        if (month !== undefined && day >= 1 && day <= 31 && year >= 1) {
+            const date = new Date(year, month, day);
+            const startOfYear = new Date(year, 0, 0); // Dec 31 of previous year
+            const diff = date - startOfYear;
+            const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+            if (dayOfYear >= 1 && dayOfYear <= 366) {
+                console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from date "${dateStr}"`);
+                return dayOfYear;
+            }
+        }
+    }
 
-RULES:
-- Only use information explicitly found in the chat history. Do NOT invent.
-- If a field has no relevant information, leave it empty.
-- Write with atmospheric, narrative detail.
-- Flag any inconsistencies you detect in the chat history.
-- Do NOT mark any events as auto-committed. All events are proposed for review.`;
+    // Also try ISO format: "2024-04-15"
+    const isoMatch = cleaned.match(/(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) {
+        const year = parseInt(isoMatch[1], 10);
+        const month = parseInt(isoMatch[2], 10) - 1; // JS months are 0-indexed
+        const day = parseInt(isoMatch[3], 10);
+        if (year >= 1 && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+            const date = new Date(year, month, day);
+            const startOfYear = new Date(year, 0, 0);
+            const diff = date - startOfYear;
+            const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+            if (dayOfYear >= 1 && dayOfYear <= 366) {
+                console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from ISO date "${dateStr}"`);
+                return dayOfYear;
+            }
+        }
+    }
+
+    return null;
+}
+
+// ── Internal prompts ───────────────────────────────────────────────────────
+
+// Chunk analysis prompt — used for each chunk pass
+const BATCH_CHUNK_PROMPT = `You are analyzing a segment of a roleplay chat history to build a world state. Read carefully and extract:
+
+1. Any explicit or implied date, time, season, or era information
+2. Setting details — location, climate, atmosphere, cultural context
+3. Upcoming events mentioned by characters or implied by the world
+4. World conditions — political tensions, social dynamics, spiritual/supernatural elements, environmental state
+5. Key facts, unresolved threads, planted details, character whereabouts
+6. Character social groupings and dynamics
+
+Accumulate your findings. If this is not the final chunk, do not produce final output yet — just summarize what you found in plain text for later synthesis.`;
+
+// Final synthesis system prompt — used for the structured JSON pass
+const BATCH_SYNTHESIS_SYSTEM_PROMPT = `You are synthesizing a complete initial world state for a narrative roleplay tracking extension. You have already analyzed the full chat history. Now produce a structured JSON object.
+
+=== DATE RESOLUTION — READ THIS FIRST ===
+Determining the current in-game date is your most important task. Follow this priority order STRICTLY:
+
+PRIORITY 1: Setting context (authoritative).
+If the setting context provided below includes a start date, use it as your temporal anchor. Advance from that date based on how many in-story days appear to have passed in the chat. The setting context date format and calendar system define how the date should be written.
+
+PRIORITY 2: Explicit in-chat date.
+If a specific date was mentioned in the chat, use it.
+
+PRIORITY 3: Reasoned construction.
+If neither is available, construct the best possible date from the available season, time period, and setting context. Use the setting's era and naming conventions. Write it in the appropriate format for the world — a feudal Japanese date looks nothing like a modern one.
+
+NEVER produce:
+- "Unknown era" or "Unknown date"
+- Vague approximations like "approximately late afternoon"
+- Generic descriptions divorced from the setting's calendar system
+- A blank or placeholder date
+
+If you must estimate, write it as a plausible specific date and note it as an estimate in the dateSub field (e.g. "Estimated — no explicit date in chat").
+
+=== CURRENT DAY BLOCK — CHARACTER PROHIBITION ===
+The Current Day block is injected into EVERY message the main AI receives. It must describe the WORLD, not the characters. Any character reference in the Current Day block will contaminate every future generation.
+
+DO NOT include:
+- Named characters in any field
+- What characters are doing, feeling, or planning
+- Specific character actions or states
+- Story events or plot recaps
+
+The Current Day fields (season, weatherToday, flora, fauna, spiritualClimate) describe ambient world conditions only — what the world looks like, smells like, feels like at this moment.
+
+=== WORLD CONDITIONS — CHARACTER PROHIBITION ===
+Same rule applies. World conditions describe the macro state of the world — the political atmosphere, the social climate, the spiritual texture. They do NOT describe what specific named characters are doing or have done. Write conditions as atmospheric narratives an observer would perceive, not as summaries of character actions.
+
+=== COMMUNITY SUMMARIES — ANALYTICAL DEPTH ===
+Community summaries are not plot recaps. They are analytical portraits of social groupings — the power dynamics, unspoken tensions, what characters are maneuvering around, what is really happening beneath the surface. Write them with insight and specificity. Reference specific moments that reveal something meaningful. Avoid generic observations.
+
+=== EVENTS — FORWARD FACING ONLY ===
+Events describe what is COMING, not what has already happened. Past events belong in the notebook (established facts, planted details). If something already occurred, do not put it in the events array.`;
 
 // ── Execute Batch Scan ────────────────────────────────────────────────────
 
 /**
  * Run a full batch scan on the current chat.
  * This is the only function that reads ALL messages regardless of visibility.
- *
- * Toast notification sequence (per spec):
- *   1. "Narrative World State Tracker: Batch scan started — analyzing chat history..."
- *   2. "Narrative World State Tracker: Processing messages [X]–[Y]..." (per chunk)
- *   3. "Narrative World State Tracker: [Component] complete." (per component)
- *   4. "Narrative World State Tracker: Batch scan complete."
- *   5. On error: "Narrative World State Tracker: Batch scan failed at [stage]. Check console for details."
  *
  * @returns {Promise<boolean>} True on success
  */
@@ -69,9 +158,7 @@ export async function runBatchScan() {
         return false;
     }
 
-    // Check if batch scan has already been run for this chat
     const hasData = chatHasData(chatId);
-    console.log(`[NWST BatchScan] chatHasData("${chatId}") returned: ${hasData}`);
     if (hasData) {
         nwstToast('Batch scan has already been run for this chat. Existing data will not be overwritten.', 'warning');
         return false;
@@ -86,8 +173,7 @@ export async function runBatchScan() {
             throw new Error('No Planning LLM connection profile configured. Set one in Settings > Connection Profiles.');
         }
 
-        // Get the full chat history — ALL messages, regardless of visibility flags
-        // This is the DOCUMENTED EXCEPTION to the visibility rule
+        // Get ALL messages — documented exception to visibility rule
         const allMessages = getAllMessagesUnfiltered();
         if (allMessages.length === 0) {
             nwstToast('No chat messages found to scan.', 'warning');
@@ -95,16 +181,24 @@ export async function runBatchScan() {
             return false;
         }
 
-        // Calculate chunk size based on context window
-        const maxContext = SillyTavern.getContext().maxContext;
-        const chunkSize = Math.floor(maxContext * 0.6); // 60% for input, 40% for output
+        // Get setting context — the authoritative source for date and world info
+        const settingContext = getSettingContext(chatId);
+
+        const maxContext = SillyTavern.getContext().maxContext || 8000;
+        const chunkSize = Math.floor(maxContext * 0.6);
         const chunks = chunkMessages(allMessages, chunkSize);
 
         console.log(`[NWST BatchScan] Processing ${allMessages.length} messages in ${chunks.length} chunks...`);
-        console.log(`[NWST BatchScan] Max context: ${maxContext}, Chunk size: ~${chunkSize} tokens`);
 
-        // Process each chunk sequentially through the Planning LLM
+        // Process each chunk sequentially
         let accumulatedContext = '';
+
+        // Include setting context in the accumulated context so the synthesis
+        // pass always has it regardless of what was extracted from chunks
+        if (settingContext) {
+            accumulatedContext += `=== SETTING CONTEXT (authoritative — use for date anchor and world details) ===\n${settingContext}\n\n`;
+        }
+
         for (let i = 0; i < chunks.length; i++) {
             const messagesPerChunk = Math.ceil(allMessages.length / chunks.length);
             const startMsg = i * messagesPerChunk + 1;
@@ -112,11 +206,10 @@ export async function runBatchScan() {
 
             nwstToast(`Processing messages ${startMsg}–${endMsg}...`, 'info');
 
-            const chunkText = formatChunkForLLM(chunks[i], i + 1, chunks.length, startMsg, endMsg);
+            const chunkText = formatChunkForLLM(chunks[i], i + 1, chunks.length, startMsg, endMsg, settingContext);
 
-            // Call Planning LLM for this chunk via connection profile
             const messages = [
-                { role: 'system', content: BATCH_SCAN_SYSTEM_PROMPT },
+                { role: 'system', content: BATCH_CHUNK_PROMPT },
                 { role: 'user', content: chunkText }
             ];
 
@@ -126,9 +219,9 @@ export async function runBatchScan() {
             }
         }
 
-        // After all chunks processed, synthesize final structured results
+        // Synthesize final structured results
         nwstToast('Synthesizing world state from full analysis...', 'info');
-        await synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages);
+        await synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages, settingContext);
 
         nwstToast('Batch scan complete.', 'success');
         return true;
@@ -146,22 +239,13 @@ export async function runBatchScan() {
 
 function getAllMessagesUnfiltered() {
     try {
-        const ctx = SillyTavern.getContext();
-        return ctx.chat || [];
+        return SillyTavern.getContext().chat || [];
     } catch (e) {
         console.error('[NWST BatchScan] Error accessing chat:', e);
         return [];
     }
 }
 
-/**
- * Chunk messages into context-window-safe segments.
- * Uses approximate token counting (1 token ≈ 4 characters).
- *
- * @param {object[]} messages - Full message array
- * @param {number} approxTokensPerChunk - Approximate max tokens per chunk
- * @returns {object[][]} Array of message chunks
- */
 function chunkMessages(messages, approxTokensPerChunk) {
     const charsPerChunk = approxTokensPerChunk * 4;
     const chunks = [];
@@ -172,8 +256,6 @@ function chunkMessages(messages, approxTokensPerChunk) {
         const msgText = `[${msg.name || (msg.is_user ? 'User' : 'Character')}]: ${msg.mes || ''}`;
         const msgChars = msgText.length;
 
-        // If adding this message would exceed chunk size and chunk isn't empty,
-        // finalize current chunk and start a new one
         if (currentChars + msgChars > charsPerChunk && currentChunk.length > 0) {
             chunks.push(currentChunk);
             currentChunk = [];
@@ -184,22 +266,21 @@ function chunkMessages(messages, approxTokensPerChunk) {
         currentChars += msgChars;
     }
 
-    // Don't forget the last chunk
-    if (currentChunk.length > 0) {
-        chunks.push(currentChunk);
-    }
-
+    if (currentChunk.length > 0) chunks.push(currentChunk);
     return chunks;
 }
 
-function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg) {
+function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg, settingContext) {
     let text = `CHUNK ${chunkNum}/${totalChunks} — Messages ${startMsg}–${endMsg}\n`;
-    text += `This is chunk ${chunkNum} of ${totalChunks}. `;
 
     if (chunkNum === 1) {
-        text += `This is the BEGINNING of the chat history. Pay attention to setting details, character introductions, and initial world state clues.\n\n`;
+        text += `This is the BEGINNING of the chat history. Pay special attention to setting details, calendar system, date references, era, and character introductions.\n\n`;
+        // Include setting context on first chunk so LLM is grounded immediately
+        if (settingContext) {
+            text += `SETTING CONTEXT (authoritative — use this for date anchor):\n${settingContext}\n\n`;
+        }
     } else if (chunkNum === totalChunks) {
-        text += `This is the FINAL chunk — the most recent messages. Pay closest attention to the current state of the world.\n\n`;
+        text += `This is the FINAL chunk — the most recent messages. This defines the CURRENT world state.\n\n`;
     } else {
         text += `Continue building your understanding of the narrative.\n\n`;
     }
@@ -210,72 +291,16 @@ function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg) {
     }
 
     text += `\n(End of chunk ${chunkNum}/${totalChunks})`;
-
     return text;
 }
 
 // ── Final Synthesis ───────────────────────────────────────────────────────
 
-async function synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages) {
-    // Build a final synthesis prompt asking for structured JSON output
-    const synthesisPrompt = `You have now read the full ${allMessages.length}-message chat history. Below is your accumulated analysis from each chunk.
-
-${accumulatedContext}
-
-Now synthesize the COMPLETE initial world state as a single JSON object. Use this EXACT structure:
-
-{
-  "currentDay": {
-    "dateDisplay": "string — the current in-game date, written narratively",
-    "dateSub": "string — era, year, or sub-date context",
-    "season": "string — current season with atmospheric detail",
-    "weatherToday": "string — today's weather, written narratively",
-    "flora": "string — current flora state",
-    "fauna": "string — current fauna state",
-    "spiritualClimate": "string — metaphysical climate (omit if no spiritual elements exist)"
-  },
-  "events": [
-    {
-      "title": "string",
-      "description": "string",
-      "tier": "immediate|week|month|undetermined",
-      "isNPC": false
-    }
-  ],
-  "conditions": {
-    "political": "string or empty",
-    "social": "string or empty",
-    "spiritual": "string or empty",
-    "environmental": "string or empty"
-  },
-  "notebook": {
-    "core": {
-      "unresolvedDetail": ["string", ...],
-      "promiseThreatDeadline": ["string", ...],
-      "offscreenPressure": ["string", ...],
-      "doNotForget": ["string", ...]
-    },
-    "mystery": {
-      "establishedFacts": ["string", ...],
-      "plantedDetails": ["string", ...],
-      "characterWhereabouts": ["string", ...],
-      "inconsistenciesFlagged": ["string", ...],
-      "currentToneAtmosphere": ["string", ...]
-    }
-  },
-  "communities": [
-    {
-      "name": "string",
-      "members": "string — comma-separated names",
-      "summary": "string — social dynamics description"
-    }
-  ]
-}
-
-Respond with valid JSON ONLY. No markdown, no explanation outside the JSON.`;
+async function synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages, settingContext) {
+    const synthesisPrompt = buildSynthesisPrompt(accumulatedContext, allMessages.length, settingContext);
 
     const messages = [
-        { role: 'system', content: BATCH_SCAN_SYSTEM_PROMPT },
+        { role: 'system', content: BATCH_SYNTHESIS_SYSTEM_PROMPT },
         { role: 'user', content: synthesisPrompt }
     ];
 
@@ -286,13 +311,90 @@ Respond with valid JSON ONLY. No markdown, no explanation outside the JSON.`;
         return;
     }
 
-    // Parse and apply the synthesis results
     const result = parseBatchSynthesis(response);
     if (result) {
         await applyBatchResults(chatId, result);
     } else {
         nwstToast('Could not parse batch scan results. The LLM may have returned an invalid format.', 'error');
     }
+}
+
+function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) {
+    let prompt = `You have analyzed the full ${messageCount}-message chat history. Here is your accumulated analysis:\n\n`;
+    prompt += accumulatedContext;
+    prompt += `\n\nNow synthesize the COMPLETE initial world state as a single JSON object.\n\n`;
+
+    // Reiterate the date priority inline in the user prompt so it's impossible to miss
+    prompt += `REMINDER — DATE RESOLUTION PRIORITY:\n`;
+    if (settingContext) {
+        prompt += `Your setting context (already included above) contains the authoritative date anchor. `;
+        prompt += `Use it. Do NOT produce "unknown era" or vague dates. `;
+        prompt += `Advance from the setting context start date based on story time elapsed.\n\n`;
+    } else {
+        prompt += `No setting context was provided. Construct the most specific date possible from seasonal `;
+        prompt += `and contextual clues. Use the world's own calendar system and era naming conventions.\n\n`;
+    }
+
+    prompt += `CRITICAL DATE FORMAT RULES — READ BEFORE GENERATING:\n`;
+    prompt += `  1. dateDisplay MUST start with the day of the week (e.g. "Monday", "Thursday", "Kin'yōbi")\n`;
+    prompt += `  2. dateDisplay MUST NOT contain a pipe | character — that belongs in dateSub\n`;
+    prompt += `  3. Use dateSub for era/calendar context ONLY (e.g. "Reiwa 6", "Heian Era · 1125 CE")\n`;
+    prompt += `  4. dayCount = day-of-year (1-366). If date is "October 17, 2024", dayCount = 291 (leap year) or 290.\n`;
+    prompt += `  5. FAILURE TO FOLLOW THESE RULES WILL CORRUPT THE DATE DISPLAY IN THE UI.\n\n`;
+
+    prompt += `Use this EXACT JSON structure:\n\n`;
+    prompt += `{
+  "currentDay": {
+    "dateDisplay": "MUST start with day-of-week followed by ', Month Date, Year'. No pipe characters. Modern: 'Monday, April 15th, 2024'. Historical: 'Kin'yōbi, Chrysanthemum Month · Sixth Day of the Waxing Moon'.",
+    "dateSub": "Era context only — e.g. 'Reiwa 6', 'Heian Era · 1125 CE', '21st Century'. Leave empty if no applicable era.",
+    "season": "Current season — evocative, sensory, grounded in the setting. NO character names.",
+    "weatherToday": "Today's weather as a physical experience. NO character names.",
+    "flora": "What is growing or changing in the natural world. NO character names.",
+    "fauna": "Animal activity and presence. NO character names.",
+    "spiritualClimate": "Metaphysical atmosphere if applicable. NO character names. Omit if no spiritual elements.",
+    "dayCount": "DAYS SINCE STORY START (integer). CRITICAL: If a concrete date is present (e.g. 'April 15th, 2024'), compute the day-of-year. Example: April 15 in a leap year = Jan(31) + Feb(29) + Mar(31) + Apr(15) = day 106. If no date exists, estimate from story progression or default to 1."
+  },
+  "events": [
+    {
+      "title": "Forward-facing event title — what is COMING, not what happened",
+      "description": "What is expected or planned. Future-facing only.",
+      "tier": "immediate|week|month|undetermined",
+      "isNPC": false
+    }
+  ],
+  "conditions": {
+    "political": "Atmospheric narrative of the political climate. NO character names or specific character actions. Describe the macro mood, tensions, movements.",
+    "social": "Atmospheric narrative of the social climate. NO character names. Describe dynamics, hierarchies, undercurrents.",
+    "spiritual": "Metaphysical texture. NO character names. Describe what the spiritually aware would perceive, not who perceives it.",
+    "environmental": "Physical world state — landscape, season, climate conditions. NO character names."
+  },
+  "notebook": {
+    "core": {
+      "unresolvedDetail": ["string", "..."],
+      "promiseThreatDeadline": ["string", "..."],
+      "offscreenPressure": ["string", "..."],
+      "doNotForget": ["string", "..."]
+    },
+    "mystery": {
+      "establishedFacts": ["string", "..."],
+      "plantedDetails": ["string", "..."],
+      "characterWhereabouts": ["string", "..."],
+      "inconsistenciesFlagged": ["string", "..."],
+      "currentToneAtmosphere": ["string", "..."]
+    }
+  },
+  "communities": [
+    {
+      "name": "Community or faction name",
+      "members": "Comma-separated character names",
+      "summary": "Analytical portrait of power dynamics and unspoken tensions — not a plot recap"
+    }
+  ]
+}
+
+Respond with valid JSON ONLY. No markdown fences. No explanation outside the JSON.`;
+
+    return prompt;
 }
 
 // ── Parse LLM response ────────────────────────────────────────────────────
@@ -302,7 +404,7 @@ function parseBatchSynthesis(response) {
 
     let jsonStr = response.trim();
 
-    // Remove markdown code fences if present
+    // Strip markdown fences
     const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch) jsonStr = fenceMatch[1].trim();
 
@@ -322,18 +424,109 @@ function parseBatchSynthesis(response) {
 // ── Apply batch results to storage ────────────────────────────────────────
 
 async function applyBatchResults(chatId, result) {
-    // Apply Current Day
     if (result.currentDay) {
         const { replaceCurrentDay } = await import('../data/worldState.js');
-        replaceCurrentDay(chatId, result.currentDay);
+
+        // ── Post-process dateDisplay ──────────────────────────────
+        // If the LLM put era/region info after a pipe (e.g. "October 17, 2024 | Modern day Japan"),
+        // split it into dateDisplay and dateSub. Also ensure day-of-week is present.
+        if (result.currentDay.dateDisplay && typeof result.currentDay.dateDisplay === 'string') {
+            const pipeIdx = result.currentDay.dateDisplay.indexOf('|');
+            if (pipeIdx !== -1) {
+                const before = result.currentDay.dateDisplay.substring(0, pipeIdx).trim();
+                const after = result.currentDay.dateDisplay.substring(pipeIdx + 1).trim();
+                result.currentDay.dateDisplay = before;
+                if (!result.currentDay.dateSub || result.currentDay.dateSub.trim() === '') {
+                    result.currentDay.dateSub = after;
+                    console.log(`[NWST BatchScan] Extracted dateSub from dateDisplay pipe: "${result.currentDay.dateSub}"`);
+                }
+            }
+        }
+
+        // ── dayCount computation (CRITICAL — ALWAYS override from dateDisplay) ──
+        // computeDayOfYearFromDate() parses a Gregorian month-day-year from
+        // dateDisplay (even with day-of-week prefix like "Thursday, October 17th, 2024").
+        // When a parseable date exists, the computed day-of-year is ALWAYS more
+        // reliable than whatever the LLM guessed. Override unconditionally.
+        const computedDayCount = computeDayOfYearFromDate(result.currentDay.dateDisplay);
+        if (computedDayCount && computedDayCount > 0) {
+            const oldVal = result.currentDay.dayCount;
+            result.currentDay.dayCount = computedDayCount;
+            console.log(`[NWST BatchScan] dayCount SET from dateDisplay: ${oldVal ?? 'none'} → ${computedDayCount} (from "${result.currentDay.dateDisplay}")`);
+        } else {
+            // Normalize dayCount to integer (LLM may output string, null, etc.)
+            const rawDayCount = result.currentDay.dayCount;
+            let parsedDayCount = (typeof rawDayCount === 'number' && !Number.isNaN(rawDayCount))
+                ? Math.floor(rawDayCount)
+                : (typeof rawDayCount === 'string' ? parseInt(rawDayCount, 10) : NaN);
+            if (Number.isNaN(parsedDayCount) || parsedDayCount <= 0) {
+                // No parseable date and no valid dayCount from LLM — fallback to existing storage or default
+                const { getCurrentDay } = await import('../data/worldState.js');
+                const existingDay = getCurrentDay(chatId);
+                if (existingDay?.dayCount && existingDay.dayCount > 0) {
+                    result.currentDay.dayCount = existingDay.dayCount;
+                    console.log(`[NWST BatchScan] Preserved existing dayCount: ${result.currentDay.dayCount}`);
+                } else {
+                    result.currentDay.dayCount = 1;
+                    console.log(`[NWST BatchScan] Set default dayCount: 1`);
+                }
+            }
+            // else: keep LLM's dayCount since it's a plausible positive integer and no date to compute from
+        }
+
+        // ── Normalize season ──────────────────────────────────────
+        // Strip verbose descriptions (e.g. "Spring — the chill of autumn lingers") to prevent
+        // substring matching in getMoonPhenomena() which does season.includes('autumn').
+        if (result.currentDay.season && typeof result.currentDay.season === 'string') {
+            const seasonText = result.currentDay.season.trim();
+            if (seasonText.split(' ').length > 3 || /[,;.—]/.test(seasonText)) {
+                const seasonWords = ['spring', 'summer', 'autumn', 'fall', 'winter'];
+                const lower = seasonText.toLowerCase();
+                const foundSeason = seasonWords.find(sw => {
+                    const regex = new RegExp(`\\b${sw}\\b`, 'i');
+                    return regex.test(lower);
+                });
+                if (foundSeason) {
+                    result.currentDay.season = foundSeason.charAt(0).toUpperCase() + foundSeason.slice(1);
+                    console.log(`[NWST BatchScan] Normalized season from verbose description to "${result.currentDay.season}"`);
+                } else {
+                    const firstSentence = seasonText.split(/[.\n;]/)[0].trim();
+                    result.currentDay.season = firstSentence;
+                    console.log(`[NWST BatchScan] Trimmed season to first segment: "${result.currentDay.season.substring(0, 60)}"`);
+                }
+            }
+        }
+        if (result.currentDay.season && typeof result.currentDay.season === 'string') {
+            const seasonText = result.currentDay.season.trim();
+            // If more than 3 words or contains punctuation that suggests multiple clauses
+            if (seasonText.split(' ').length > 3 || /[,;.—]/.test(seasonText)) {
+                // Extract first recognized season word if present, otherwise take first sentence
+                const seasonWords = ['spring', 'summer', 'autumn', 'fall', 'winter'];
+                const lower = seasonText.toLowerCase();
+                const foundSeason = seasonWords.find(sw => {
+                    // Match as whole word, not substring
+                    const regex = new RegExp(`\\b${sw}\\b`, 'i');
+                    return regex.test(lower);
+                });
+                if (foundSeason) {
+                    result.currentDay.season = foundSeason.charAt(0).toUpperCase() + foundSeason.slice(1);
+                    console.log(`[NWST BatchScan] Normalized season from verbose description to "${result.currentDay.season}"`);
+                } else {
+                    // No recognized season word — take just first sentence
+                    const firstSentence = seasonText.split(/[.\n;]/)[0].trim();
+                    result.currentDay.season = firstSentence;
+                    console.log(`[NWST BatchScan] Trimmed season to first segment: "${result.currentDay.season.substring(0, 60)}"`);
+                }
+            }
+        }
+        await replaceCurrentDay(chatId, result.currentDay);
         nwstToast('Current Day block generated.', 'info');
     }
 
-    // Apply events
     if (result.events && Array.isArray(result.events)) {
         const { addEvent } = await import('../data/events.js');
         for (const event of result.events) {
-            addEvent(chatId, {
+            await addEvent(chatId, {
                 ...event,
                 status: 'pending',
                 origin: 'detected',
@@ -344,43 +537,62 @@ async function applyBatchResults(chatId, result) {
         nwstToast('Events complete.', 'info');
     }
 
-    // Apply conditions
     if (result.conditions) {
         const { updateConditionContent } = await import('../data/worldState.js');
         for (const [key, content] of Object.entries(result.conditions)) {
             if (content && typeof content === 'string' && content.trim()) {
-                updateConditionContent(chatId, key, content);
+                await updateConditionContent(chatId, key, content.trim());
             }
         }
         nwstToast('World conditions complete.', 'info');
     }
 
-    // Apply notebook (merge with defaults to avoid missing fields)
     if (result.notebook) {
-        const { getNotebook: getNb, saveNotebook } = await import('../data/notebook.js');
-        saveNotebook(chatId, result.notebook);
+        // ── Validate & normalize notebook fields: ensure string[] fields are arrays, not raw strings ──
+        // LLMs sometimes return "currentToneAtmosphere": "string" instead of ["string"],
+        // which causes bullet rendering to iterate characters instead of array items.
+        const ARRAY_FIELDS = ['unresolvedDetail', 'promiseThreatDeadline', 'offscreenPressure', 'doNotForget',
+            'establishedFacts', 'plantedDetails', 'characterWhereabouts', 'inconsistenciesFlagged', 'currentToneAtmosphere'];
+        let normalized = 0;
+        for (const section of ['core', 'mystery']) {
+            if (result.notebook[section]) {
+                for (const field of ARRAY_FIELDS) {
+                    const val = result.notebook[section][field];
+                    if (typeof val === 'string') {
+                        result.notebook[section][field] = [val];
+                        normalized++;
+                    }
+                }
+            }
+        }
+        if (normalized > 0) {
+            console.log(`[NWST BatchScan] Normalized ${normalized} string fields to arrays in notebook`);
+        }
+
+        const { saveNotebook } = await import('../data/notebook.js');
+        await saveNotebook(chatId, result.notebook);
         nwstToast('Notebook seeded.', 'info');
     }
 
-    // Apply communities
     if (result.communities && Array.isArray(result.communities)) {
         const { addCommunity } = await import('../data/communities.js');
         for (const com of result.communities) {
-            if (com.name) {
-                addCommunity(chatId, com);
-            }
+            if (com.name) await addCommunity(chatId, com);
         }
+        nwstToast('Communities complete.', 'info');
     }
 
     // Save a post-batch-scan snapshot
-    const { getWorldState, saveSnapshot: saveSnap } = await import('../data/worldState.js');
-    const { getAllEvents: getEvents } = await import('../data/events.js');
-    const { getNotebook: getNb } = await import('../data/notebook.js');
-    saveSnap(chatId, 'batch_scan', getWorldState(chatId), getEvents(chatId), getNb(chatId));
+    try {
+        const { getWorldState: getWS, saveSnapshot: saveSnap } = await import('../data/worldState.js');
+        const { getAllEvents: getEvts } = await import('../data/events.js');
+        const { getNotebook: getNb } = await import('../data/notebook.js');
+        await saveSnap(chatId, 'batch_scan', getWS(chatId), getEvts(chatId), getNb(chatId));
+    } catch (e) {
+        console.warn('[NWST BatchScan] Post-scan snapshot failed (non-fatal):', e);
+    }
 
-    // Seed the 7-day forecast and moon phases
-    // This uses the Day Advancement LLM profile to generate initial weather data
-    // based on the current day, setting context, and world conditions just created
+    // Seed the 7-day forecast via Day Advancement LLM
     nwstToast('Generating initial 7-day forecast...', 'info');
     try {
         await regenerateForecast();
@@ -389,14 +601,26 @@ async function applyBatchResults(chatId, result) {
         console.warn('[NWST BatchScan] Forecast generation failed (non-fatal):', forecastErr);
         nwstToast('Forecast generation skipped. Use the Regen button on the Home tab to try again.', 'warning');
     }
+
+    // Seed world events via Event Generation LLM (creates "world events" with origin: 'generated')
+    // The batch scan itself only produces detected events from chat analysis — world events
+    // need the full event generation pipeline to create forward-facing plot hooks from setting context.
+    nwstToast('Generating initial world events...', 'info');
+    try {
+        const { regenerateAllEvents } = await import('./eventGen.js');
+        const count = await regenerateAllEvents();
+        nwstToast(`World events seeded: ${count} event(s) created.`, 'info');
+    } catch (eventErr) {
+        console.warn('[NWST BatchScan] World event generation failed (non-fatal):', eventErr);
+        nwstToast('Event generation skipped. Use Regen buttons on the Events tab to try again.', 'warning');
+    }
 }
 
-// ── Loading UI ────────────────────────────────────────────────────────────
+// ── Loading UI ─────────────────────────────────────────────────────────────
 
 function showBatchScanLoading(show) {
     const spinner = document.getElementById('nwst-batchScan-spinner');
     const btn = document.getElementById('nwst-setting-batchScan');
-
     if (spinner) spinner.style.display = show ? 'inline-block' : 'none';
     if (btn) {
         btn.disabled = show;

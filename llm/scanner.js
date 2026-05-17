@@ -1,5 +1,4 @@
 /* eslint-disable */
-import { generateWithProfile } from './connections.js';
 // =============================================================================
 // NWST Message Scanner — llm/scanner.js
 // =============================================================================
@@ -13,14 +12,16 @@ import { generateWithProfile } from './connections.js';
 // The scanner does NOT update the Current Day block or auto-commit event changes.
 // =============================================================================
 
+import { generateWithProfile } from './connections.js';
 import { getChatId, nwstToast } from '../index.js';
-import { getScanFrequency, isPaused, isEnabled, getPlannerPrompt } from '../settings.js';
-import { getWorldState, getEnabledConditions, getSettingContext } from '../data/worldState.js';
-import { getActiveEvents, addEvent } from '../data/events.js';
+import { getScanFrequency, isPaused, isEnabled } from '../settings.js';
+import { getWorldState, getEnabledConditions, getSettingContext, updateConditionContent } from '../data/worldState.js';
+import { getActiveEvents } from '../data/events.js';
 import { getNotebook, addCoreBullet, addMysteryBullet } from '../data/notebook.js';
-import { getAllCommunities, updateCommunitySummary } from '../data/communities.js';
+import { getAllCommunities, updateCommunitySummary, addCommunity } from '../data/communities.js';
 import { resolveProfile } from './connections.js';
 import { runConsistencyCheck } from './narrativeConsistency.js';
+import { detectNPCEventsFromChat } from './eventGen.js';
 
 // ── Scanner state ─────────────────────────────────────────────────────────
 
@@ -28,86 +29,155 @@ let messageCountAtLastScan = 0;
 let scanTimer = null;
 let isScanning = false;
 
-// ── Internal prompt (NOT user-editable) ───────────────────────────────────
+// ── Internal system prompts ───────────────────────────────────────────────
+// These are not user-editable. The user-editable planner prompt is passed as
+// an additional instruction, not as the primary system prompt.
 
-const SCANNER_SYSTEM_PROMPT = `You are a narrative world state scanner for an ongoing roleplay. You review recent chat messages and maintain the living world state. Your updates must be grounded in what actually happened in the chat.
+const SCANNER_SYSTEM_PROMPT = `You are a narrative world state scanner for an ongoing roleplay. You review recent chat messages and update the living world state — the notebook, world conditions, and community summaries.
 
-You will receive:
-- Recent chat messages (the latest exchanges)
-- Current world state (date, season, conditions)
-- Current notebook (established facts, planted details, etc.)
-- Active community summaries
-- Active upcoming events
+You will receive the recent chat messages, current world state, current notebook, active community summaries, and active events.
 
-Your task:
-1. Review recent messages for new facts, developments, or changes
-2. Update notebook fields as appropriate:
-   - Add unresolved details that were introduced
-   - Note promises, threats, or deadlines made
-   - Update offscreen pressures (things happening away from the scene)
-   - Add "do not forget" items for important details
-   - Add established facts (things confirmed in chat)
-   - Note planted details (hooks that haven't resolved)
-   - Update character whereabouts if mentioned
-   - Flag any contradictions or inconsistencies you detect
-   - Note the current tone/atmosphere
-3. Update community summaries if social dynamics have shifted
-4. Update world conditions if the state of the world has changed
-5. Identify any NPC events detected in the chat (plans, meetings, promises made by characters)
+WHAT YOU DO:
 
-IMPORTANT RULES:
-- Do NOT invent events. Only flag events that are explicitly mentioned or implied by characters in the chat.
-- Do NOT auto-commit event changes. Flag detected NPC events for user review.
-- Do NOT update the Current Day block (that's handled separately).
-- Be factual. Write in the notebook's existing style — concise, bullet-point observations.
-- If you detect inconsistencies, flag them in the inconsistencies field with specific references.`;
+1. NOTEBOOK UPDATES — add or update bullets in notebook fields based on what happened:
+   - unresolvedDetail: new unresolved threads, unanswered questions, things left dangling
+   - promiseThreatDeadline: explicit or implied promises, threats, warnings, or deadlines set in the scene
+   - offscreenPressure: pressures building away from the scene — other characters' plans, external forces
+   - doNotForget: specific important details that must not be dropped (an object, a name, a revealed fact)
+   - establishedFacts: things now confirmed as true in this world — do not add speculation
+   - plantedDetails: seeds placed in the scene that haven't paid off yet (a meaningful glance, an unexplained object, a subtle shift)
+   - characterWhereabouts: where named characters are or were last confirmed to be
+   - inconsistenciesFlagged: anything in the recent messages that contradicts established facts
+   - currentToneAtmosphere: the current emotional register and tension level of the story
+
+2. WORLD CONDITION UPDATES — update only conditions that meaningfully shifted in the recent messages:
+   CRITICAL: World conditions are ATMOSPHERIC NARRATIVES, not factual summaries. They must:
+   - Describe the condition's CURRENT MOOD, SUBTEXT, and IMPLICATIONS — not just facts
+   - Read the space between what is stated and what is left unsaid
+   - Convey tension, movement, or stasis with specificity and texture
+   - Sound like a thoughtful narrator interpreting the world, not a journalist listing events
+   - NEVER mention specific named characters. World conditions describe the macro state of the world, not what individuals are doing. Character actions belong in the notebook, not world conditions.
+
+   Example of BAD world condition (factual summary):
+   "Sukuna has left for a nearby village. The harem concubines are watching Sachiko."
+
+   Example of GOOD world condition (atmospheric narrative):
+   "Sukuna's absence has shifted the gravitational center of the fortress. The concubines move more openly now — assessing, circling, recalibrating. Whatever fragile equilibrium his presence imposed has dissolved into something more volatile and less predictable."
+
+   Only update a condition if something in the recent messages genuinely changes it. If a condition is stable, leave it unchanged.
+
+3. COMMUNITY SUMMARY UPDATES — update community summaries if social dynamics shifted:
+   Community summaries must be ANALYTICAL and NUANCED. They are not plot recaps. They should:
+   - Read between the lines of character interactions and identify the underlying power dynamics
+   - Surface what is unspoken — what characters are maneuvering around, avoiding, or competing for
+   - Note specific details that carry weight (a particular choice, a significant omission, a gesture)
+   - Describe the internal tensions and pressures within the group, not just the surface events
+   - Be dense with insight, not long with description
+
+4. NPC EVENT DETECTION — identify any EXPLICIT future plans made by characters:
+   Only flag events where a character explicitly states or clearly implies something will happen.
+   Do NOT infer or extrapolate — only flag what is directly stated.
+
+RESPONSE FORMAT — respond with a JSON object:
+{
+  "notebookUpdates": {
+    "unresolvedDetail": ["new bullet 1", "new bullet 2"],
+    "promiseThreatDeadline": [],
+    "offscreenPressure": [],
+    "doNotForget": [],
+    "establishedFacts": [],
+    "plantedDetails": [],
+    "characterWhereabouts": [],
+    "inconsistenciesFlagged": [],
+    "currentToneAtmosphere": []
+  },
+  "conditionUpdates": {
+    "political": "Updated atmospheric narrative, or null if unchanged",
+    "social": null,
+    "spiritual": null,
+    "environmental": null
+  },
+  "communityUpdates": [
+    {
+      "name": "Community name (must match existing name exactly, or new name if new community)",
+      "members": "member list if changed",
+      "summary": "Updated analytical summary"
+    }
+  ],
+  "detectedNPCEvents": [
+    {
+      "title": "Brief label",
+      "description": "What was explicitly stated or clearly implied",
+      "tier": "immediate" | "week" | "month" | "undetermined",
+      "detectedFrom": "brief reference to what in the chat indicates this"
+    }
+  ],
+  "noChanges": false
+}
+
+If nothing meaningful changed, return {"noChanges": true} and nothing else.
+Only include fields that have actual updates — empty arrays and null values are fine for unchanged fields.
+For notebookUpdates: only include NEW bullets to add. Do not repeat bullets already in the notebook.`;
+
+// ── Community synthesis prompt (dedicated, richer pass) ───────────────────
+
+const COMMUNITY_SYNTHESIS_PROMPT = `You are a community analyst for a narrative roleplay. You read character interactions and write rich, insightful summaries of social groups — their internal dynamics, power structures, unspoken tensions, and the forces shaping them.
+
+Your summaries are not plot recaps. They are analytical portraits of a group — what the characters are maneuvering around, what they want and can't say, how they relate to each other beneath the surface.
+
+Guidelines:
+- Surface the SUBTEXT, not just the events. What is really happening beneath the stated interactions?
+- Identify POWER DYNAMICS — who holds leverage, who is vulnerable, who is performing, who is genuine
+- Note SPECIFIC DETAILS that carry symbolic or narrative weight — a particular choice, an omission, a gesture that reveals something
+- Describe INTERNAL TENSIONS within the group — competing interests, unstated conflicts, fragile alliances
+- Keep summaries DENSE WITH INSIGHT rather than long with description. Quality over quantity.
+- Use precise, evocative language. Write like a perceptive human observer, not a summarizing AI.
+
+DO NOT write:
+- Generic plot summaries ("Character A did X, then Character B said Y")
+- Factual inventories of events
+- Vague observations ("The group is tense")
+
+DO write:
+- Interpretive analysis of what the interactions reveal
+- Specific observations tied to specific moments ("Uraume's offer of unspecified future assistance is carefully phrased — vague enough to avoid obligation, but recorded as a promise that could bear weight in Sukuna's absence")
+- The emotional and political subtext beneath the surface
+
+Respond with a JSON array of community summaries:
+[
+  {
+    "name": "Community name",
+    "members": "character list",
+    "summary": "Rich analytical summary following the guidelines above"
+  }
+]`;
 
 // ── Start / Stop Scanner ──────────────────────────────────────────────────
 
-/**
- * Start the background scanner. Runs on a message-count-based cadence.
- * Listens for ST's native MESSAGE_SENT and MESSAGE_RECEIVED events instead
- * of polling — no setInterval needed.
- */
 export function startScanner() {
-    if (scanTimer) {
-        console.log('[NWST Scanner] Scanner already running.');
-        return;
-    }
-
-    console.log(`[NWST Scanner] Starting scanner (frequency: every ${getScanFrequency()} messages)...`);
+    if (scanTimer) return;
+    console.log(`[NWST Scanner] Starting (frequency: every ${getScanFrequency()} messages)...`);
     messageCountAtLastScan = getCurrentMessageCount();
-
-    // Listen for ST's native message events instead of polling
     const { eventSource, event_types } = SillyTavern.getContext();
     eventSource.on(event_types.MESSAGE_SENT, checkAndScan);
     eventSource.on(event_types.MESSAGE_RECEIVED, checkAndScan);
-    scanTimer = 'event-driven'; // marker that scanner is running
-
-    console.log('[NWST Scanner] Scanner started (event-driven).');
+    scanTimer = 'event-driven';
+    console.log('[NWST Scanner] Started (event-driven).');
 }
 
-/**
- * Stop the background scanner.
- */
 export function stopScanner() {
     if (!scanTimer) return;
-
     try {
         const { eventSource, event_types } = SillyTavern.getContext();
         eventSource.removeListener(event_types.MESSAGE_SENT, checkAndScan);
         eventSource.removeListener(event_types.MESSAGE_RECEIVED, checkAndScan);
     } catch (e) {
-        console.warn('[NWST Scanner] Error detaching event listeners:', e);
+        console.warn('[NWST Scanner] Error detaching listeners:', e);
     }
-
     scanTimer = null;
-    console.log('[NWST Scanner] Scanner stopped.');
+    console.log('[NWST Scanner] Stopped.');
 }
 
-/**
- * Restart the scanner (e.g., after frequency change).
- */
 export function restartScanner() {
     stopScanner();
     startScanner();
@@ -116,17 +186,10 @@ export function restartScanner() {
 // ── Scan check ────────────────────────────────────────────────────────────
 
 async function checkAndScan() {
-    // Don't scan if extension is disabled or paused
-    if (!isEnabled() || isPaused()) return;
-
-    // Don't scan if already scanning
-    if (isScanning) return;
-
+    if (!isEnabled() || isPaused() || isScanning) return;
     const currentCount = getCurrentMessageCount();
-    const frequency = getScanFrequency();
     const messagesSinceLastScan = currentCount - messageCountAtLastScan;
-
-    if (messagesSinceLastScan >= frequency) {
+    if (messagesSinceLastScan >= getScanFrequency()) {
         await runScan();
         messageCountAtLastScan = currentCount;
     }
@@ -146,7 +209,6 @@ async function runScan() {
             return;
         }
 
-        // Gather context for the Planning LLM
         const recentMessages = getRecentMessages(getScanFrequency());
         const worldState = getWorldState(chatId);
         const notebook = getNotebook(chatId);
@@ -154,10 +216,8 @@ async function runScan() {
         const activeEvents = getActiveEvents(chatId);
         const settingContext = getSettingContext(chatId);
 
-        // Build the scan prompt
         const userPrompt = buildScannerPrompt(recentMessages, worldState, notebook, communities, activeEvents, settingContext);
 
-        // Call Planning LLM via connection profile
         const messages = [
             { role: 'system', content: SCANNER_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
@@ -167,23 +227,20 @@ async function runScan() {
         const response = await generateWithProfile(profile, messages);
 
         if (!response) {
-            console.log('[NWST Scanner] Empty response — no updates needed.');
+            console.log('[NWST Scanner] Empty response.');
             return;
         }
 
-        // Parse and apply the scanner's findings
-        const hadUpdates = await applyScanResults(chatId, response);
+        const hadUpdates = await applyScanResults(chatId, response, recentMessages);
 
         if (hadUpdates) {
             nwstToast('World state updated.', 'info');
-            // Refresh UI if panel is open
             if (typeof window?.nwstRefreshAllUI === 'function') {
                 window.nwstRefreshAllUI();
             }
         }
 
-        // Run narrative consistency check after each scan
-        // This reviews recent chat for knowledge violations against secret whoKnows/whoDoesNotKnow lists
+        // Run narrative consistency check (secrets monitoring)
         await runConsistencyCheck();
 
         console.log('[NWST Scanner] Scan complete.');
@@ -199,102 +256,101 @@ async function runScan() {
 
 function getCurrentMessageCount() {
     try {
-        const ctx = SillyTavern.getContext();
-        return ctx.chat?.length || 0;
-    } catch (e) {
-        return 0;
-    }
+        return SillyTavern.getContext().chat?.length || 0;
+    } catch (e) { return 0; }
 }
 
 function getRecentMessages(count) {
     try {
         const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
-        // Get the most recent N messages, respecting visibility flags
         const start = Math.max(0, chat.length - count);
         return chat.slice(start).filter(msg => {
-            // Respect ST's visibility flags
+            // Respect ST's message visibility flags
+            // Hidden: is_system + extra.hidden, or extra.display === 'none'
             if (msg.is_system && msg.extra?.hidden) return false;
+            if (msg.extra?.display === 'none') return false;
             return true;
         });
-    } catch (e) {
-        return [];
-    }
+    } catch (e) { return []; }
 }
 
 function buildScannerPrompt(recentMessages, worldState, notebook, communities, activeEvents, settingContext) {
     let prompt = '';
 
-    // Recent messages
+    // Recent messages — the primary input
     prompt += `=== RECENT CHAT MESSAGES ===\n`;
     for (const msg of recentMessages) {
         const sender = msg.name || (msg.is_user ? 'User' : 'Character');
         prompt += `[${sender}]: ${msg.mes}\n`;
     }
-    prompt += `\n`;
+    prompt += '\n';
 
-    // Current world state summary
+    // Current world state anchor
     prompt += `=== CURRENT WORLD STATE ===\n`;
     prompt += `Date: ${worldState.currentDay?.dateDisplay || '(not set)'}\n`;
     prompt += `Season: ${worldState.currentDay?.season || '(not set)'}\n`;
-    prompt += `Weather: ${worldState.currentDay?.weatherToday || '(not set)'}\n`;
-    prompt += `\n`;
+    prompt += `Weather: ${worldState.currentDay?.weatherToday || '(not set)'}\n\n`;
 
-    // Active conditions
+    // Existing world conditions (so the LLM knows what's already there)
     const conditions = worldState.conditions || {};
-    prompt += `=== WORLD CONDITIONS ===\n`;
-    for (const [key, cond] of Object.entries(conditions)) {
-        if (cond.enabled && cond.content) {
-            prompt += `[${key.toUpperCase()}]: ${cond.content}\n`;
+    const hasConditions = Object.values(conditions).some(c => c.enabled && c.content);
+    if (hasConditions) {
+        prompt += `=== CURRENT WORLD CONDITIONS (update only if changed) ===\n`;
+        for (const [key, cond] of Object.entries(conditions)) {
+            if (cond.enabled) {
+                prompt += `[${key.toUpperCase()}]: ${cond.content || '(not yet set)'}\n`;
+            }
         }
+        prompt += '\n';
     }
-    prompt += `\n`;
 
-    // Notebook summary
-    prompt += `=== NOTEBOOK ===\n`;
+    // Existing notebook
+    prompt += `=== CURRENT NOTEBOOK ===\n`;
     prompt += formatNotebookForPrompt(notebook);
-    prompt += `\n`;
+    prompt += '\n';
 
-    // Communities
+    // Community summaries
     if (communities.length > 0) {
-        prompt += `=== COMMUNITIES ===\n`;
+        prompt += `=== CURRENT COMMUNITY SUMMARIES (update only if dynamics shifted) ===\n`;
         for (const com of communities) {
-            prompt += `- ${com.name}: ${com.summary || '(no summary)'}\n`;
+            prompt += `--- ${com.name} (${com.members || 'members unknown'}) ---\n`;
+            prompt += `${com.summary || '(no summary yet)'}\n\n`;
         }
-        prompt += `\n`;
     }
 
-    // Active events
+    // Active events (for reference only)
     if (activeEvents.length > 0) {
         prompt += `=== ACTIVE EVENTS ===\n`;
-        for (const event of activeEvents) {
-            prompt += `- [${event.tier}] ${event.title}: ${event.description}\n`;
+        for (const ev of activeEvents) {
+            prompt += `- [${ev.tier}] ${ev.title}\n`;
         }
-        prompt += `\n`;
+        prompt += '\n';
     }
 
     if (settingContext) {
         prompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
     }
 
-    prompt += `Review the recent messages and update the world state accordingly. Identify any new notebook entries, world condition changes, community shifts, or NPC events that should be flagged.`;
+    prompt += `Review the recent messages and produce your JSON update response.`;
 
     return prompt;
 }
 
 function formatNotebookForPrompt(notebook) {
     let text = '';
-    const core = notebook.core || {};
-    const mystery = notebook.mystery || {};
+    const core = notebook?.core || {};
+    const mystery = notebook?.mystery || {};
 
-    if (core.unresolvedDetail?.length) text += `Unresolved: ${core.unresolvedDetail.join('; ')}\n`;
-    if (core.promiseThreatDeadline?.length) text += `Promises/Threats: ${core.promiseThreatDeadline.join('; ')}\n`;
-    if (core.offscreenPressure?.length) text += `Offscreen Pressure: ${core.offscreenPressure.join('; ')}\n`;
-    if (core.doNotForget?.length) text += `Don't Forget: ${core.doNotForget.join('; ')}\n`;
-    if (mystery.establishedFacts?.length) text += `Facts: ${mystery.establishedFacts.join('; ')}\n`;
-    if (mystery.plantedDetails?.length) text += `Planted: ${mystery.plantedDetails.join('; ')}\n`;
-    if (mystery.characterWhereabouts?.length) text += `Whereabouts: ${mystery.characterWhereabouts.join('; ')}\n`;
-    if (mystery.inconsistenciesFlagged?.length) text += `Inconsistencies: ${mystery.inconsistenciesFlagged.join('; ')}\n`;
+    if (core.unresolvedDetail?.length)       text += `Unresolved Details:\n${core.unresolvedDetail.map(b => `  - ${b}`).join('\n')}\n`;
+    if (core.promiseThreatDeadline?.length)   text += `Promises/Threats:\n${core.promiseThreatDeadline.map(b => `  - ${b}`).join('\n')}\n`;
+    if (core.offscreenPressure?.length)       text += `Offscreen Pressure:\n${core.offscreenPressure.map(b => `  - ${b}`).join('\n')}\n`;
+    if (core.doNotForget?.length)             text += `Do Not Forget:\n${core.doNotForget.map(b => `  - ${b}`).join('\n')}\n`;
+    if (mystery.establishedFacts?.length)     text += `Established Facts:\n${mystery.establishedFacts.map(b => `  - ${b}`).join('\n')}\n`;
+    if (mystery.plantedDetails?.length)       text += `Planted Details:\n${mystery.plantedDetails.map(b => `  - ${b}`).join('\n')}\n`;
+    if (mystery.characterWhereabouts?.length) text += `Character Whereabouts:\n${mystery.characterWhereabouts.map(b => `  - ${b}`).join('\n')}\n`;
+    if (mystery.inconsistenciesFlagged?.length) text += `Inconsistencies Flagged:\n${mystery.inconsistenciesFlagged.map(b => `  - ${b}`).join('\n')}\n`;
+    if (mystery.currentToneAtmosphere?.length)  text += `Current Tone/Atmosphere:\n${mystery.currentToneAtmosphere.map(b => `  - ${b}`).join('\n')}\n`;
 
     return text || '(notebook is empty)\n';
 }
@@ -302,41 +358,226 @@ function formatNotebookForPrompt(notebook) {
 // ── Apply scan results ────────────────────────────────────────────────────
 
 /**
- * Parse the Planning LLM's scan response and apply updates.
- * The LLM response is expected to contain structured sections for each update type.
+ * Parse the Planning LLM's JSON response and apply updates to storage.
  *
  * @param {string} chatId
- * @param {string} response - The LLM's response text
+ * @param {string} response - LLM response text
+ * @param {object[]} recentMessages - Recent messages (for NPC detection pass)
  * @returns {Promise<boolean>} True if any updates were applied
  */
-async function applyScanResults(chatId, response) {
+async function applyScanResults(chatId, response, recentMessages) {
     if (!response || typeof response !== 'string') return false;
 
-    let hadUpdates = false;
-    const text = response.trim();
+    let result = null;
+    let jsonStr = response.trim();
 
-    // Try to parse structured updates from the response
-    // The LLM may use markdown sections like:
-    // ### Notebook Updates
-    // ### World Condition Updates
-    // ### NPC Events Detected
+    // Strip markdown code fences
+    const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) jsonStr = fenceMatch[1].trim();
 
-    // For now, we log the response and flag that processing occurred
-    // Full structured parsing will be refined during integration testing
-    console.log('[NWST Scanner] LLM response received (' + text.length + ' chars).');
+    // Find outermost JSON object
+    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (objMatch) jsonStr = objMatch[0];
 
-    // If the response indicates no changes needed, skip
-    if (text.toLowerCase().includes('no updates') || text.toLowerCase().includes('no changes')) {
-        console.log('[NWST Scanner] LLM indicated no updates needed.');
+    try {
+        result = JSON.parse(jsonStr);
+    } catch (e) {
+        console.warn('[NWST Scanner] Could not parse scan response as JSON. Logging raw response.');
+        console.log('[NWST Scanner] Raw response:', response.substring(0, 800));
         return false;
     }
 
-    // Mark that the scanner found updates
-    hadUpdates = true;
+    if (!result || result.noChanges === true) {
+        console.log('[NWST Scanner] LLM indicated no changes needed.');
+        return false;
+    }
 
-    // Future: Parse notebook updates, condition changes, NPC event proposals
-    // For the initial build, the structured parsing will be refined during
-    // integration testing with actual LLM responses.
+    let hadUpdates = false;
+
+    // ── Apply notebook updates ────────────────────────────────────────────
+    const nbUpdates = result.notebookUpdates || {};
+    const coreFields = ['unresolvedDetail', 'promiseThreatDeadline', 'offscreenPressure', 'doNotForget'];
+    const mysteryFields = ['establishedFacts', 'plantedDetails', 'characterWhereabouts', 'inconsistenciesFlagged', 'currentToneAtmosphere'];
+
+    for (const field of coreFields) {
+        const bullets = nbUpdates[field];
+        if (Array.isArray(bullets) && bullets.length > 0) {
+            for (const bullet of bullets) {
+                if (bullet && typeof bullet === 'string' && bullet.trim()) {
+                    addCoreBullet(chatId, field, bullet.trim());
+                    hadUpdates = true;
+                }
+            }
+        }
+    }
+
+    for (const field of mysteryFields) {
+        const bullets = nbUpdates[field];
+        if (Array.isArray(bullets) && bullets.length > 0) {
+            for (const bullet of bullets) {
+                if (bullet && typeof bullet === 'string' && bullet.trim()) {
+                    addMysteryBullet(chatId, field, bullet.trim());
+                    hadUpdates = true;
+                }
+            }
+        }
+    }
+
+    // ── Apply world condition updates ─────────────────────────────────────
+    const condUpdates = result.conditionUpdates || {};
+    for (const [condName, content] of Object.entries(condUpdates)) {
+        if (content && typeof content === 'string' && content.trim() &&
+            ['political', 'social', 'spiritual', 'environmental'].includes(condName)) {
+            updateConditionContent(chatId, condName, content.trim());
+            hadUpdates = true;
+            console.log(`[NWST Scanner] Updated world condition: ${condName}`);
+        }
+    }
+
+    // ── Apply community summary updates ───────────────────────────────────
+    const comUpdates = result.communityUpdates || [];
+    const existingCommunities = getAllCommunities(chatId);
+
+    for (const update of comUpdates) {
+        if (!update.name || !update.summary) continue;
+        const existing = existingCommunities.find(c => c.name.toLowerCase() === update.name.toLowerCase());
+        if (existing) {
+            updateCommunitySummary(chatId, existing.id, update.summary.trim());
+        } else {
+            // New community detected — create it
+            addCommunity(chatId, {
+                name: update.name,
+                members: update.members || '',
+                summary: update.summary.trim()
+            });
+        }
+        hadUpdates = true;
+        console.log(`[NWST Scanner] Updated community: ${update.name}`);
+    }
+
+    // ── Store detected NPC events for user review ─────────────────────────
+    // These are proposed, NOT auto-committed — stored as pendingEvents for UI review
+    const detectedEvents = result.detectedNPCEvents || [];
+    if (detectedEvents.length > 0) {
+        // Store proposed events in a staging area for UI review
+        // The UI will display these with approve/dismiss options
+        try {
+            const { chatMetadata, saveMetadata } = SillyTavern.getContext();
+            const existing = chatMetadata['nwst:pendingEvents'] || [];
+            const existingTitles = new Set(existing.map(e => e.title?.toLowerCase().trim()));
+            for (const ev of detectedEvents) {
+                if (ev.title && ev.description && !existingTitles.has(ev.title.toLowerCase().trim())) {
+                    existing.push({
+                        ...ev,
+                        id: `pending_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                        isNPC: true,
+                        npcOrigin: 'detected',
+                        origin: 'detected',
+                        status: 'pending',
+                        proposedAt: Date.now()
+                    });
+                    existingTitles.add(ev.title.toLowerCase().trim());
+                }
+            }
+            chatMetadata['nwst:pendingEvents'] = existing;
+            await saveMetadata();
+            hadUpdates = true;
+            console.log(`[NWST Scanner] ${detectedEvents.length} NPC event(s) proposed for review.`);
+        } catch (e) {
+            console.error('[NWST Scanner] Failed to store pending events:', e);
+        }
+    }
 
     return hadUpdates;
+}
+
+// ── Community synthesis (dedicated richer pass) ───────────────────────────
+
+/**
+ * Run a dedicated community synthesis pass using the richer community prompt.
+ * This produces higher-quality community summaries than the inline scanner update.
+ * Call this from the batch scan or manually when communities need deep analysis.
+ *
+ * @param {string} chatId
+ * @param {object[]} messages - Messages to analyze
+ * @returns {Promise<boolean>} True if communities were updated
+ */
+export async function synthesizeCommunities(chatId, messages) {
+    try {
+        const profile = resolveProfile('planningLLM');
+        if (!profile) return false;
+
+        const existingCommunities = getAllCommunities(chatId);
+        const notebook = getNotebook(chatId);
+        const settingContext = getSettingContext(chatId);
+
+        let userPrompt = '';
+
+        // Provide full message history for community analysis
+        userPrompt += `=== CHAT MESSAGES ===\n`;
+        for (const msg of messages) {
+            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            userPrompt += `[${sender}]: ${msg.mes}\n`;
+        }
+        userPrompt += '\n';
+
+        if (settingContext) {
+            userPrompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
+        }
+
+        if (existingCommunities.length > 0) {
+            userPrompt += `=== EXISTING COMMUNITIES (update or add as needed) ===\n`;
+            for (const com of existingCommunities) {
+                userPrompt += `${com.name}: ${com.summary || '(no summary)'}\n`;
+            }
+            userPrompt += '\n';
+        }
+
+        // Key notebook facts for community analysis
+        const facts = notebook?.mystery?.establishedFacts || [];
+        if (facts.length > 0) {
+            userPrompt += `=== ESTABLISHED FACTS ===\n${facts.map(f => `  - ${f}`).join('\n')}\n\n`;
+        }
+
+        userPrompt += `Analyze the character interactions and produce rich, analytical community summaries. Identify social groupings, power dynamics, unspoken tensions, and what is really happening beneath the surface.`;
+
+        const llmMessages = [
+            { role: 'system', content: COMMUNITY_SYNTHESIS_PROMPT },
+            { role: 'user', content: userPrompt }
+        ];
+
+        const response = await generateWithProfile(profile, llmMessages);
+        if (!response) return false;
+
+        // Parse response
+        let jsonStr = response.trim();
+        const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (fenceMatch) jsonStr = fenceMatch[1].trim();
+        const arrMatch = jsonStr.match(/\[[\s\S]*\]/);
+        if (arrMatch) jsonStr = arrMatch[0];
+
+        const communities = JSON.parse(jsonStr);
+        if (!Array.isArray(communities)) return false;
+
+        const existingList = getAllCommunities(chatId);
+        for (const com of communities) {
+            if (!com.name || !com.summary) continue;
+            const existing = existingList.find(c => c.name.toLowerCase() === com.name.toLowerCase());
+            if (existing) {
+                updateCommunitySummary(chatId, existing.id, com.summary.trim());
+            } else {
+                addCommunity(chatId, {
+                    name: com.name,
+                    members: com.members || '',
+                    summary: com.summary.trim()
+                });
+            }
+        }
+
+        return true;
+
+    } catch (err) {
+        console.error('[NWST Scanner] Community synthesis failed:', err);
+        return false;
+    }
 }
