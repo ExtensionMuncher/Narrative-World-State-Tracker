@@ -131,12 +131,65 @@ function showPlaceholder(tabName, message) {
     }
 }
 
+// ── Popout (⛶) handler ────────────────────────────────────────────────────
+
+/**
+ * Wire popout buttons that use the data-for attribute.
+ * When clicked, opens ST's callGenericPopup with a textarea containing
+ * the target element's current value. On save, writes back.
+ */
+function wirePopoutHandler() {
+    $(document).on('click', '.nwst-expand-btn', async function () {
+        const targetId = $(this).data('for');
+        if (!targetId) return;
+
+        const targetEl = document.getElementById(targetId);
+        if (!targetEl) return;
+
+        const currentValue = targetEl.value || targetEl.textContent || '';
+        const label = $(this).attr('title') || 'Edit content';
+
+        const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+
+        const formHtml = `
+            <div style="padding:10px;min-width:400px;min-height:300px">
+                <label style="display:block;font-size:12px;margin-bottom:6px;color:#999">${label}</label>
+                <textarea class="text_pole" style="width:100%;min-height:250px;resize:vertical">${currentValue.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>')}</textarea>
+            </div>
+        `;
+
+        const result = await callGenericPopup(formHtml, POPUP_TYPE.TEXT, '', {
+            okButton: 'Save',
+            cancelButton: 'Cancel',
+        });
+
+        if (result) {
+            // Read the value from the popup's textarea
+            const popupTextarea = document.querySelector('.nwst-popout-overlay textarea, .popup textarea');
+            if (popupTextarea) {
+                const newValue = popupTextarea.value;
+                if (targetEl.tagName === 'TEXTAREA' || targetEl.tagName === 'INPUT') {
+                    targetEl.value = newValue;
+                    // Trigger input/change event so any listeners fire
+                    targetEl.dispatchEvent(new Event('input', { bubbles: true }));
+                    targetEl.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                    targetEl.textContent = newValue;
+                }
+            }
+        }
+    });
+}
+
 // ── Initial build of tabs that should appear immediately ──────────────────
 
 /**
  * Build all tabs that are ready. Called after panel mount.
  */
 export function initializeTabs() {
+    // Wire popout handler
+    wirePopoutHandler();
+
     // Build Home and Settings tabs immediately (they're ready)
     buildTab('home');
     builtTabs.home = true;

@@ -13,7 +13,7 @@
 //     pattern — this is how the extension appears in the dropdown menu.
 //   • Chat change detection uses ST's native CHAT_CHANGED event — NOT polling.
 //   • Settings stored in extensionSettings (global prefs, not per-chat).
-//   • Per-chat narrative data stored in chatMetadata (namespaced under nwst:).
+//   • Per-chat narrative data stored in extensionSettings.nwst.chatData (namespaced under chatId).
 //
 // ── DATA STORAGE SPLIT ────────────────────────────────────────────────────
 //
@@ -24,7 +24,7 @@
 //     • injection settings
 //     • plannerPrompt
 //
-//   PER-CHAT (chatMetadata — namespaced under nwst:${key}):
+//   PER-CHAT (extensionSettings.nwst.chatData[chatId]):
 //     • settingContext       — world climate/geography description
 //     • worldState           — currentDay, forecast, moonPhases, conditions
 //     • events               — all event objects
@@ -279,21 +279,56 @@ function wireTabSwitching() {
 
 /**
  * Wire the enable/disable toggle on the Home tab.
+ * Manages scanner lifecycle plus consistency check cadence.
  */
 function wireEnableToggle() {
-    $(document).on('change', '#nwst-enable-toggle', function () {
+    $(document).on('change', '#nwst-enable-toggle', async function () {
         const enabled = $(this).prop('checked');
         setSetting('enabled', enabled);
         updateStatusLabel();
-        debug(`Extension ${enabled ? 'enabled' : 'disabled'}.`);
+
+        if (enabled) {
+            debug('Extension enabled — starting scanner.');
+            const { startScanner } = await import('./llm/scanner.js');
+            startScanner();
+        } else {
+            debug('Extension disabled — stopping scanner.');
+            const { stopScanner } = await import('./llm/scanner.js');
+            stopScanner();
+        }
+
+        // Update prompt injection to reflect new state (clear or show)
+        try {
+            const { updateInjection } = await import('./inject/promptInjector.js');
+            updateInjection();
+        } catch (err) {
+            // Non-fatal — injection may not be registered yet
+        }
     });
 
-    $(document).on('click', '#nwst-pause-btn', function () {
+    $(document).on('click', '#nwst-pause-btn', async function () {
         const currentlyPaused = getSetting('scanPaused');
         setSetting('scanPaused', !currentlyPaused);
         updatePauseButton();
         updateStatusLabel();
-        debug(`Scanning ${!currentlyPaused ? 'paused' : 'resumed'}.`);
+
+        if (getSetting('scanPaused')) {
+            debug('Scanning paused — stopping scanner.');
+            const { stopScanner } = await import('./llm/scanner.js');
+            stopScanner();
+        } else {
+            debug('Scanning resumed — starting scanner.');
+            const { startScanner } = await import('./llm/scanner.js');
+            startScanner();
+        }
+
+        // Update prompt injection to reflect paused state (world state only, no secrets)
+        try {
+            const { updateInjection } = await import('./inject/promptInjector.js');
+            updateInjection();
+        } catch (err) {
+            // Non-fatal — injection may not be registered yet
+        }
     });
 }
 
@@ -363,6 +398,13 @@ function onChatChanged() {
         window.nwstRefreshAllUI();
     }
 
+    // Restart scanner for the new chat (if extension is enabled and not paused)
+    if (getSetting('enabled') && !getSetting('scanPaused')) {
+        import('./llm/scanner.js').then(({ restartScanner }) => {
+            restartScanner();
+        });
+    }
+
     debug('Chat metadata available:', !!chatMetadata);
 }
 
@@ -413,6 +455,29 @@ async function init() {
     // 5. Set initial UI state based on loaded settings
     updateStatusLabel();
     updatePauseButton();
+
+    // 6. Register prompt injection with ST's extension prompt system
+    //     This ensures the world state block is injected into every LLM prompt.
+    try {
+        const { registerPromptInjection } = await import('./inject/promptInjector.js');
+        registerPromptInjection();
+        log('Prompt injection registered.');
+    } catch (err) {
+        console.warn('[NWST] Failed to register prompt injection:', err);
+    }
+
+    // 7. Start background scanner if extension is enabled
+    if (getSetting('enabled') && !getSetting('scanPaused')) {
+        try {
+            const { startScanner } = await import('./llm/scanner.js');
+            startScanner();
+            log('Background scanner started.');
+        } catch (err) {
+            console.warn('[NWST] Failed to start scanner:', err);
+        }
+    } else {
+        log('Scanner not started (disabled or paused).');
+    }
 
     log('NWST initialization complete. ✅');
     log('───────────────────────────────────────────');

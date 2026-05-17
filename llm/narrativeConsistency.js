@@ -28,6 +28,7 @@
 import { getChatId, nwstToast } from '../index.js';
 import { getNotebook, getAllSecrets, addMysteryBullet, getMysteryField } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
+import { isEnabled, isPaused } from '../settings.js';
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -80,6 +81,10 @@ If no violations:
  * @returns {string} Injection text for active secrets, or empty string
  */
 export function getSelectiveSecretInjection(chatId) {
+    // Respect pause/disable state — secrets are sensitive info
+    if (!isEnabled()) return '';
+    if (isPaused()) return '';
+
     if (!chatId) chatId = getChatId();
     if (!chatId) return '';
 

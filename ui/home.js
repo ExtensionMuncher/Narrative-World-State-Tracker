@@ -31,6 +31,9 @@ import {
     replaceCurrentDay
 } from '../data/worldState.js';
 import { getEventsGroupedByTier } from '../data/events.js';
+import { advanceToNextDay, restorePreviousDay } from '../llm/dayAdvancement.js';
+import { executeTimeSkip } from '../llm/timeskip.js';
+import { synthesizeCurrentDay } from '../llm/currentDaySynth.js';
 
 // ── Build the Home tab HTML ───────────────────────────────────────────────
 
@@ -142,16 +145,18 @@ function wireHomeEvents() {
     // ── Previous Day ───────────────────────────────────────────
     const prevDayBtn = document.getElementById('nwst-prev-day-btn');
     if (prevDayBtn) {
-        prevDayBtn.addEventListener('click', () => {
-            nwstToast('Previous Day will be available in a future update (restores snapshot).', 'info');
+        prevDayBtn.addEventListener('click', async () => {
+            await restorePreviousDay();
+            refreshHomeUI();
         });
     }
 
     // ── Next Day ───────────────────────────────────────────────
     const nextDayBtn = document.getElementById('nwst-next-day-btn');
     if (nextDayBtn) {
-        nextDayBtn.addEventListener('click', () => {
-            nwstToast('Next Day will be available in a future update (calls Day Advancement LLM).', 'info');
+        nextDayBtn.addEventListener('click', async () => {
+            await advanceToNextDay();
+            refreshHomeUI();
         });
     }
 
@@ -175,14 +180,15 @@ function wireHomeEvents() {
     // ── Time skip Jump button ──────────────────────────────────
     const jumpBtn = document.getElementById('nwst-timeskip-jump');
     if (jumpBtn) {
-        jumpBtn.addEventListener('click', () => {
+        jumpBtn.addEventListener('click', async () => {
             const input = document.getElementById('nwst-timeskip-input');
             const skipDesc = input ? input.value.trim() : '';
             if (!skipDesc) {
                 nwstToast('Enter a description of the time skip first.', 'warning');
                 return;
             }
-            nwstToast('Time skip will be available in a future update.', 'info');
+            await executeTimeSkip(skipDesc);
+            refreshHomeUI();
         });
     }
 
@@ -209,8 +215,9 @@ function wireHomeEvents() {
     // ── Forecast Regen button ──────────────────────────────────
     const forecastRegen = document.getElementById('nwst-forecast-regen');
     if (forecastRegen) {
-        forecastRegen.addEventListener('click', () => {
-            nwstToast('Forecast regeneration will be available in a future update.', 'info');
+        forecastRegen.addEventListener('click', async () => {
+            await synthesizeCurrentDay();
+            refreshHomeUI();
         });
     }
 

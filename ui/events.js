@@ -18,6 +18,7 @@ import {
     addEvent, updateEvent, deleteEvent, setEventStatus,
     getEventsGroupedByTier
 } from '../data/events.js';
+import { regenerateAllEvents, regenerateTierEvents } from '../llm/eventGen.js';
 
 // ── Build the Events tab HTML ─────────────────────────────────────────────
 
@@ -198,16 +199,18 @@ function wireEventItemEvents() {
     // ── Regenerate All button ─────────────────────────────────
     const regenAllBtn = document.getElementById('nwst-events-regenAll');
     if (regenAllBtn) {
-        regenAllBtn.onclick = () => {
-            nwstToast('Regenerate all will be available in a future update.', 'info');
+        regenAllBtn.onclick = async () => {
+            await regenerateAllEvents();
+            refreshEventsUI();
         };
     }
 
     // ── Tier Regen buttons ────────────────────────────────────
     container.querySelectorAll('.nwst-events-tier-regen').forEach(btn => {
-        btn.onclick = () => {
+        btn.onclick = async () => {
             const tier = btn.getAttribute('data-tier');
-            nwstToast(`Regenerate ${tier} events will be available in a future update.`, 'info');
+            await regenerateTierEvents(tier);
+            refreshEventsUI();
         };
     });
 

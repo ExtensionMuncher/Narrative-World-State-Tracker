@@ -19,6 +19,7 @@ import { getActiveEvents, addEvent } from '../data/events.js';
 import { getNotebook, addCoreBullet, addMysteryBullet } from '../data/notebook.js';
 import { getAllCommunities, updateCommunitySummary } from '../data/communities.js';
 import { resolveProfile } from './connections.js';
+import { runConsistencyCheck } from './narrativeConsistency.js';
 
 // ── Scanner state ─────────────────────────────────────────────────────────
 
@@ -180,6 +181,10 @@ async function runScan() {
                 window.nwstRefreshAllUI();
             }
         }
+
+        // Run narrative consistency check after each scan
+        // This reviews recent chat for knowledge violations against secret whoKnows/whoDoesNotKnow lists
+        await runConsistencyCheck();
 
         console.log('[NWST Scanner] Scan complete.');
 

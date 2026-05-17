@@ -28,6 +28,7 @@ import {
 import { getSettingContext, saveSettingContext } from '../data/worldState.js';
 import { getChatId, nwstToast } from '../index.js';
 import { download } from '../../../../utils.js';
+import { runBatchScan } from '../llm/batchScan.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
 
@@ -367,10 +368,8 @@ function wireSettingsEvents() {
     // ── Batch scan ───────────────────────────────────────────────
     const batchScanBtn = document.getElementById('nwst-setting-batchScan');
     if (batchScanBtn) {
-        batchScanBtn.addEventListener('click', () => {
-            // This will be wired to llm/batchScan.js in Phase 14
-            // For now, show a placeholder message
-            nwstToast('Batch scan will be available in a future update.', 'info');
+        batchScanBtn.addEventListener('click', async () => {
+            await runBatchScan();
         });
     }
 

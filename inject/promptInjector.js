@@ -13,7 +13,7 @@
 //   • Selective secret blocks (from narrativeConsistency.js)
 //
 // What NEVER gets injected:
-//   • Notebook contents
+//   • Notebook contents (bullets, core fields, mystery fields)
 //   • Community summaries
 //   • Secrets (except selective blocks from narrativeConsistency.js)
 // =============================================================================
@@ -24,16 +24,13 @@ import { getActiveEvents, getEventsGroupedByTier } from '../data/events.js';
 import {
     isInjectCurrentDay, isInjectEvents, isInjectWorldConditions,
     getInjectionPlacement, getInjectionDepth, getInjectionDepthRole,
-    isEnabled
+    isEnabled, isPaused
 } from '../settings.js';
 import { getChatId } from '../index.js';
 // Selective secret injection runs on EVERY message — no API call needed.
 // It checks which characters are in the current scene and injects only
 // the secrets whose whoKnows characters are scene-present.
 import { getSelectiveSecretInjection } from '../llm/narrativeConsistency.js';
-
-// We'll be called by ST's generate_interceptor or through extension_prompt_types
-// See manifest.json for the generate_interceptor registration
 
 // ── Build the injection block ─────────────────────────────────────────────
 
@@ -184,19 +181,111 @@ function buildConditionsBlock(conditions) {
 
 // ── ST Integration ────────────────────────────────────────────────────────
 
+// ── ST injection key ────────────────────────────────────────────────────────
+
+const INJECTION_KEY = 'nwst_world_state';
+
+// ── Pause/disable aware injection builder ──────────────────────────────────
+
+/**
+ * Build the injection block respecting pause and disable state.
+ * - Disabled: returns empty (nothing injected)
+ * - Paused: returns world state only (no secret injection)
+ * - Active: returns full block including selective secrets
+ *
+ * @param {string} chatId
+ * @returns {string}
+ */
+function buildInjectionBlockWithState(chatId) {
+    if (!isEnabled()) return '';
+
+    // When paused, build world state only (no secrets)
+    if (isPaused()) {
+        const parts = [];
+
+        if (isInjectCurrentDay()) {
+            const day = getCurrentDay(chatId);
+            const dayBlock = buildCurrentDayBlock(day, chatId);
+            if (dayBlock) parts.push(dayBlock);
+
+            const forecast = getForecast(chatId);
+            const moonPhases = getMoonPhases(chatId);
+            const weatherBlock = buildWeatherBlock(forecast, moonPhases);
+            if (weatherBlock) parts.push(weatherBlock);
+        }
+
+        if (isInjectEvents()) {
+            const events = getActiveEvents(chatId);
+            const eventsBlock = buildEventsBlock(events);
+            if (eventsBlock) parts.push(eventsBlock);
+        }
+
+        if (isInjectWorldConditions()) {
+            const conditions = getEnabledConditions(chatId);
+            const conditionsBlock = buildConditionsBlock(conditions);
+            if (conditionsBlock) parts.push(conditionsBlock);
+        }
+
+        if (parts.length === 0) return '';
+        return `\n[WORLD STATE]\n${parts.join('\n')}\n[/WORLD STATE]\n`;
+    }
+
+    // Active — use the full injection block including secrets
+    return buildInjectionBlock(chatId);
+}
+
+/**
+ * Update the ST extension prompt with the current world state block.
+ * Called on every message to keep the injection fresh.
+ */
+export function updateInjection() {
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const config = getInjectionConfig();
+    if (!config) {
+        // Extension disabled — clear the injection
+        const { setExtensionPrompt, extension_prompt_roles } = SillyTavern.getContext();
+        setExtensionPrompt(INJECTION_KEY, '', 0, 0, false, extension_prompt_roles.SYSTEM);
+        return;
+    }
+
+    const { setExtensionPrompt, extension_prompt_roles } = SillyTavern.getContext();
+    setExtensionPrompt(
+        INJECTION_KEY,
+        config.content,
+        config.position,
+        config.depth || 0,
+        false, // scan: don't scan for WI in our injection
+        config.role || extension_prompt_roles.SYSTEM
+    );
+}
+
 /**
  * Register the prompt injection with ST's native prompt system.
  * Called during extension initialization.
  *
+ * Uses ST's setExtensionPrompt API to inject the world state block
+ * on every message. The injection content is rebuilt on each
+ * MESSAGE_SENT/MESSAGE_RECEIVED event to stay current.
+ *
  * ST provides several injection mechanisms:
- * - extension_prompt_types.IN_PROMPT (before/after main prompt)
- * - extension_prompt_types.AFTER_CHAR (after character definition)
- * - extension_prompt_types.AUTHOR_NOTE (in author's note)
- * - At depth (injects at a specific message depth)
+ * - extension_prompt_types.IN_PROMPT (before/after main prompt) — position 0
+ * - extension_prompt_types.IN_CHAT (at a specific depth) — position 1
+ * - extension_prompt_types.BEFORE_PROMPT (before the entire prompt) — position 2
  */
 export function registerPromptInjection() {
-    // The actual injection is configured in index.js using ST's settings
-    // This function validates the configuration and sets up the injection hook.
+    const { eventSource, event_types } = SillyTavern.getContext();
+
+    // Update injection on every message event
+    eventSource.on(event_types.MESSAGE_SENT, () => updateInjection());
+    eventSource.on(event_types.MESSAGE_RECEIVED, () => updateInjection());
+
+    // Also update on chat changed (switched to a different chat)
+    eventSource.on(event_types.CHAT_CHANGED, () => updateInjection());
+
+    // Initial injection
+    updateInjection();
 
     console.log('[NWST PromptInjector] Prompt injection registered.');
     console.log(`  - Inject Current Day: ${isInjectCurrentDay()}`);
@@ -220,36 +309,39 @@ export function getInjectionConfig() {
 
     const placement = getInjectionPlacement();
     const chatId = getChatId();
-    const content = buildInjectionBlock(chatId);
+    const content = buildInjectionBlockWithState(chatId);
 
     if (!content) return null;
 
     // Map our placement strings to ST's extension_prompt_types values
-    // These will be verified during integration testing
     const config = {
         content: content
     };
 
     switch (placement) {
         case 'before_main':
-            config.position = 0; // extension_prompt_types.IN_PROMPT (before)
+            config.position = 2; // extension_prompt_types.BEFORE_PROMPT
             break;
         case 'after_main':
-            config.position = 1; // extension_prompt_types.IN_PROMPT (after)
+            config.position = 0; // extension_prompt_types.IN_PROMPT
             break;
         case 'top_an':
-            config.position = 2; // extension_prompt_types.AUTHOR_NOTE (top)
+            config.position = 1; // extension_prompt_types.IN_CHAT (top of chat, depth 0)
+            config.depth = 0;
+            config.role = 'system';
             break;
         case 'bottom_an':
-            config.position = 3; // extension_prompt_types.AUTHOR_NOTE (bottom)
+            config.position = 1; // extension_prompt_types.IN_CHAT (bottom)
+            config.depth = 999;
+            config.role = 'system';
             break;
         case 'at_depth':
-            config.position = 4; // At depth
+            config.position = 1; // extension_prompt_types.IN_CHAT
             config.depth = getInjectionDepth();
             config.role = getInjectionDepthRole();
             break;
         default:
-            config.position = 0;
+            config.position = 0; // extension_prompt_types.IN_PROMPT
     }
 
     return config;
