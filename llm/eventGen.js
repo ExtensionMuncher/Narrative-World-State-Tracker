@@ -399,6 +399,7 @@ function buildEventGenPrompt(context, tier) {
     prompt += `  2. World events should feel like organic world rhythms, not extractions from chat text\n`;
     prompt += `  3. Consider: seasonal festivals, cultural practices, environmental shifts, political rhythms\n`;
     prompt += `  4. Forward-facing only. Respond with valid JSON array only.\n`;
+    prompt += `  5. CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the USER CHARACTER's personal or mundane actions (getting coffee, leaving their desk, daily routines, etc.) unless the story narrative explicitly establishes them as plot-relevant. Events must describe what the WORLD and NPCs are doing, what natural/societal forces are unfolding, and what plot hooks exist — NOT what the user character will do.\n`;
 
     return prompt;
 }

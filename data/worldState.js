@@ -27,7 +27,8 @@ import {
     setChatData,
     deleteChatData,
     DEFAULT_WORLD_STATE,
-    DEFAULT_SEASON_CONFIG
+    DEFAULT_SEASON_CONFIG,
+    DEFAULT_CALENDAR_CONFIG
 } from './storage.js';
 
 // ── Current Day ───────────────────────────────────────────────────────────
@@ -263,6 +264,43 @@ export function saveSeasonConfig(chatId, config) {
     setChatData(chatId, 'seasonConfig', config);
 }
 
+// ── Calendar Configuration ────────────────────────────────────────────────
+
+/**
+ * Get the calendar configuration for a chat.
+ * Controls custom month names and day counts per month (Experimental).
+ * @param {string} chatId
+ * @returns {object} Calendar config { enabled, months, monthNames, monthDays }
+ */
+export function getCalendarConfig(chatId) {
+    const stored = getChatData(chatId, 'calendarConfig');
+    if (stored && typeof stored === 'object') {
+        return {
+            enabled: stored.enabled || false,
+            months: stored.months || 12,
+            monthNames: Array.isArray(stored.monthNames) && stored.monthNames.length > 0
+                ? stored.monthNames
+                : [...DEFAULT_CALENDAR_CONFIG.monthNames],
+            monthDays: Array.isArray(stored.monthDays) && stored.monthDays.length > 0
+                ? stored.monthDays
+                : [...DEFAULT_CALENDAR_CONFIG.monthDays],
+            weekDays: Array.isArray(stored.weekDays) && stored.weekDays.length > 0
+                ? stored.weekDays
+                : [...DEFAULT_CALENDAR_CONFIG.weekDays]
+        };
+    }
+    return { ...DEFAULT_CALENDAR_CONFIG, monthNames: [...DEFAULT_CALENDAR_CONFIG.monthNames], monthDays: [...DEFAULT_CALENDAR_CONFIG.monthDays], weekDays: [...DEFAULT_CALENDAR_CONFIG.weekDays] };
+}
+
+/**
+ * Save the calendar configuration for a chat.
+ * @param {string} chatId
+ * @param {object} config - Calendar config object { enabled, months, monthNames, monthDays }
+ */
+export function saveCalendarConfig(chatId, config) {
+    setChatData(chatId, 'calendarConfig', config);
+}
+
 // ── Snapshots ─────────────────────────────────────────────────────────────
 
 /**
@@ -286,9 +324,14 @@ export function getSnapshots(chatId) {
  */
 export function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsSnapshot, notebookSnapshot) {
     const snapshots = getSnapshots(chatId);
+    // Handle both range keys ("123-456") and non-range keys ("day_1234567890", "batch_scan")
+    const parts = rangeKey.split('-');
+    const parsedStart = parts.length >= 2 ? parseInt(parts[0], 10) : NaN;
+    const parsedEnd = parts.length >= 2 ? parseInt(parts[1], 10) : NaN;
     snapshots[rangeKey] = {
-        messageRangeStart: parseInt(rangeKey.split('-')[0], 10),
-        messageRangeEnd: parseInt(rangeKey.split('-')[1], 10),
+        // For non-range keys, use Date.now() as sortable fallback so getLatestSnapshot() works correctly
+        messageRangeStart: isNaN(parsedStart) ? 0 : parsedStart,
+        messageRangeEnd: isNaN(parsedEnd) ? Date.now() : parsedEnd,
         worldStateSnapshot,
         eventsSnapshot,
         notebookSnapshot
@@ -307,8 +350,19 @@ export function getLatestSnapshot(chatId) {
     const keys = Object.keys(snapshots);
     if (keys.length === 0) return null;
 
-    // Sort by messageRangeEnd descending
-    keys.sort((a, b) => snapshots[b].messageRangeEnd - snapshots[a].messageRangeEnd);
+    // Sort by messageRangeEnd descending, handling NaN values safely
+    // Non-range keys (e.g. "day_1234567890") store Date.now() as messageRangeEnd,
+    // so they sort correctly. This protects against any legacy snapshots with NaN.
+    keys.sort((a, b) => {
+        const endA = snapshots[a].messageRangeEnd;
+        const endB = snapshots[b].messageRangeEnd;
+        const validA = typeof endA === 'number' && !isNaN(endA);
+        const validB = typeof endB === 'number' && !isNaN(endB);
+        if (!validA && !validB) return 0;
+        if (!validA) return 1;  // NaN sorts after valid numbers
+        if (!validB) return -1;
+        return endB - endA;
+    });
     return snapshots[keys[0]];
 }
 

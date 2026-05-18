@@ -17,7 +17,7 @@ import { getChatId, nwstToast, getSetting } from '../index.js';
 import { getSettingContext, getCurrentDay, replaceCurrentDay, updateCurrentDay,
          getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
          saveSnapshot, getLatestSnapshot, getWorldState,
-         getSeasonConfig } from '../data/worldState.js';
+         getSeasonConfig, getCalendarConfig } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
@@ -112,7 +112,20 @@ export function getMoonPhaseForAngle(angle) {
  * @param {number} [startOffset=0] - Day offset from anchor for the first entry
  * @returns {Array<{label: string, icon: string, phaseName: string}>}
  */
-export function generateMoonPhases(anchorAngle, numDays = 7, startOffset = 0) {
+/**
+ * Generate moon phase entries for a range of days, optionally computing phenomena.
+ * When phenomenaOptions is provided, phenomena are computed at generation time
+ * and stored in the phase entries — this preserves them across day advancements
+ * instead of recomputing them fresh at display time (which causes them to change).
+ *
+ * @param {number} anchorAngle - Starting lunar angle in degrees
+ * @param {number} [numDays=7] - Number of days to generate
+ * @param {number} [startOffset=0] - Day offset from anchor
+ * @param {object|null} [phenomenaOptions=null] - If provided, compute phenomena:
+ *   { season, weatherToday, cycleDays }
+ * @returns {object[]} Array of { label, icon, phaseName, phenomena? }
+ */
+export function generateMoonPhases(anchorAngle, numDays = 7, startOffset = 0, phenomenaOptions = null) {
     const labels = ['Today', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Day 7'];
     const degPerDay = getDegreesPerDay();
     const phases = [];
@@ -120,11 +133,20 @@ export function generateMoonPhases(anchorAngle, numDays = 7, startOffset = 0) {
     for (let i = 0; i < numDays; i++) {
         const angle = anchorAngle + (startOffset + i) * degPerDay;
         const { phaseName, icon } = getMoonPhaseForAngle(angle);
-        phases.push({
+        const entry = {
             label: labels[i] || `Day ${i + 1}`,
             icon,
             phaseName
-        });
+        };
+
+        // Compute and STORE phenomena at generation time so they persist
+        // across re-renders and day advancements.
+        if (phenomenaOptions) {
+            const cycleDays = phenomenaOptions.cycleDays || 29.53;
+            entry.phenomena = getMoonPhenomena(angle, i, cycleDays, phenomenaOptions);
+        }
+
+        phases.push(entry);
     }
 
     return phases;
@@ -359,12 +381,18 @@ export function getMoonPhenomena(angle, dayIndex, cycleDays, options = {}) {
         }
 
         // ── Seasonal Full Moon naming ─────────────────────────────
-        // Harvest Moon = Full Moon in autumn; Hunter Moon = subsequent one
-        // Since we generate 7-day strips without tracking equinoxes, we use
-        // a heuristic: if season suggests autumn, assign Harvest or Hunter.
+        // Harvest Moon = Full Moon closest to autumn equinox (September).
+        // Hunter Moon = next Full Moon after Harvest (October).
+        // They are one FULL MOON CYCLE (~29 days) apart, NOT per-day.
+        // CRITICAL: Use lunar month window (angle/30 = 12 segments of 30°),
+        // NOT per-dayIndex seeding. This prevents alternating Harvest/Hunter
+        // when a Full Moon spans multiple days in the 7-day strip.
         const season = (options.season || '').toLowerCase();
         if (season.includes('autumn') || season.includes('fall')) {
-            const seasonSeed = (Math.abs(angle * 41 + dayIndex * 43) % 100) / 100;
+            // Group by 30° lunar month segments — all days in the same segment
+            // get the SAME seasonal full moon name. No more day-to-day alternation.
+            const lunarMonthIndex = Math.floor(angle / 30);
+            const seasonSeed = (Math.abs(lunarMonthIndex * 41) % 100) / 100;
             if (seasonSeed < 0.5) {
                 phenomena.push('🌾 Harvest Moon');
             } else {
@@ -439,7 +467,15 @@ export function setMoonPhaseAnchor(chatId, phaseName) {
     const angle = getPhaseAngle(phaseName);
     setLunarAngle(chatId, angle);
 
-    const newMoonPhases = generateMoonPhases(angle, 7, 0);
+    // Compute phenomena in context of the current day
+    const day = getCurrentDay(chatId);
+    const cycleDays = getSetting('moonCycleDays') || 29.53;
+    const phenOptions = {
+        season: day?.season || '',
+        weatherToday: day?.weatherToday || '',
+        cycleDays
+    };
+    const newMoonPhases = generateMoonPhases(angle, 7, 0, phenOptions);
     replaceMoonPhases(chatId, newMoonPhases);
 
     return true;
@@ -483,8 +519,15 @@ export function regenerateMoonPhasesFromDate(chatId, dateText) {
     const angle = computeLunarAngleFromDate(text);
     setLunarAngle(chatId, angle);
 
-    // Generate new phases from this position
-    const newMoonPhases = generateMoonPhases(angle, 7, 0);
+    // Generate new phases from this position (with phenomena computed at generation time)
+    const currentDay = getCurrentDay(chatId);
+    const cycleDays = getSetting('moonCycleDays') || 29.53;
+    const phenOptions = {
+        season: currentDay?.season || '',
+        weatherToday: currentDay?.weatherToday || '',
+        cycleDays
+    };
+    const newMoonPhases = generateMoonPhases(angle, 7, 0, phenOptions);
     replaceMoonPhases(chatId, newMoonPhases);
 
     const phaseName = getMoonPhaseForAngle(angle).phaseName;
@@ -652,7 +695,13 @@ export async function regenerateForecast(mode = 'all') {
             anchorAngle = ((anchorAngle % 360) + 360) % 360;
             setLunarAngle(chatId, anchorAngle);
 
-            const newMoonPhases = generateMoonPhases(anchorAngle, 7, 0);
+            const cycleDays = getSetting('moonCycleDays') || 29.53;
+            const phenOptions = {
+                season: currentDay?.season || '',
+                weatherToday: currentDay?.weatherToday || '',
+                cycleDays
+            };
+            const newMoonPhases = generateMoonPhases(anchorAngle, 7, 0, phenOptions);
             replaceMoonPhases(chatId, newMoonPhases);
         }
 
@@ -799,12 +848,59 @@ export async function advanceToNextDay() {
             // keep existing forecast (snapshot already saved above)
         }
 
-        // 7. Calculate moon phases programmatically
+        // 7. Calculate moon phases programmatically with stored phenomena
         //    Advance the stored lunar angle by one day's progression,
         //    then generate the new 7-day view from that position.
+        //    CRITICAL: Phenomena are NOW stored in the phase data (not computed at display time),
+        //    so they persist across day advancements instead of being randomly reassigned.
         const currentAngle = getLunarAngle(chatId);
         const newAngle = (currentAngle + getDegreesPerDay()) % 360;
-        const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
+
+        // Read old moon phases to carry forward overlapping phenomena
+        const oldMoonPhases = getMoonPhases(chatId);
+        const cycleDays = getSetting('moonCycleDays') || 29.53;
+
+        // Build phenomena options from current day context
+        const phenOptions = {
+            season: currentDay.season || '',
+            weatherToday: currentDay.weatherToday || '',
+            cycleDays
+        };
+
+        // ★ MIGRATION: Backfill phenomena for old phases that lack them.
+        //    This handles pre-fix data where moon phases were stored without a `phenomena` field.
+        //    Without this, carry-forward would find no phenomena to preserve.
+        if (oldMoonPhases && oldMoonPhases.length > 0) {
+            const degPerDay = getDegreesPerDay();
+            oldMoonPhases.forEach((phase, idx) => {
+                if (!phase.phenomena || !Array.isArray(phase.phenomena)) {
+                    const phaseAngle = (currentAngle + idx * degPerDay) % 360;
+                    phase.phenomena = getMoonPhenomena(phaseAngle, idx, cycleDays, phenOptions);
+                }
+            });
+        }
+
+        const newMoonPhases = generateMoonPhases(newAngle, 7, 0, phenOptions);
+
+        // Carry forward phenomena for overlapping days:
+        //   new Today (idx 0) ← old Day 2 (idx 1) phenomena
+        //   new Day 2  (idx 1) ← old Day 3 (idx 2) phenomena
+        //   ...
+        //   new Day 6  (idx 5) ← old Day 7 (idx 6) phenomena
+        //   new Day 7  (idx 6) — NO overlap, keeps freshly computed phenomena
+        if (oldMoonPhases && oldMoonPhases.length >= 2) {
+            const carryCount = Math.min(6, oldMoonPhases.length - 1);
+            for (let i = 0; i < carryCount; i++) {
+                const oldPhase = oldMoonPhases[i + 1];
+                const newPhase = newMoonPhases[i];
+                if (oldPhase && newPhase && oldPhase.phenomena && Array.isArray(oldPhase.phenomena)) {
+                    // Preserve the old phenomena so Moonbows, Blood Moons, etc.
+                    // don't get randomly reassigned on day advancement.
+                    newPhase.phenomena = [...oldPhase.phenomena];
+                }
+            }
+        }
+
         replaceMoonPhases(chatId, newMoonPhases);
         setLunarAngle(chatId, newAngle);
 
@@ -903,6 +999,16 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast, compute
         prompt += `Setting Context (world climate/geography):\n${settingContext}\n\n`;
     }
 
+    // Inject calendar config (months + week days) if configured
+    const calConfig = getCalendarConfig(getChatId());
+    if (calConfig.enabled) {
+        const monthList = calConfig.monthNames.map((name, i) =>
+            `${name} (${calConfig.monthDays[i]} days)`
+        ).join(', ');
+        const dayList = calConfig.weekDays.join(', ');
+        prompt += `Calendar System:\n  Months (${calConfig.months} total): ${monthList}\n  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n  Use these month and day names when generating or displaying dates.\n\n`;
+    }
+
     prompt += `Current 7-Day Forecast:\n`;
     if (forecast.length > 0) {
         for (const day of forecast) {
@@ -934,6 +1040,16 @@ function buildForecastOnlyPrompt(currentDay, settingContext, forecast, computedS
 
     if (settingContext) {
         prompt += `Setting Context (world climate/geography):\n${settingContext}\n\n`;
+    }
+
+    // Inject calendar config (months + week days) if configured
+    const calConfig = getCalendarConfig(getChatId());
+    if (calConfig.enabled) {
+        const monthList = calConfig.monthNames.map((name, i) =>
+            `${name} (${calConfig.monthDays[i]} days)`
+        ).join(', ');
+        const dayList = calConfig.weekDays.join(', ');
+        prompt += `Calendar System:\n  Months (${calConfig.months} total): ${monthList}\n  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n  Use these month and day names when generating or displaying dates.\n\n`;
     }
 
     prompt += `Current 7-Day Forecast:\n`;

@@ -21,7 +21,7 @@ import { generateWithProfile } from './connections.js';
 
 import { getChatId, nwstToast } from '../index.js';
 import { chatHasData } from '../data/storage.js';
-import { getWorldState, saveSnapshot, getSettingContext } from '../data/worldState.js';
+import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig } from '../data/worldState.js';
 import { getAllEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
@@ -96,6 +96,7 @@ const BATCH_CHUNK_PROMPT = `You are analyzing a segment of a roleplay chat histo
 4. World conditions — political tensions, social dynamics, spiritual/supernatural elements, environmental state
 5. Key facts, unresolved threads, planted details, character whereabouts
 6. Character social groupings and dynamics
+7. World-level context separately — what the SETTING, CONDITIONS, SEASON, and WORLD imply for upcoming events (distinct from chat-detected events). Note seasonal shifts, political undercurrents, environmental changes that could generate events even if no one in the chat mentioned them.
 
 Accumulate your findings. If this is not the final chunk, do not produce final output yet — just summarize what you found in plain text for later synthesis.`;
 
@@ -335,13 +336,42 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
         prompt += `and contextual clues. Use the world's own calendar system and era naming conventions.\n\n`;
     }
 
+    // Inject calendar month names if configured
+    const calConfig = getCalendarConfig(getChatId());
+    if (calConfig.enabled) {
+        const monthList = calConfig.monthNames.map((name, i) =>
+            `${name} (${calConfig.monthDays[i]} days)`
+        ).join(', ');
+        const dayList = calConfig.weekDays.join(', ');
+        prompt += `CALENDAR SYSTEM:\n  Months (${calConfig.months} total): ${monthList}\n  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n  Use these month and day names when generating dates.\n\n`;
+    }
+
     prompt += `CRITICAL DATE FORMAT RULES — READ BEFORE GENERATING:\n`;
-    prompt += `  1. dateDisplay MUST start with the day of the week (e.g. "Monday", "Thursday", "Kin'yōbi")\n`;
+    prompt += `  1. dateDisplay MUST start with the day of the week (e.g. "${calConfig.enabled && calConfig.weekDays.length > 0 ? calConfig.weekDays[0] : 'Monday'}", "${calConfig.enabled && calConfig.weekDays.length > 1 ? calConfig.weekDays[1] : 'Thursday'}", "Kin'yōbi")\n`;
     prompt += `  2. dateDisplay MUST NOT contain a pipe | character — that belongs in dateSub\n`;
     prompt += `  3. Use dateSub for era/calendar context ONLY (e.g. "Reiwa 6", "Heian Era · 1125 CE")\n`;
     prompt += `  4. dayCount = day-of-year (1-366). If date is "October 17, 2024", dayCount = 291 (leap year) or 290.\n`;
     prompt += `  5. FAILURE TO FOLLOW THESE RULES WILL CORRUPT THE DATE DISPLAY IN THE UI.\n\n`;
 
+    prompt += `CRITICAL — EVENTS MUST BE COMPLETE IN A SINGLE PASS:\n`;
+    prompt += `  - Generate ALL events here. This is the ONLY event generation call.\n`;
+    prompt += `  - You MUST produce TWO DISTINCT KINDS of events:\n\n`;
+    prompt += `  KIND A — Chat-Detected Events (from conversation/context analysis):\n`;
+    prompt += `    * Events directly mentioned, implied, or foreshadowed in the chat\n`;
+    prompt += `    * Character plans, rumors, threats discussed by characters\n`;
+    prompt += `    * Example: "The merchant caravan is expected to arrive next week"\n`;
+    prompt += `    * Example: "Bandit raids have been increasing along the eastern road"\n\n`;
+    prompt += `  KIND B — World-Level Events (from setting, conditions, season, context):\n`;
+    prompt += `    * Events that the WORLD itself is generating — natural, political, societal, seasonal\n`;
+    prompt += `    * NOT mentioned in chat, but driven by the setting context and world conditions\n`;
+    prompt += `    * Example (political): "Noble houses are maneuvering for position ahead of the succession council"\n`;
+    prompt += `    * Example (seasonal): "The autumn harvest festival preparations are underway across the region"\n`;
+    prompt += `    * Example (environmental): "The river's rise threatens low-lying farmlands as spring melt accelerates"\n`;
+    prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
+    prompt += `  AIM FOR AT LEAST 3-5 WORLD-LEVEL EVENTS in addition to any chat-detected events.\n`;
+    prompt += `  CRITICAL — PROPORTION: The majority of events should be world-generated, not chat-detected.\n\n`;
+    prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
+    prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;
     prompt += `Use this EXACT JSON structure:\n\n`;
     prompt += `{
   "currentDay": {
@@ -602,18 +632,10 @@ async function applyBatchResults(chatId, result) {
         nwstToast('Forecast generation skipped. Use the Regen button on the Home tab to try again.', 'warning');
     }
 
-    // Seed world events via Event Generation LLM (creates "world events" with origin: 'generated')
-    // The batch scan itself only produces detected events from chat analysis — world events
-    // need the full event generation pipeline to create forward-facing plot hooks from setting context.
-    nwstToast('Generating initial world events...', 'info');
-    try {
-        const { regenerateAllEvents } = await import('./eventGen.js');
-        const count = await regenerateAllEvents();
-        nwstToast(`World events seeded: ${count} event(s) created.`, 'info');
-    } catch (eventErr) {
-        console.warn('[NWST BatchScan] World event generation failed (non-fatal):', eventErr);
-        nwstToast('Event generation skipped. Use Regen buttons on the Events tab to try again.', 'warning');
-    }
+    // Events are already complete — the batch synthesis prompt above was instructed to generate
+    // BOTH detected events (from chat analysis) AND world-level events (from setting/conditions/season)
+    // in a SINGLE pass. No separate world event generation call is needed.
+    console.log('[NWST BatchScan] Events generated in single synthesis pass (no separate world event call).');
 }
 
 // ── Loading UI ─────────────────────────────────────────────────────────────

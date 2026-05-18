@@ -15,7 +15,7 @@
 // The user should be able to retry the skip cleanly from a known good state.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../index.js';
+import { getChatId, nwstToast, getSetting } from '../index.js';
 import {
     getWorldState, saveWorldState, getCurrentDay, replaceCurrentDay,
     getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
@@ -265,7 +265,14 @@ export async function executeTimeSkip(skipDescription) {
             setLunarAngle(chatId, newAngle);
 
             // Generate new 7-day moon phase strip from the new angle
-            const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
+            // Build phenomena context from the current (pre-skip or updated) day
+            const cycleDays = getSetting('moonCycleDays') || 29.53;
+            const phenOptions = {
+                season: currentDay?.season || '',
+                weatherToday: currentDay?.weatherToday || '',
+                cycleDays
+            };
+            const newMoonPhases = generateMoonPhases(newAngle, 7, 0, phenOptions);
             replaceMoonPhases(chatId, newMoonPhases);
 
             const phaseInfo = getMoonPhaseForAngle(newAngle);

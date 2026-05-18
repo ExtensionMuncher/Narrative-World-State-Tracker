@@ -25,7 +25,7 @@ import {
     exportAll, importAll
 } from '../settings.js';
 
-import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCurrentDay, updateCurrentDay } from '../data/worldState.js';
+import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCalendarConfig, saveCalendarConfig, getCurrentDay, updateCurrentDay } from '../data/worldState.js';
 import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData } from '../data/storage.js';
@@ -46,265 +46,433 @@ export function buildSettingsTab() {
 
     pane.innerHTML = `
         <!-- ── Connection Profiles ────────────────────────────── -->
-        <div class="nwst-lbl">Connection profiles</div>
-        <div class="nwst-card">
-            <!-- Planning LLM -->
-            <div style="font-size:12px;color:#666;margin-bottom:4px">Planning LLM</div>
-            <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
-                Handles Current Day synthesis, world state, notebook, communities, time skips, event generation, and batch scan
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-connections">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Connection profiles</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
             </div>
-            <select id="nwst-setting-planningLLM" style="margin-bottom:12px"></select>
+            <div class="nwst-accordion-body" id="nwst-accordion-connections">
+                <div class="nwst-card">
+                    <!-- Planning LLM -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Planning LLM</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        Handles Current Day synthesis, world state, notebook, communities, time skips, event generation, and batch scan
+                    </div>
+                    <select id="nwst-setting-planningLLM" style="margin-bottom:12px"></select>
 
-            <!-- Day Advancement LLM -->
-            <div style="font-size:12px;color:#666;margin-bottom:4px">Day Advancement LLM</div>
-            <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
-                Handles date, forecast, moon phase updates, and front-facing event display
-            </div>
-            <select id="nwst-setting-dayAdvancementLLM" style="margin-bottom:12px"></select>
+                    <!-- Day Advancement LLM -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Day Advancement LLM</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        Handles date, forecast, moon phase updates, and front-facing event display
+                    </div>
+                    <select id="nwst-setting-dayAdvancementLLM" style="margin-bottom:12px"></select>
 
-            <!-- Narrative Consistency LLM -->
-            <div style="font-size:12px;color:#666;margin-bottom:4px">Narrative Consistency</div>
-            <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
-                Monitors secrets for knowledge leaks, flags inconsistencies, and manages selective secret injection. A reliable mid-size model is recommended (Mistral Small 24B, Qwen 3.5 9B, or equivalent) — this is a consistency check, not a creative task.
-            </div>
-            <select id="nwst-setting-narrativeConsistencyLLM" style="margin-bottom:12px"></select>
+                    <!-- Narrative Consistency LLM -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Narrative Consistency</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        Monitors secrets for knowledge leaks, flags inconsistencies, and manages selective secret injection. A reliable mid-size model is recommended (Mistral Small 24B, Qwen 3.5 9B, or equivalent) — this is a consistency check, not a creative task.
+                    </div>
+                    <select id="nwst-setting-narrativeConsistencyLLM" style="margin-bottom:12px"></select>
 
-            <!-- Scan frequency -->
-            <div style="font-size:12px;color:#666;margin-bottom:4px">Scan frequency</div>
-            <div style="display:flex;align-items:center;gap:8px">
-                <input type="number" id="nwst-setting-scanFrequency" value="20" min="1" max="100" style="width:60px;text-align:center">
-                <span style="font-size:12px;color:#666">messages</span>
+                    <!-- Scan frequency -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Scan frequency</div>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="nwst-setting-scanFrequency" value="20" min="1" max="100" style="width:60px;text-align:center">
+                        <span style="font-size:12px;color:#666">messages</span>
+                    </div>
+                </div>
             </div>
         </div>
 
-        <!-- ── World Climate / Atmosphere ───────────────────────── -->
-        <div class="nwst-lbl">World climate / atmosphere</div>
-        <div class="nwst-card">
-            <!-- Enable/disable moons entirely -->
-            <div class="nwst-setting-row" style="margin-bottom:10px">
-                <div>
-                    <div class="nwst-setting-label">Enable moons</div>
-                    <div class="nwst-setting-sub">Disable to hide the moon phase system entirely</div>
+        <!-- ── Moon Cycles (Experimental) ─────────────────────── -->
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-moons">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Moon Cycles</span>
+                    <span class="nwst-experimental-badge">Experimental</span>
                 </div>
-                <label class="nwst-toggle">
-                    <input type="checkbox" id="nwst-setting-enableMoons" checked>
-                    <span class="nwst-slider"></span>
-                </label>
+                <span class="nwst-accordion-arrow">▶</span>
             </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-moons">
+                <div class="nwst-card">
+                    <!-- Enable/disable moons entirely -->
+                    <div class="nwst-setting-row" style="margin-bottom:10px">
+                        <div>
+                            <div class="nwst-setting-label">Enable moons</div>
+                            <div class="nwst-setting-sub">Disable to hide the moon phase system entirely</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-enableMoons" checked>
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
 
-            <!-- Primary moon cycle length (legacy/fallback) -->
-            <div style="font-size:12px;color:#666;margin-bottom:4px">Default cycle length</div>
-            <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
-                The default lunar cycle length (29.53 days for Earth). Used as fallback when no moons are configured.
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-                <input type="number" id="nwst-setting-moonCycleDays" value="29.53" min="1" max="999" step="0.01" style="width:80px;text-align:center">
-                <span style="font-size:12px;color:#666">days per cycle</span>
-            </div>
+                    <!-- Primary moon cycle length (legacy/fallback) -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Default cycle length</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        The default lunar cycle length (29.53 days for Earth). Used as fallback when no moons are configured.
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                        <input type="number" id="nwst-setting-moonCycleDays" value="29.53" min="1" max="999" step="0.01" style="width:80px;text-align:center">
+                        <span style="font-size:12px;color:#666">days per cycle</span>
+                    </div>
 
-            <!-- Enable/disable moon phenomena -->
-            <div class="nwst-setting-row" style="margin-bottom:10px">
-                <div>
-                    <div class="nwst-setting-label">Enable moon phenomena</div>
-                    <div class="nwst-setting-sub">Eclipses, blue moons, super moons, blood moons — rare natural events that appear alongside normal phases</div>
+                    <!-- Enable/disable moon phenomena -->
+                    <div class="nwst-setting-row" style="margin-bottom:10px">
+                        <div>
+                            <div class="nwst-setting-label">Enable moon phenomena</div>
+                            <div class="nwst-setting-sub">Eclipses, blue moons, super moons, blood moons — rare natural events that appear alongside normal phases</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-enableMoonPhenomena" checked>
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
+
+                    <!-- Multi-moon list -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Configured moons</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        Add multiple moons or remove all for a moonless world. Each moon has its own cycle length. Any enabled moon appears in the forecast strip individually.
+                    </div>
+                    <div id="nwst-moons-list" style="margin-bottom:8px"></div>
+                    <div class="nwst-btn-row">
+                        <button class="menu_button nwst-btn" id="nwst-setting-addMoon" style="font-size:11px;padding:3px 9px">+ Add Moon</button>
+                    </div>
+
+                    <!-- Hidden template for moon entry -->
+                    <template id="nwst-moon-entry-tpl">
+                        <div class="nwst-moon-entry" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:4px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                            <input type="checkbox" class="nwst-moon-enabled" checked style="margin:0;flex-shrink:0" title="Enable this moon">
+                            <input type="text" class="nwst-moon-name" value="The Moon" placeholder="Name" style="flex:1;min-width:80px">
+                            <input type="number" class="nwst-moon-cycle" value="29.53" min="1" max="999" step="0.01" style="width:60px;text-align:center" title="Cycle length (days)">
+                            <span style="font-size:11px;color:#888;white-space:nowrap">days</span>
+                            <button class="menu_button nwst-moon-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this moon">✕</button>
+                        </div>
+                    </template>
                 </div>
-                <label class="nwst-toggle">
-                    <input type="checkbox" id="nwst-setting-enableMoonPhenomena" checked>
-                    <span class="nwst-slider"></span>
-                </label>
             </div>
+        </div>
 
-            <!-- Multi-moon list -->
-            <div style="font-size:12px;color:#666;margin-bottom:4px">Configured moons</div>
-            <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
-                Add multiple moons or remove all for a moonless world. Each moon has its own cycle length. Any enabled moon appears in the forecast strip individually.
-            </div>
-            <div id="nwst-moons-list" style="margin-bottom:8px"></div>
-            <div class="nwst-btn-row">
-                <button class="menu_button nwst-btn" id="nwst-setting-addMoon" style="font-size:11px;padding:3px 9px">+ Add Moon</button>
-            </div>
-
-            <!-- Hidden template for moon entry -->
-            <template id="nwst-moon-entry-tpl">
-                <div class="nwst-moon-entry" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:4px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
-                    <input type="checkbox" class="nwst-moon-enabled" checked style="margin:0;flex-shrink:0" title="Enable this moon">
-                    <input type="text" class="nwst-moon-name" value="The Moon" placeholder="Name" style="flex:1;min-width:80px">
-                    <input type="number" class="nwst-moon-cycle" value="29.53" min="1" max="999" step="0.01" style="width:60px;text-align:center" title="Cycle length (days)">
-                    <span style="font-size:11px;color:#888;white-space:nowrap">days</span>
-                    <button class="menu_button nwst-moon-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this moon">✕</button>
+        <!-- ── Calendar Configuration (Experimental) ─────────── -->
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-calendar">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Calendar configuration</span>
+                    <span class="nwst-experimental-badge">Experimental</span>
                 </div>
-            </template>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-calendar">
+                <div class="nwst-card">
+                    <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
+                        Configure the calendar system for this world. When enabled, the LLM will be instructed to use these month names when generating dates during day advancement and batch scanning. <strong>This is saved per-chat</strong> — each roleplay can have its own calendar.
+                    </div>
+
+                    <!-- Enable toggle -->
+                    <div class="nwst-setting-row" style="margin-bottom:12px">
+                        <div>
+                            <div class="nwst-setting-label">Enable calendar configuration</div>
+                            <div class="nwst-setting-sub">When enabled, month names are injected into LLM prompts during day advancement and batch scanning</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-enableCalendarConfig">
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
+
+                    <!-- Number of months -->
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                        <div style="font-size:12px;color:#666;white-space:nowrap">Number of months</div>
+                        <input type="number" id="nwst-setting-monthCount" value="12" min="1" max="24" style="width:55px;text-align:center">
+                    </div>
+
+                    <!-- Month editor list -->
+                    <div id="nwst-calendar-months-list" style="margin-bottom:8px"></div>
+
+                    <!-- Total days validation -->
+                    <div id="nwst-calendar-validation" style="margin-bottom:10px"></div>
+
+                    <!-- Days of the week editor -->
+                    <div style="margin-top:14px;padding-top:10px;border-top:1px solid #333">
+                        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                            <span style="font-size:12px;color:#666;text-transform:uppercase;letter-spacing:0.5px">Days of the week</span>
+                            <span class="nwst-experimental-badge" style="font-size:9px">Experimental</span>
+                        </div>
+                        <div style="font-size:11px;color:#888;margin-bottom:8px;line-height:1.4">
+                            Configure custom day names for this world's week. When enabled, the LLM will use these names in date displays.
+                        </div>
+                        <div id="nwst-calendar-days-list" style="margin-bottom:8px"></div>
+                    </div>
+
+                    <!-- Save button -->
+                    <div class="nwst-btn-row">
+                        <button class="menu_button nwst-btn" id="nwst-setting-saveCalendarConfig" style="font-size:11px;padding:3px 9px">Save Calendar Config</button>
+                    </div>
+
+                    <!-- Hidden template for month entry -->
+                    <template id="nwst-calendar-month-tpl">
+                        <div class="nwst-month-entry">
+                            <span class="nwst-month-index"></span>
+                            <input type="text" class="nwst-month-name-input" placeholder="Month name" style="flex:1;min-width:80px">
+                            <input type="number" class="nwst-month-days-input" min="1" max="99" value="30">
+                            <span class="nwst-month-days-label">days</span>
+                        </div>
+                    </template>
+
+                    <!-- Hidden template for day entry -->
+                    <template id="nwst-calendar-day-tpl">
+                        <div class="nwst-month-entry">
+                            <span class="nwst-month-index"></span>
+                            <input type="text" class="nwst-weekday-name-input" placeholder="Day name" style="flex:1;min-width:80px">
+                        </div>
+                    </template>
+                </div>
+            </div>
         </div>
 
         <!-- ── Setting Context (per-chat) ─────────────────────── -->
-        <div class="nwst-lbl">Setting context</div>
-        <div class="nwst-card">
-            <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
-                Describe your world's climate, geography, and setting. The day advancement LLM reads this when generating weather forecasts so it knows what kind of world it's operating in — real-world location, fantasy biome, or anything in between. <strong>This is saved per-chat</strong> — each roleplay can have a completely different setting.
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-context">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Setting context</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
             </div>
-            <textarea id="nwst-setting-context" rows="4" style="margin-bottom:8px"
-                placeholder="e.g. Feudal Japan, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
-            <div class="nwst-btn-row">
-                <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
+            <div class="nwst-accordion-body" id="nwst-accordion-context">
+                <div class="nwst-card">
+                    <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
+                        Describe your world's climate, geography, and setting. The day advancement LLM reads this when generating weather forecasts so it knows what kind of world it's operating in — real-world location, fantasy biome, or anything in between. <strong>This is saved per-chat</strong> — each roleplay can have a completely different setting.
+                    </div>
+                    <textarea id="nwst-setting-context" rows="4" style="margin-bottom:8px"
+                        placeholder="e.g. Feudal Japan, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
+                    <div class="nwst-btn-row">
+                        <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
+                    </div>
+                </div>
             </div>
         </div>
 
         <!-- ── Season Configuration (per-chat) ────────────────── -->
-        <div class="nwst-lbl">Season configuration</div>
-        <div class="nwst-card">
-            <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
-                Configure how seasons are determined for this chat. <strong>This is saved per-chat</strong> — each roleplay can have different seasonal patterns. When enabled (mode: Auto or Static), the computed season overrides whatever the LLM writes for the season field. The LLM still writes evocative seasonal prose, but the engine is the authority on which season it is.
-            </div>
-
-            <!-- Mode selector -->
-            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-                <div style="font-size:12px;color:#666;white-space:nowrap">Mode</div>
-                <select id="nwst-setting-seasonMode" style="flex:1">
-                    <option value="auto">Auto — seasons cycle based on day count</option>
-                    <option value="static">Static — always the first season</option>
-                    <option value="disabled">Disabled — LLM controls seasons (legacy)</option>
-                </select>
-            </div>
-
-            <!-- Year length (only relevant for auto mode) -->
-            <div id="nwst-season-yearLength-row" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-                <div style="font-size:12px;color:#666;white-space:nowrap">Year length</div>
-                <input type="number" id="nwst-setting-seasonYearLength" value="365" min="1" max="9999" style="width:70px;text-align:center">
-                <span style="font-size:11px;color:#888">days in a full seasonal cycle</span>
-            </div>
-
-            <!-- Season bands editor -->
-            <div id="nwst-season-bands-section">
-                <div style="font-size:12px;color:#666;margin-bottom:6px">Season bands</div>
-                <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">
-                    Each band defines a season's name and its day range within the year (0-based). Bands are checked in order — the first matching band is used.
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-seasons">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Season configuration</span>
                 </div>
-                <div id="nwst-season-bands-list"></div>
-                <div class="nwst-btn-row" style="margin-top:6px">
-                    <button class="menu_button nwst-btn" id="nwst-setting-addSeasonBand" style="font-size:11px;padding:3px 9px">+ Add Season Band</button>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-seasons">
+                <div class="nwst-card">
+                    <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
+                        Configure how seasons are determined for this chat. <strong>This is saved per-chat</strong> — each roleplay can have different seasonal patterns. When enabled (mode: Auto or Static), the computed season overrides whatever the LLM writes for the season field. The LLM still writes evocative seasonal prose, but the engine is the authority on which season it is.
+                    </div>
+
+                    <!-- Mode selector -->
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                        <div style="font-size:12px;color:#666;white-space:nowrap">Mode</div>
+                        <select id="nwst-setting-seasonMode" style="flex:1">
+                            <option value="auto">Auto — seasons cycle based on day count</option>
+                            <option value="static">Static — always the first season</option>
+                            <option value="disabled">Disabled — LLM controls seasons (legacy)</option>
+                        </select>
+                    </div>
+
+                    <!-- Year length (only relevant for auto mode) -->
+                    <div id="nwst-season-yearLength-row" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                        <div style="font-size:12px;color:#666;white-space:nowrap">Year length</div>
+                        <input type="number" id="nwst-setting-seasonYearLength" value="365" min="1" max="9999" style="width:70px;text-align:center">
+                        <span style="font-size:11px;color:#888">days in a full seasonal cycle</span>
+                    </div>
+
+                    <!-- Season bands editor -->
+                    <div id="nwst-season-bands-section">
+                        <div style="font-size:12px;color:#666;margin-bottom:6px">Season bands</div>
+                        <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">
+                            Each band defines a season's name and its day range within the year (0-based). Bands are checked in order — the first matching band is used.
+                        </div>
+                        <div id="nwst-season-bands-list"></div>
+                        <div class="nwst-btn-row" style="margin-top:6px">
+                            <button class="menu_button nwst-btn" id="nwst-setting-addSeasonBand" style="font-size:11px;padding:3px 9px">+ Add Season Band</button>
+                        </div>
+                    </div>
+
+                    <!-- Editable day count (per-chat) -->
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-top:8px;border-top:1px solid rgba(128,128,128,0.2)">
+                        <div style="font-size:12px;color:#666;white-space:nowrap">Current day count</div>
+                        <input type="number" id="nwst-setting-dayCount" value="0" min="0" style="width:70px;text-align:center">
+                        <span style="font-size:11px;color:#888">absolute elapsed days (controls season cycling)</span>
+                        <button class="menu_button nwst-btn" id="nwst-setting-saveDayCount" style="font-size:11px;padding:2px 7px;margin-left:auto">Update</button>
+                    </div>
+
+                    <!-- Save button -->
+                    <div class="nwst-btn-row" style="margin-top:4px">
+                        <button class="menu_button nwst-btn" id="nwst-setting-saveSeasonConfig">Save Season Config</button>
+                    </div>
+
+                    <!-- Hidden template for season band entry -->
+                    <template id="nwst-season-band-tpl">
+                        <div class="nwst-season-band-entry" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:4px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
+                            <input type="text" class="nwst-season-band-name" value="Spring" placeholder="Name" style="flex:1;min-width:80px">
+                            <span style="font-size:11px;color:#888">from day</span>
+                            <input type="number" class="nwst-season-band-start" value="0" min="0" max="9999" style="width:55px;text-align:center">
+                            <span style="font-size:11px;color:#888">to day</span>
+                            <input type="number" class="nwst-season-band-end" value="91" min="0" max="9999" style="width:55px;text-align:center">
+                            <button class="menu_button nwst-season-band-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this season band">✕</button>
+                        </div>
+                    </template>
                 </div>
             </div>
-
-            <!-- Editable day count (per-chat) -->
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-top:8px;border-top:1px solid rgba(128,128,128,0.2)">
-                <div style="font-size:12px;color:#666;white-space:nowrap">Current day count</div>
-                <input type="number" id="nwst-setting-dayCount" value="0" min="0" style="width:70px;text-align:center">
-                <span style="font-size:11px;color:#888">absolute elapsed days (controls season cycling)</span>
-                <button class="menu_button nwst-btn" id="nwst-setting-saveDayCount" style="font-size:11px;padding:2px 7px;margin-left:auto">Update</button>
-            </div>
-
-            <!-- Save button -->
-            <div class="nwst-btn-row" style="margin-top:4px">
-                <button class="menu_button nwst-btn" id="nwst-setting-saveSeasonConfig">Save Season Config</button>
-            </div>
-
-            <!-- Hidden template for season band entry -->
-            <template id="nwst-season-band-tpl">
-                <div class="nwst-season-band-entry" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:4px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
-                    <input type="text" class="nwst-season-band-name" value="Spring" placeholder="Name" style="flex:1;min-width:80px">
-                    <span style="font-size:11px;color:#888">from day</span>
-                    <input type="number" class="nwst-season-band-start" value="0" min="0" max="9999" style="width:55px;text-align:center">
-                    <span style="font-size:11px;color:#888">to day</span>
-                    <input type="number" class="nwst-season-band-end" value="91" min="0" max="9999" style="width:55px;text-align:center">
-                    <button class="menu_button nwst-season-band-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this season band">✕</button>
-                </div>
-            </template>
         </div>
 
         <!-- ── Injection Settings ──────────────────────────────── -->
-        <div class="nwst-lbl">Injection settings</div>
-        <div class="nwst-card">
-            <div class="nwst-setting-row">
-                <div>
-                    <div class="nwst-setting-label">Inject current day</div>
-                    <div class="nwst-setting-sub">Date, season, weather, flora/fauna, spiritual climate</div>
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-injection">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Injection settings</span>
                 </div>
-                <label class="nwst-toggle">
-                    <input type="checkbox" id="nwst-setting-injectCurrentDay" checked>
-                    <span class="nwst-slider"></span>
-                </label>
+                <span class="nwst-accordion-arrow">▶</span>
             </div>
-            <div class="nwst-setting-row">
-                <div>
-                    <div class="nwst-setting-label">Inject upcoming events</div>
-                    <div class="nwst-setting-sub">Immediate, this week, this month, undetermined — resolved and missed events excluded</div>
-                </div>
-                <label class="nwst-toggle">
-                    <input type="checkbox" id="nwst-setting-injectEvents" checked>
-                    <span class="nwst-slider"></span>
-                </label>
-            </div>
-            <div class="nwst-setting-row">
-                <div>
-                    <div class="nwst-setting-label">Inject world conditions</div>
-                    <div class="nwst-setting-sub">Only active (eye-on) conditions are injected</div>
-                </div>
-                <label class="nwst-toggle">
-                    <input type="checkbox" id="nwst-setting-injectWorldConditions" checked>
-                    <span class="nwst-slider"></span>
-                </label>
-            </div>
-            <div class="nwst-setting-row">
-                <div><div class="nwst-setting-label">Injection placement</div></div>
-                <select id="nwst-setting-placement" style="width:180px;flex-shrink:0">
-                    <option value="before_main">Before Main Prompt / Story String</option>
-                    <option value="after_main">After Main Prompt / Story String</option>
-                    <option value="top_an">Top of Author's Note</option>
-                    <option value="bottom_an">Bottom of Author's Note</option>
-                    <option value="at_depth">Inject at Depth</option>
-                </select>
-            </div>
-            <div class="nwst-setting-row" id="nwst-depth-row" style="display:none">
-                <div>
-                    <div class="nwst-setting-label">Depth</div>
-                    <div class="nwst-setting-sub">Number of messages from the bottom</div>
-                </div>
-                <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-                    <input type="number" id="nwst-setting-depth" value="2" min="0" max="99" style="width:52px;text-align:center">
-                    <select id="nwst-setting-depthRole" style="width:90px">
-                        <option value="system">System</option>
-                        <option value="user">User</option>
-                        <option value="assistant">Assistant</option>
-                    </select>
+            <div class="nwst-accordion-body" id="nwst-accordion-injection">
+                <div class="nwst-card">
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Inject current day</div>
+                            <div class="nwst-setting-sub">Date, season, weather, flora/fauna, spiritual climate</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-injectCurrentDay" checked>
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Inject upcoming events</div>
+                            <div class="nwst-setting-sub">Immediate, this week, this month, undetermined — resolved and missed events excluded</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-injectEvents" checked>
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Inject world conditions</div>
+                            <div class="nwst-setting-sub">Only active (eye-on) conditions are injected</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-injectWorldConditions" checked>
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Injection placement</div></div>
+                        <select id="nwst-setting-placement" style="width:180px;flex-shrink:0">
+                            <option value="before_main">Before Main Prompt / Story String</option>
+                            <option value="after_main">After Main Prompt / Story String</option>
+                            <option value="top_an">Top of Author's Note</option>
+                            <option value="bottom_an">Bottom of Author's Note</option>
+                            <option value="at_depth">Inject at Depth</option>
+                        </select>
+                    </div>
+                    <div class="nwst-setting-row" id="nwst-depth-row" style="display:none">
+                        <div>
+                            <div class="nwst-setting-label">Depth</div>
+                            <div class="nwst-setting-sub">Number of messages from the bottom</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-depth" value="2" min="0" max="99" style="width:52px;text-align:center">
+                            <select id="nwst-setting-depthRole" style="width:90px">
+                                <option value="system">System</option>
+                                <option value="user">User</option>
+                                <option value="assistant">Assistant</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
 
         <!-- ── Planner Prompt ──────────────────────────────────── -->
-        <div class="nwst-lbl">Planner prompt</div>
-        <div class="nwst-card">
-            <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
-                Customize how the planner LLM updates world state and generates events. <strong>This is the only user-editable prompt</strong> — all other LLM prompts (scanner, day advancement, event generation, time skip, batch scan, narrative consistency) are internal and not exposed.
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-planner">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Planner prompt</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
             </div>
-            <textarea id="nwst-setting-plannerPrompt" rows="4" style="margin-bottom:8px"></textarea>
-            <div class="nwst-btn-row">
-                <button class="menu_button nwst-btn" id="nwst-setting-importPrompt">Import</button>
-                <button class="menu_button nwst-btn" id="nwst-setting-exportPrompt">Export</button>
-                <button class="menu_button nwst-btn" id="nwst-setting-resetPrompt">Reset to default</button>
+            <div class="nwst-accordion-body" id="nwst-accordion-planner">
+                <div class="nwst-card">
+                    <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
+                        Customize how the planner LLM updates world state and generates events. <strong>This is the only user-editable prompt</strong> — all other LLM prompts (scanner, day advancement, event generation, time skip, batch scan, narrative consistency) are internal and not exposed.
+                    </div>
+                    <textarea id="nwst-setting-plannerPrompt" rows="4" style="margin-bottom:8px"></textarea>
+                    <div class="nwst-btn-row">
+                        <button class="menu_button nwst-btn" id="nwst-setting-importPrompt">Import</button>
+                        <button class="menu_button nwst-btn" id="nwst-setting-exportPrompt">Export</button>
+                        <button class="menu_button nwst-btn" id="nwst-setting-resetPrompt">Reset to default</button>
+                    </div>
+                </div>
             </div>
         </div>
 
         <!-- ── Batch Scan ──────────────────────────────────────── -->
-        <div class="nwst-lbl">Batch scan</div>
-        <div class="nwst-card">
-            <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
-                Scan your full chat history to generate an initial world state. Creates a current day entry, populates the event horizon, fills active world conditions, seeds the notebook, and groups any detected communities. Runs once — does not overwrite existing data.
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-batchscan">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Batch scan</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
             </div>
-            <button class="menu_button nwst-btn" id="nwst-setting-batchScan" style="font-size:11px;padding:3px 9px">Run batch scan</button>
-            <span id="nwst-batchScan-spinner" style="display:none;margin-left:8px;" class="nwst-spinner"></span>
+            <div class="nwst-accordion-body" id="nwst-accordion-batchscan">
+                <div class="nwst-card">
+                    <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
+                        Scan your full chat history to generate an initial world state. Creates a current day entry, populates the event horizon, fills active world conditions, seeds the notebook, and groups any detected communities. Runs once — does not overwrite existing data.
+                    </div>
+                    <button class="menu_button nwst-btn" id="nwst-setting-batchScan" style="font-size:11px;padding:3px 9px">Run batch scan</button>
+                    <span id="nwst-batchScan-spinner" style="display:none;margin-left:8px;" class="nwst-spinner"></span>
+                </div>
+            </div>
         </div>
 
         <!-- ── Data Import / Export / Clear ────────────────────── -->
-        <div class="nwst-lbl">Data</div>
-        <div class="nwst-btn-row">
-            <button class="menu_button nwst-btn" id="nwst-setting-importAll">Import all</button>
-            <button class="menu_button nwst-btn" id="nwst-setting-exportAll">Export all</button>
-            <button class="menu_button nwst-btn" id="nwst-setting-clearAll" style="font-size:11px;padding:3px 9px">Clear all</button>
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-data">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Data</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-data">
+                <div class="nwst-btn-row" style="margin-top:4px">
+                    <button class="menu_button nwst-btn" id="nwst-setting-importAll">Import all</button>
+                    <button class="menu_button nwst-btn" id="nwst-setting-exportAll">Export all</button>
+                    <button class="menu_button nwst-btn" id="nwst-setting-clearAll" style="font-size:11px;padding:3px 9px">Clear all</button>
+                </div>
+            </div>
         </div>
 
         <!-- Hidden file input for import -->
         <input type="file" id="nwst-import-file" accept=".json" style="display:none">
     `;
+
+    // Wire accordion toggle behavior
+    document.querySelectorAll('.nwst-accordion-header').forEach(header => {
+        header.addEventListener('click', () => {
+            const bodyId = header.getAttribute('data-accordion');
+            const body = document.getElementById(bodyId);
+            if (!body) return;
+            const arrow = header.querySelector('.nwst-accordion-arrow');
+            const isOpen = body.classList.contains('open');
+            if (isOpen) {
+                body.classList.remove('open');
+                if (arrow) arrow.classList.remove('open');
+            } else {
+                body.classList.add('open');
+                if (arrow) arrow.classList.add('open');
+            }
+        });
+    });
 
     // Populate UI with current values and wire events
     populateSettingsUI();
@@ -404,6 +572,133 @@ function renderSeasonBandsList() {
     }
 }
 
+// ── Calendar Configuration UI ────────────────────────────────────────────
+
+/**
+ * Populate the calendar config UI controls from the stored per-chat config.
+ */
+function populateCalendarConfigUI() {
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const config = getCalendarConfig(chatId);
+
+    setCheckbox('nwst-setting-enableCalendarConfig', config.enabled);
+
+    const monthCountInput = document.getElementById('nwst-setting-monthCount');
+    if (monthCountInput) {
+        monthCountInput.value = config.months || 12;
+    }
+
+    renderCalendarMonthsList();
+    renderCalendarDaysList();
+}
+
+/**
+ * Render the month editor list for calendar config.
+ */
+function renderCalendarMonthsList() {
+    const container = document.getElementById('nwst-calendar-months-list');
+    if (!container) return;
+
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const config = getCalendarConfig(chatId);
+    const template = document.getElementById('nwst-calendar-month-tpl');
+    if (!template) return;
+
+    container.innerHTML = '';
+
+    for (let i = 0; i < config.months; i++) {
+        const clone = template.content.cloneNode(true);
+
+        const indexSpan = clone.querySelector('.nwst-month-index');
+        const nameInput = clone.querySelector('.nwst-month-name-input');
+        const daysInput = clone.querySelector('.nwst-month-days-input');
+
+        indexSpan.textContent = `${i + 1}.`;
+        nameInput.value = config.monthNames[i] || `Month ${i + 1}`;
+        daysInput.value = config.monthDays[i] || 30;
+
+        // Wire live updates to store
+        const updateMonth = () => {
+            const cfg = getCalendarConfig(chatId);
+            cfg.monthNames[i] = nameInput.value.trim() || `Month ${i + 1}`;
+            cfg.monthDays[i] = parseInt(daysInput.value, 10) || 30;
+            saveCalendarConfig(chatId, cfg);
+            validateCalendarTotal();
+        };
+        nameInput.addEventListener('change', updateMonth);
+        daysInput.addEventListener('change', updateMonth);
+
+        container.appendChild(clone);
+    }
+
+    validateCalendarTotal();
+}
+
+/**
+ * Validate that total days in months matches season config year length.
+ */
+function validateCalendarTotal() {
+    const validationEl = document.getElementById('nwst-calendar-validation');
+    if (!validationEl) return;
+
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const calendarConfig = getCalendarConfig(chatId);
+    const seasonConfig = getSeasonConfig(chatId);
+
+    const totalDays = calendarConfig.monthDays.slice(0, calendarConfig.months).reduce((sum, d) => sum + (d || 0), 0);
+    const yearLength = seasonConfig.yearLength || 365;
+
+    if (totalDays === yearLength) {
+        validationEl.innerHTML = `<span class="nwst-validation-ok">✓ Total days (${totalDays}) match season year length (${yearLength})</span>`;
+    } else {
+        validationEl.innerHTML = `<span class="nwst-validation-error">✗ Total days (${totalDays}) do not match season year length (${yearLength}) — adjust month days or year length to match</span>`;
+    }
+}
+
+/**
+ * Render the days-of-week editor list from the stored config.
+ */
+function renderCalendarDaysList() {
+    const container = document.getElementById('nwst-calendar-days-list');
+    if (!container) return;
+
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const config = getCalendarConfig(chatId);
+    const template = document.getElementById('nwst-calendar-day-tpl');
+    if (!template) return;
+
+    container.innerHTML = '';
+
+    const dayCount = config.weekDays.length || 7;
+    for (let i = 0; i < dayCount; i++) {
+        const clone = template.content.cloneNode(true);
+
+        const indexSpan = clone.querySelector('.nwst-month-index');
+        const nameInput = clone.querySelector('.nwst-weekday-name-input');
+
+        indexSpan.textContent = `${i + 1}.`;
+        nameInput.value = config.weekDays[i] || `Day ${i + 1}`;
+
+        // Wire live updates to store
+        const updateDay = () => {
+            const cfg = getCalendarConfig(chatId);
+            cfg.weekDays[i] = nameInput.value.trim() || `Day ${i + 1}`;
+            saveCalendarConfig(chatId, cfg);
+        };
+        nameInput.addEventListener('change', updateDay);
+
+        container.appendChild(clone);
+    }
+}
+
 // ── Populate UI with current settings values ──────────────────────────────
 
 function populateSettingsUI() {
@@ -452,6 +747,9 @@ function populateSettingsUI() {
 
     // Season configuration (per-chat)
     populateSeasonConfigUI();
+
+    // Calendar configuration (per-chat)
+    populateCalendarConfigUI();
 }
 
 /**
@@ -692,6 +990,81 @@ function wireSettingsEvents() {
 
             saveSeasonConfig(chatId, config);
             nwstToast('Season configuration saved.', 'success');
+        });
+    }
+
+    // ── Calendar Configuration ──────────────────────────────────────
+    const enableCalToggle = document.getElementById('nwst-setting-enableCalendarConfig');
+    if (enableCalToggle) {
+        enableCalToggle.addEventListener('change', () => {
+            const chatId = getChatId();
+            if (!chatId) return;
+            const config = getCalendarConfig(chatId);
+            config.enabled = enableCalToggle.checked;
+            saveCalendarConfig(chatId, config);
+        });
+    }
+
+    const monthCountInput = document.getElementById('nwst-setting-monthCount');
+    if (monthCountInput) {
+        monthCountInput.addEventListener('change', () => {
+            const chatId = getChatId();
+            if (!chatId) return;
+            const num = parseInt(monthCountInput.value, 10);
+            if (num < 1 || num > 24) {
+                nwstToast('Month count must be between 1 and 24.', 'warning');
+                monthCountInput.value = 12;
+                return;
+            }
+            const config = getCalendarConfig(chatId);
+            config.months = num;
+            // Extend or trim monthNames/monthDays arrays
+            while (config.monthNames.length < num) config.monthNames.push(`Month ${config.monthNames.length + 1}`);
+            while (config.monthDays.length < num) config.monthDays.push(30);
+            config.monthNames = config.monthNames.slice(0, num);
+            config.monthDays = config.monthDays.slice(0, num);
+            saveCalendarConfig(chatId, config);
+            renderCalendarMonthsList();
+            validateCalendarTotal();
+        });
+    }
+
+    const saveCalBtn = document.getElementById('nwst-setting-saveCalendarConfig');
+    if (saveCalBtn) {
+        saveCalBtn.addEventListener('click', () => {
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            // Read current values from DOM
+            const monthEntries = document.querySelectorAll('#nwst-calendar-months-list .nwst-month-entry');
+            const config = getCalendarConfig(chatId);
+            config.monthNames = [];
+            config.monthDays = [];
+            monthEntries.forEach(entry => {
+                const nameInput = entry.querySelector('.nwst-month-name-input');
+                const daysInput = entry.querySelector('.nwst-month-days-input');
+                if (nameInput) {
+                    config.monthNames.push(nameInput.value.trim() || `Month ${config.monthNames.length + 1}`);
+                    config.monthDays.push(parseInt(daysInput?.value, 10) || 30);
+                }
+            });
+            config.months = config.monthNames.length;
+
+            // Read weekDays from DOM
+            const dayEntries = document.querySelectorAll('#nwst-calendar-days-list .nwst-month-entry');
+            config.weekDays = [];
+            dayEntries.forEach(entry => {
+                const nameInput = entry.querySelector('.nwst-weekday-name-input');
+                if (nameInput) {
+                    config.weekDays.push(nameInput.value.trim() || `Day ${config.weekDays.length + 1}`);
+                }
+            });
+
+            saveCalendarConfig(chatId, config);
+            // Re-validate and re-populate to ensure consistency
+            renderCalendarMonthsList();
+            renderCalendarDaysList();
+            validateCalendarTotal();
+            nwstToast('Calendar configuration saved.', 'success');
         });
     }
 

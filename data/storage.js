@@ -128,6 +128,21 @@ const DEFAULT_SEASON_CONFIG = {
 };
 
 /**
+ * Default calendar configuration (per-chat).
+ * months: number of months in the year
+ * monthNames: display names for each month
+ * monthDays: number of days in each month (must sum to yearLength from season config)
+ * enabled: whether the calendar config is active (Experimental)
+ */
+const DEFAULT_CALENDAR_CONFIG = {
+    enabled: false,
+    months: 12,
+    monthNames: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
+    monthDays: [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31],
+    weekDays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+};
+
+/**
  * Default (empty) snapshots object.
  * Snapshots are keyed by message range (e.g., "1-20", "21-40").
  */
@@ -142,6 +157,7 @@ const DEFAULTS = {
     communities: DEFAULT_COMMUNITIES,
     settingContext: DEFAULT_SETTING_CONTEXT,
     seasonConfig: DEFAULT_SEASON_CONFIG,
+    calendarConfig: DEFAULT_CALENDAR_CONFIG,
     snapshots: DEFAULT_SNAPSHOTS
 };
 
@@ -381,6 +397,7 @@ export {
     DEFAULT_COMMUNITIES,
     DEFAULT_SETTING_CONTEXT,
     DEFAULT_SEASON_CONFIG,
+    DEFAULT_CALENDAR_CONFIG,
     DEFAULT_SNAPSHOTS,
     DEFAULTS
 };

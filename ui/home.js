@@ -292,6 +292,15 @@ function wireHomeEvents() {
 
                 // Helper: regenerate moon phases based on selected source
                 const doMoonPhaseRegen = () => {
+                    // Build context for phenomena computation so they're stored at generation time
+                    const currentDay = getCurrentDay(chatId);
+                    const cycleDays = getSetting('moonCycleDays') || 29.53;
+                    const phenOptions = {
+                        season: currentDay?.season || '',
+                        weatherToday: currentDay?.weatherToday || '',
+                        cycleDays
+                    };
+
                     if (source === 'date') {
                         // Read from the text input the user typed — avoids ambiguous
                         // automatic parsing of the existing date display text
@@ -301,7 +310,7 @@ function wireHomeEvents() {
                         } else {
                             nwstToast('No date text entered. Using stored angle.', 'warning');
                             const storedAngle = getLunarAngle(chatId);
-                            const newMoonPhases = generateMoonPhases(storedAngle, 7, 0);
+                            const newMoonPhases = generateMoonPhases(storedAngle, 7, 0, phenOptions);
                             replaceMoonPhases(chatId, newMoonPhases);
                         }
                     } else if (source === 'manual') {
@@ -311,7 +320,7 @@ function wireHomeEvents() {
                     } else {
                         // 'stored' — use the direct stored angle without date parsing
                         const storedAngle = getLunarAngle(chatId);
-                        const newMoonPhases = generateMoonPhases(storedAngle, 7, 0);
+                        const newMoonPhases = generateMoonPhases(storedAngle, 7, 0, phenOptions);
                         replaceMoonPhases(chatId, newMoonPhases);
                     }
                 };
@@ -435,7 +444,14 @@ function saveCurrentDayEdit() {
         const newAngle = computeLunarAngleFromDate(day.dateDisplay);
         const phaseInfo = getMoonPhaseForAngle(newAngle);
         setLunarAngle(chatId, newAngle);
-        const newMoonPhases = generateMoonPhases(newAngle, 7, 0);
+        // Compute phenomena in context of the edited day
+        const cycleDays = getSetting('moonCycleDays') || 29.53;
+        const phenOptions = {
+            season: day.season || '',
+            weatherToday: day.weatherToday || '',
+            cycleDays
+        };
+        const newMoonPhases = generateMoonPhases(newAngle, 7, 0, phenOptions);
         replaceMoonPhases(chatId, newMoonPhases);
         nwstToast(`Date changed — moon phases recalculated from date text. Anchored as "${phaseInfo.phaseName}" (${newAngle.toFixed(1)}°).`, 'info');
     }
@@ -586,28 +602,32 @@ function refreshMoonDisplay() {
         return;
     }
 
-    // Calculate base angle for phenomena detection
-    const day = getCurrentDay(chatId);
-    const lunarAngle = getLunarAngle(chatId);
-    const cycleDays = getSetting('moonCycleDays') || 29.53;
-    const degPerDay = 360 / cycleDays;
-
-    // Gather weather/season context for weather-dependent phenomena
-    // (Moonbows need rain, Lunar Rings need high clouds)
-    const phenomenaOptions = {
-        season: day.season || '',
-        weatherToday: day.weatherToday || ''
-    };
-
     let html = '';
     for (let i = 0; i < moonPhases.length; i++) {
         const moon = moonPhases[i];
         const isToday = i === 0;
         const todayClass = isToday ? ' nwst-today' : '';
 
-        // Get phenomena for this day's phase
-        const dayAngle = (lunarAngle + i * degPerDay) % 360;
-        const phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenomenaOptions);
+        // Read phenomena from STORED data (computed at generation time in generateMoonPhases)
+        // If the phase entry has stored phenomena, use them. Otherwise fall back to
+        // computing fresh (backward compatibility with old data).
+        let phenomena = [];
+        if (moon.phenomena && Array.isArray(moon.phenomena)) {
+            phenomena = moon.phenomena;
+        } else {
+            // Legacy fallback — compute fresh for old data that didn't store phenomena
+            const day = getCurrentDay(chatId);
+            const lunarAngle = getLunarAngle(chatId);
+            const cycleDays = getSetting('moonCycleDays') || 29.53;
+            const degPerDay = 360 / cycleDays;
+            const dayAngle = (lunarAngle + i * degPerDay) % 360;
+            const phenOptions = {
+                season: day.season || '',
+                weatherToday: day.weatherToday || '',
+                cycleDays
+            };
+            phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenOptions);
+        }
 
         // Build phenomena tags
         let phenHtml = '';

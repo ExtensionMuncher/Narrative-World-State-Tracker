@@ -12,7 +12,7 @@
 import { getChatId, nwstToast } from '../index.js';
 import {
     getCurrentDay, updateCurrentDay, getForecast, getMoonPhases,
-    getEnabledConditions, getSettingContext
+    getEnabledConditions, getSettingContext, getCalendarConfig
 } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
@@ -135,6 +135,16 @@ function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents
     // reading weather data — prevents generic descriptions divorced from the setting
     if (settingContext) {
         prompt += `=== SETTING CONTEXT (read this first — ground all descriptions in this world) ===\n${settingContext}\n\n`;
+    }
+
+    // Inject calendar config (months + week days) if configured
+    const calConfig = getCalendarConfig(getChatId());
+    if (calConfig.enabled) {
+        const monthList = calConfig.monthNames.map((name, i) =>
+            `${name} (${calConfig.monthDays[i]} days)`
+        ).join(', ');
+        const dayList = calConfig.weekDays.join(', ');
+        prompt += `=== CALENDAR SYSTEM ===\n  Months (${calConfig.months} total): ${monthList}\n  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n  Use these month and day names when writing date or seasonal descriptions.\n\n`;
     }
 
     prompt += `=== CURRENT DATE ===\n`;
