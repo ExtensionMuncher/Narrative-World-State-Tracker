@@ -128,7 +128,7 @@ export async function executeTimeSkip(skipDescription) {
 
     // Save snapshot for potential rollback
     const snapshotKey = `pre_skip_${Date.now()}`;
-    saveSnapshot(chatId, snapshotKey, preSkipSnapshot.worldState, preSkipSnapshot.events, preSkipSnapshot.notebook);
+    await saveSnapshot(chatId, snapshotKey, preSkipSnapshot.worldState, preSkipSnapshot.events, preSkipSnapshot.notebook);
 
     try {
         // ── 2. Resolve Planning LLM profile ─────────────────────
@@ -191,7 +191,7 @@ export async function executeTimeSkip(skipDescription) {
             const computedSeason = computeSeason(oldDayCount, seasonConfig);
             const finalSeason = computedSeason !== null ? computedSeason : (result.currentDay.season || '');
 
-            replaceCurrentDay(chatId, {
+            await replaceCurrentDay(chatId, {
                 ...result.currentDay,
                 season: finalSeason,
                 dayCount: oldDayCount
@@ -200,19 +200,19 @@ export async function executeTimeSkip(skipDescription) {
 
         // Apply event updates
         if (result.eventUpdates) {
-            applyEventUpdates(chatId, result.eventUpdates);
+            await applyEventUpdates(chatId, result.eventUpdates);
             nwstToast('Events updated.', 'info');
         }
 
         // Apply condition updates
         if (result.conditionUpdates) {
-            applyConditionUpdates(chatId, result.conditionUpdates);
+            await applyConditionUpdates(chatId, result.conditionUpdates);
             nwstToast('World conditions updated.', 'info');
         }
 
         // Apply notebook updates
         if (result.notebookUpdates) {
-            applyNotebookUpdates(chatId, result.notebookUpdates);
+            await applyNotebookUpdates(chatId, result.notebookUpdates);
             nwstToast('Notebook updated.', 'info');
         }
 
@@ -273,7 +273,7 @@ export async function executeTimeSkip(skipDescription) {
                 cycleDays
             };
             const newMoonPhases = generateMoonPhases(newAngle, 7, 0, phenOptions);
-            replaceMoonPhases(chatId, newMoonPhases);
+            await replaceMoonPhases(chatId, newMoonPhases);
 
             const phaseInfo = getMoonPhaseForAngle(newAngle);
             nwstToast(`Moon phases recalculated (${phaseSource}). Anchored as "${phaseInfo.phaseName}" (${newAngle.toFixed(1)}°).`, 'info');
@@ -291,6 +291,7 @@ export async function executeTimeSkip(skipDescription) {
         }
 
         nwstToast('Time skip complete.', 'success');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
         return true;
 
     } catch (err) {
@@ -298,10 +299,11 @@ export async function executeTimeSkip(skipDescription) {
         console.error('[NWST Timeskip] FAILED — rolling back:', err);
 
         try {
-            saveWorldState(chatId, preSkipSnapshot.worldState);
-            saveAllEvents(chatId, preSkipSnapshot.events);
-            saveNotebook(chatId, preSkipSnapshot.notebook);
+            await saveWorldState(chatId, preSkipSnapshot.worldState);
+            await saveAllEvents(chatId, preSkipSnapshot.events);
+            await saveNotebook(chatId, preSkipSnapshot.notebook);
             nwstToast(`Time skip failed: ${err.message}. State rolled back.`, 'error');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
         } catch (rollbackErr) {
             console.error('[NWST Timeskip] CRITICAL: Rollback also failed!', rollbackErr);
             nwstToast('Time skip failed and rollback was incomplete. Check console.', 'error');
@@ -438,7 +440,7 @@ function parseTimeskipResponse(response) {
 
 // ── Apply helpers ─────────────────────────────────────────────────────────
 
-function applyEventUpdates(chatId, updates) {
+async function applyEventUpdates(chatId, updates) {
     const events = getAllEvents(chatId);
 
     // Mark resolved
@@ -455,7 +457,7 @@ function applyEventUpdates(chatId, updates) {
 
     // Add new events
     for (const newEvent of (updates.newEvents || [])) {
-        addEvent(chatId, {
+        await addEvent(chatId, {
             ...newEvent,
             status: 'pending',
             origin: 'generated'
@@ -463,15 +465,15 @@ function applyEventUpdates(chatId, updates) {
     }
 }
 
-function applyConditionUpdates(chatId, updates) {
+async function applyConditionUpdates(chatId, updates) {
     for (const [key, content] of Object.entries(updates)) {
         if (content) {
-            updateConditionContent(chatId, key, content);
+            await updateConditionContent(chatId, key, content);
         }
     }
 }
 
-function applyNotebookUpdates(chatId, updates) {
+async function applyNotebookUpdates(chatId, updates) {
     const notebook = getNotebook(chatId);
 
     // This is a simplified application — refined during integration testing

@@ -134,6 +134,23 @@ export function buildHomeTab() {
                 </div>
             </div>
         </div>
+
+        <!-- ── Pending Events Review ──────────────────────────────── -->
+        <!-- Only shown when scanner has detected NPC events awaiting approval -->
+        <div id="nwst-pending-events-section" style="display:none;margin-bottom:10px">
+            <div class="nwst-lbl" style="margin-bottom:6px">
+                Pending event detections
+                <span class="nwst-badge nwst-badge-week" id="nwst-pending-events-count" style="text-transform:none;letter-spacing:0;font-weight:400;margin-left:6px"></span>
+            </div>
+            <div class="nwst-info-box" style="margin-bottom:8px">
+                The scanner detected these events from recent chat. Review and approve any that should be added to the event horizon, or dismiss them.
+            </div>
+            <div id="nwst-pending-events-list"></div>
+            <div class="nwst-btn-row" style="margin-top:8px">
+                <button class="menu_button nwst-btn-approve" id="nwst-approve-all-pending" style="font-size:13px;padding:7px 16px">Approve all</button>
+                <button class="menu_button nwst-btn-danger" id="nwst-dismiss-all-pending">Dismiss all</button>
+            </div>
+        </div>
     `;
 
     // Wire events and populate with current data
@@ -166,16 +183,16 @@ function wireHomeEvents() {
     // Manual edits to date fields do NOT trigger any API call — they just update the stored data
     const dateDisplay = document.getElementById('nwst-date-display');
     if (dateDisplay) {
-        dateDisplay.addEventListener('blur', () => {
+        dateDisplay.addEventListener('blur', async () => {
             const chatId = getChatId();
-            updateCurrentDay(chatId, { dateDisplay: dateDisplay.textContent.trim() });
+            await updateCurrentDay(chatId, { dateDisplay: dateDisplay.textContent.trim() });
         });
     }
     const dateSub = document.getElementById('nwst-date-sub');
     if (dateSub) {
-        dateSub.addEventListener('blur', () => {
+        dateSub.addEventListener('blur', async () => {
             const chatId = getChatId();
-            updateCurrentDay(chatId, { dateSub: dateSub.textContent.trim() });
+            await updateCurrentDay(chatId, { dateSub: dateSub.textContent.trim() });
         });
     }
 
@@ -197,7 +214,7 @@ function wireHomeEvents() {
     // ── Current Day edit toggle ────────────────────────────────
     const editBtn = document.getElementById('nwst-currentday-edit-btn');
     if (editBtn) {
-        editBtn.addEventListener('click', () => {
+        editBtn.addEventListener('click', async () => {
             toggleCurrentDayEdit(true);
         });
     }
@@ -291,7 +308,7 @@ function wireHomeEvents() {
                 const chatId = getChatId();
 
                 // Helper: regenerate moon phases based on selected source
-                const doMoonPhaseRegen = () => {
+                const doMoonPhaseRegen = async () => {
                     // Build context for phenomena computation so they're stored at generation time
                     const currentDay = getCurrentDay(chatId);
                     const cycleDays = getSetting('moonCycleDays') || 29.53;
@@ -311,7 +328,7 @@ function wireHomeEvents() {
                             nwstToast('No date text entered. Using stored angle.', 'warning');
                             const storedAngle = getLunarAngle(chatId);
                             const newMoonPhases = generateMoonPhases(storedAngle, 7, 0, phenOptions);
-                            replaceMoonPhases(chatId, newMoonPhases);
+                            await replaceMoonPhases(chatId, newMoonPhases);
                         }
                     } else if (source === 'manual') {
                         const selectedPhase = window._nwstRegenPhase || phaseNames[0];
@@ -321,7 +338,7 @@ function wireHomeEvents() {
                         // 'stored' — use the direct stored angle without date parsing
                         const storedAngle = getLunarAngle(chatId);
                         const newMoonPhases = generateMoonPhases(storedAngle, 7, 0, phenOptions);
-                        replaceMoonPhases(chatId, newMoonPhases);
+                        await replaceMoonPhases(chatId, newMoonPhases);
                     }
                 };
 
@@ -342,7 +359,7 @@ function wireHomeEvents() {
     // ── Manage Events button (switches to Events tab) ──────────
     const manageBtn = document.getElementById('nwst-events-manage-btn');
     if (manageBtn) {
-        manageBtn.addEventListener('click', () => {
+        manageBtn.addEventListener('click', async () => {
             // Simulate clicking the Events tab
             const eventsTab = document.querySelector('.nwst-tab[data-nwst-tab="events"]');
             if (eventsTab) eventsTab.click();
@@ -392,7 +409,7 @@ function formatCurrentDayForEdit(day) {
 /**
  * Parse the edit textarea content back into Current Day fields and save.
  */
-function saveCurrentDayEdit() {
+async function saveCurrentDayEdit() {
     const textarea = document.getElementById('nwst-currentday-textarea');
     if (!textarea) return;
 
@@ -433,7 +450,7 @@ function saveCurrentDayEdit() {
         }
     }
 
-    updateCurrentDay(chatId, day);
+    await updateCurrentDay(chatId, day);
 
     // ── Recalculate lunar angle if the date changed ──────────────
     // Instead of estimating day difference, we now parse the date text
@@ -452,7 +469,7 @@ function saveCurrentDayEdit() {
             cycleDays
         };
         const newMoonPhases = generateMoonPhases(newAngle, 7, 0, phenOptions);
-        replaceMoonPhases(chatId, newMoonPhases);
+        await replaceMoonPhases(chatId, newMoonPhases);
         nwstToast(`Date changed — moon phases recalculated from date text. Anchored as "${phaseInfo.phaseName}" (${newAngle.toFixed(1)}°).`, 'info');
     }
 
@@ -685,6 +702,178 @@ function refreshEventsDigest() {
     }
 
     container.innerHTML = html;
+}
+
+// ── Pending events review ─────────────────────────────────────────────────
+
+function refreshPendingEvents() {
+    const section = document.getElementById('nwst-pending-events-section');
+    const list = document.getElementById('nwst-pending-events-list');
+    const countBadge = document.getElementById('nwst-pending-events-count');
+    if (!section || !list) return;
+
+    // Read pending events from chatMetadata
+    let pending = [];
+    try {
+        const meta = SillyTavern.getContext().chatMetadata;
+        pending = meta?.['nwst:pendingEvents'] || [];
+    } catch (e) { /* non-fatal */ }
+
+    if (pending.length === 0) {
+        section.style.display = 'none';
+        return;
+    }
+
+    section.style.display = 'block';
+    if (countBadge) countBadge.textContent = `${pending.length} detected`;
+
+    let html = '';
+    for (const ev of pending) {
+        const tierLabel = ev.tier === 'immediate' ? 'Immediate' :
+                          ev.tier === 'week' ? 'This week' :
+                          ev.tier === 'month' ? 'This month' : 'Undetermined';
+        html += `
+        <div class="nwst-char-pending" style="margin-bottom:8px;border:0.5px solid #AFA9EC;border-radius:8px;overflow:hidden" data-pending-id="${ev.id}">
+            <div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:#EEEDFE">
+                <span class="nwst-badge nwst-badge-week" style="flex-shrink:0">${escapeHTML(tierLabel)}</span>
+                <span style="font-weight:500;font-size:13px;flex:1">${escapeHTML(ev.title)}</span>
+            </div>
+            <div style="padding:8px 12px;font-size:12px;color:#555;line-height:1.5">${escapeHTML(ev.description)}</div>
+            <div class="nwst-btn-row" style="padding:6px 12px 10px">
+                <button class="menu_button nwst-btn-approve nwst-approve-pending" data-pending-id="${ev.id}" style="font-size:12px">Approve</button>
+                <button class="menu_button nwst-btn nwst-dismiss-pending" data-pending-id="${ev.id}" style="font-size:12px">Dismiss</button>
+            </div>
+        </div>`;
+    }
+    list.innerHTML = html;
+}
+
+async function approvePendingEvent(pendingId) {
+    try {
+        const ctx = SillyTavern.getContext();
+        const meta = ctx.chatMetadata;
+        const pending = meta?.['nwst:pendingEvents'] || [];
+        const ev = pending.find(e => e.id === pendingId);
+        if (!ev) return;
+
+        const chatId = getChatId();
+        const { addEvent } = await import('../data/events.js');
+        const { getMaxActiveEvents } = await import('../settings.js');
+        const { getAllEvents } = await import('../data/events.js');
+
+        // Check pool cap
+        const poolCap = getMaxActiveEvents();
+        const currentActive = getAllEvents(chatId).filter(e =>
+            e.status === 'pending' || e.status === 'inprogress'
+        ).length;
+
+        if (currentActive >= poolCap) {
+            nwstToast(`Event pool is full (${poolCap} active events). Resolve or dismiss existing events first.`, 'warning');
+            return;
+        }
+
+        await addEvent(chatId, {
+            title: ev.title,
+            description: ev.description,
+            tier: ev.tier || 'undetermined',
+            status: 'pending',
+            isNPC: true,
+            npcOrigin: 'detected',
+            origin: 'detected'
+        });
+
+        // Remove from pending
+        meta['nwst:pendingEvents'] = pending.filter(e => e.id !== pendingId);
+        await ctx.saveMetadata();
+
+        nwstToast(`Event added: "${ev.title}"`, 'success');
+        refreshPendingEvents();
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
+
+    } catch (err) {
+        console.error('[NWST Home] approvePendingEvent failed:', err);
+    }
+}
+
+async function dismissPendingEvent(pendingId) {
+    try {
+        const ctx = SillyTavern.getContext();
+        const meta = ctx.chatMetadata;
+        const pending = meta?.['nwst:pendingEvents'] || [];
+        meta['nwst:pendingEvents'] = pending.filter(e => e.id !== pendingId);
+        await ctx.saveMetadata();
+        refreshPendingEvents();
+    } catch (err) {
+        console.error('[NWST Home] dismissPendingEvent failed:', err);
+    }
+}
+
+async function approveAllPending() {
+    try {
+        const ctx = SillyTavern.getContext();
+        const meta = ctx.chatMetadata;
+        const pending = [...(meta?.['nwst:pendingEvents'] || [])];
+        if (pending.length === 0) return;
+
+        const chatId = getChatId();
+        const { addEvent, getAllEvents } = await import('../data/events.js');
+        const { getMaxActiveEvents } = await import('../settings.js');
+
+        const poolCap = getMaxActiveEvents();
+        let currentActive = getAllEvents(chatId).filter(e =>
+            e.status === 'pending' || e.status === 'inprogress'
+        ).length;
+
+        let added = 0;
+        const remaining = [];
+
+        for (const ev of pending) {
+            // Detected NPC events always bypass pool cap — they are facts from chat
+            const isDetected = ev.npcOrigin === 'detected';
+            if (!isDetected && currentActive >= poolCap) {
+                remaining.push(ev);
+                continue;
+            }
+            await addEvent(chatId, {
+                title: ev.title,
+                description: ev.description,
+                tier: ev.tier || 'undetermined',
+                status: 'pending',
+                isNPC: true,
+                npcOrigin: 'detected',
+                origin: 'detected'
+            });
+            if (!isDetected) currentActive++;
+            added++;
+        }
+
+        meta['nwst:pendingEvents'] = remaining;
+        await ctx.saveMetadata();
+
+        if (remaining.length > 0) {
+            nwstToast(`${added} event(s) approved. ${remaining.length} skipped — pool cap reached.`, 'warning');
+        } else {
+            nwstToast(`${added} event(s) approved.`, 'success');
+        }
+
+        refreshPendingEvents();
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
+
+    } catch (err) {
+        console.error('[NWST Home] approveAllPending failed:', err);
+    }
+}
+
+async function dismissAllPending() {
+    try {
+        const ctx = SillyTavern.getContext();
+        ctx.chatMetadata['nwst:pendingEvents'] = [];
+        await ctx.saveMetadata();
+        refreshPendingEvents();
+        nwstToast('All pending events dismissed.', 'info');
+    } catch (err) {
+        console.error('[NWST Home] dismissAllPending failed:', err);
+    }
 }
 
 // ── Utility: Escape HTML entities ─────────────────────────────────────────

@@ -160,6 +160,15 @@ export async function runBatchScan() {
     }
 
     const hasData = chatHasData(chatId);
+    // DIAGNOSTIC: Log what chatHasData found
+    try {
+        const { listCurrentChatKeys } = await import('../data/storage.js');
+        const keys = listCurrentChatKeys();
+        console.log(`[NWST BatchScan] DIAG: chatHasData=${hasData}, current chat NWST keys: [${keys.join(', ') || '(none)'}]`);
+    } catch (e) {
+        console.warn('[NWST BatchScan] DIAG logging failed:', e);
+    }
+
     if (hasData) {
         nwstToast('Batch scan has already been run for this chat. Existing data will not be overwritten.', 'warning');
         return false;
@@ -225,6 +234,27 @@ export async function runBatchScan() {
         await synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages, settingContext);
 
         nwstToast('Batch scan complete.', 'success');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
+
+        // Run a dedicated secrets scan to pick up anything the synthesis pass missed.
+        try {
+            const { scanForSecrets } = await import('./secretScan.js');
+            const secretsAdded = await scanForSecrets(chatId);
+            if (secretsAdded > 0) {
+                console.log(`[NWST BatchScan] Secrets scan added ${secretsAdded} new secret(s).`);
+            }
+        } catch (e) {
+            console.warn('[NWST BatchScan] Secrets scan failed (non-fatal):', e);
+        }
+
+        // Notify the scanner that batch scan is done.
+        // If the scanner is in warmup phase, this transitions it to cadence
+        // immediately without requiring the warmup floor to be reached first.
+        try {
+            const { notifyBatchScanComplete } = await import('./scanner.js');
+            notifyBatchScanComplete();
+        } catch (e) { /* non-fatal — scanner may not be running */ }
+
         return true;
 
     } catch (err) {
@@ -368,10 +398,18 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example (seasonal): "The autumn harvest festival preparations are underway across the region"\n`;
     prompt += `    * Example (environmental): "The river's rise threatens low-lying farmlands as spring melt accelerates"\n`;
     prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
-    prompt += `  AIM FOR AT LEAST 3-5 WORLD-LEVEL EVENTS in addition to any chat-detected events.\n`;
-    prompt += `  CRITICAL — PROPORTION: The majority of events should be world-generated, not chat-detected.\n\n`;
+    prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 2 WORLD events per tier, max 3 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
+    prompt += `  CRITICAL — PROPORTION: Quality over quantity. 1 strong world event beats 3 thin ones.\n\n`;
     prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
     prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;
+
+    prompt += `=== SECRETS ===\n`;
+    prompt += `Extract any notable secrets, hidden knowledge, or information asymmetries present in the chat history.\n`;
+    prompt += `  - A secret must have clear narrative support in the messages — do not invent unrelated secrets.\n`;
+    prompt += `  - When a secret involves the {{user}} character (the PC), use type "user_pc" — NOT "character".\n`;
+    prompt += `  - Quality over quantity — 2-5 well-developed secrets are better than 10 shallow ones.\n`;
+    prompt += `  - If no secrets are present, return an empty array [].\n\n`;
+
     prompt += `Use this EXACT JSON structure:\n\n`;
     prompt += `{
   "currentDay": {
@@ -413,6 +451,18 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
       "currentToneAtmosphere": ["string", "..."]
     }
   },
+  "secrets": [
+    {
+      "title": "Short descriptive label for this secret",
+      "type": "character|user_pc|world|dramatic_irony|unconfirmed_suspicion",
+      "secret": "Detailed explanation of what the secret IS. 1-3 sentences.",
+      "whoKnows": ["Character name who knows this secret"],
+      "whoDoesNotKnow": ["Character name who does NOT know this secret"],
+      "evidenceShown": "What evidence has been shown in the chat so far (if any)",
+      "pressureRisk": "What pressure or risk would be created if this secret were revealed",
+      "revealConditions": "Under what circumstances this secret might be revealed"
+    }
+  ],
   "communities": [
     {
       "name": "Community or faction name",
@@ -454,6 +504,32 @@ function parseBatchSynthesis(response) {
 // ── Apply batch results to storage ────────────────────────────────────────
 
 async function applyBatchResults(chatId, result) {
+    // ── Process secrets first (before notebook saves, since secrets live in notebook) ──
+    if (result.secrets && Array.isArray(result.secrets) && result.secrets.length > 0) {
+        const { addSecret } = await import('../data/notebook.js');
+        let addedCount = 0;
+        for (const secret of result.secrets) {
+            try {
+                await addSecret(chatId, {
+                    title: secret.title || 'Untitled secret',
+                    type: secret.type || 'character',
+                    secret: secret.secret || '',
+                    whoKnows: Array.isArray(secret.whoKnows) ? secret.whoKnows : [],
+                    whoDoesNotKnow: Array.isArray(secret.whoDoesNotKnow) ? secret.whoDoesNotKnow : [],
+                    evidenceShown: secret.evidenceShown || '',
+                    pressureRisk: secret.pressureRisk || '',
+                    revealConditions: secret.revealConditions || ''
+                });
+                addedCount++;
+            } catch (err) {
+                console.warn('[NWST BatchScan] Failed to add secret from synthesis:', err, secret);
+            }
+        }
+        if (addedCount > 0) {
+            console.log(`[NWST BatchScan] Seeded ${addedCount} secret(s) from synthesis.`);
+        }
+    }
+
     if (result.currentDay) {
         const { replaceCurrentDay } = await import('../data/worldState.js');
 
@@ -555,14 +631,53 @@ async function applyBatchResults(chatId, result) {
 
     if (result.events && Array.isArray(result.events)) {
         const { addEvent } = await import('../data/events.js');
-        for (const event of result.events) {
+        // Category-aware caps per tier:
+        //   Detected NPC events  — no cap (facts from chat)
+        //   Generated NPC events — max 3 per tier
+        //   World events         — max 2 per tier
+        const batchCounts = {};
+        const cappedEvents = result.events.filter(ev => {
+            const tier = ev.tier || 'undetermined';
+            if (!batchCounts[tier]) batchCounts[tier] = { detected_npc: 0, generated_npc: 0, world: 0 };
+            const tc = batchCounts[tier];
+
+            if (ev.isNPC && ev.npcOrigin === 'detected') {
+                // No cap on detected NPC events
+                return true;
+            } else if (ev.isNPC) {
+                if (tc.generated_npc >= 3) return false;
+                tc.generated_npc++;
+                return true;
+            } else {
+                if (tc.world >= 2) return false;
+                tc.world++;
+                return true;
+            }
+        });
+        // Respect active pool cap for generated events.
+        // EXCEPTION: detected NPC events (explicit plans from chat) always bypass the cap.
+        const { getMaxActiveEvents } = await import('../settings.js');
+        const poolCap = getMaxActiveEvents();
+        let poolUsed = 0;
+
+        for (const event of cappedEvents) {
+            const isDetected = event.isNPC && event.npcOrigin === 'detected';
+
+            // Detected NPC events bypass the pool cap — they are facts, not generated content
+            if (!isDetected && poolUsed >= poolCap) {
+                console.log(`[NWST BatchScan] Event pool cap (${poolCap}) reached — skipping generated event: "${event.title}"`);
+                continue;
+            }
+
             await addEvent(chatId, {
                 ...event,
                 status: 'pending',
-                origin: 'detected',
+                origin: isDetected ? 'detected' : 'generated',
                 isNPC: event.isNPC || false,
-                npcOrigin: event.isNPC ? 'detected' : null
+                npcOrigin: event.isNPC ? (event.npcOrigin || 'generated') : null
             });
+
+            if (!isDetected) poolUsed++;
         }
         nwstToast('Events complete.', 'info');
     }
@@ -578,6 +693,16 @@ async function applyBatchResults(chatId, result) {
     }
 
     if (result.notebook) {
+        // DIAGNOSTIC: Log notebook structure before save
+        console.log(`[NWST BatchScan] DIAG: result.notebook has keys: [${Object.keys(result.notebook).join(', ')}], has secrets: ${'secrets' in result.notebook}`);
+        // Check whether secrets from result.secrets were already added to metadata
+        try {
+            const { getNotebook } = await import('../data/notebook.js');
+            const existingBeforeOverwrite = getNotebook(chatId);
+            console.log(`[NWST BatchScan] DIAG: existing notebook before saveNotebook — secrets count: ${existingBeforeOverwrite.secrets?.length ?? 'N/A'}`);
+            console.log(`[NWST BatchScan] DIAG: existing core.unresolvedDetail count: ${existingBeforeOverwrite.core?.unresolvedDetail?.length ?? 'N/A'}`);
+        } catch (e) { /* non-fatal */ }
+
         // ── Validate & normalize notebook fields: ensure string[] fields are arrays, not raw strings ──
         // LLMs sometimes return "currentToneAtmosphere": "string" instead of ["string"],
         // which causes bullet rendering to iterate characters instead of array items.
@@ -600,7 +725,13 @@ async function applyBatchResults(chatId, result) {
         }
 
         const { saveNotebook } = await import('../data/notebook.js');
+        console.log(`[NWST BatchScan] DIAG: About to saveNotebook — result.notebook has secrets? ${'secrets' in result.notebook}, core keys: ${Object.keys(result.notebook.core || {}).join(', ')}`);
         await saveNotebook(chatId, result.notebook);
+        // Verify after save
+        try {
+            const afterOverwrite = getNotebook(chatId);
+            console.log(`[NWST BatchScan] DIAG: after saveNotebook — secrets count: ${afterOverwrite.secrets?.length ?? 'N/A'}, core.unresolvedDetail count: ${afterOverwrite.core?.unresolvedDetail?.length ?? 'N/A'}`);
+        } catch (e) { /* non-fatal */ }
         nwstToast('Notebook seeded.', 'info');
     }
 

@@ -176,11 +176,11 @@ function refreshConditionsUI() {
 function wireConditionEvents() {
     // ── Eye toggle ─────────────────────────────────────────────
     document.querySelectorAll('.nwst-cond-eye').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const condKey = this.getAttribute('data-cond');
             const chatId = getChatId();
-            const nowEnabled = toggleConditionEnabled(chatId, condKey);
+            const nowEnabled = await toggleConditionEnabled(chatId, condKey);
             this.classList.toggle('nwst-active', nowEnabled);
             const row = document.getElementById(`nwst-cond-${condKey}`);
             if (row) row.classList.toggle('nwst-muted', !nowEnabled);
@@ -190,7 +190,7 @@ function wireConditionEvents() {
 
     // ── Edit pencil ────────────────────────────────────────────
     document.querySelectorAll('.nwst-cond-edit').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const condKey = this.getAttribute('data-cond');
             toggleConditionEdit(condKey, true);
@@ -199,12 +199,12 @@ function wireConditionEvents() {
 
     // ── Save ──────────────────────────────────────────────────
     document.querySelectorAll('.nwst-cond-save').forEach(btn => {
-        btn.onclick = function () {
+        btn.onclick = async function () {
             const condKey = this.getAttribute('data-cond');
             const textarea = document.getElementById(`nwst-cond-${condKey}-textarea`);
             if (textarea) {
                 const chatId = getChatId();
-                updateConditionContent(chatId, condKey, textarea.value);
+                await updateConditionContent(chatId, condKey, textarea.value);
                 toggleConditionEdit(condKey, false);
                 refreshConditionsUI();
                 nwstToast(`${CONDITION_DEFS.find(d => d.key === condKey)?.label} saved.`, 'success');
@@ -214,7 +214,7 @@ function wireConditionEvents() {
 
     // ── Cancel ────────────────────────────────────────────────
     document.querySelectorAll('.nwst-cond-cancel').forEach(btn => {
-        btn.onclick = function () {
+        btn.onclick = async function () {
             const condKey = this.getAttribute('data-cond');
             toggleConditionEdit(condKey, false);
             refreshConditionsUI();
@@ -233,7 +233,7 @@ function wireConditionEvents() {
 
     // ── Accordion collapse/expand toggle ─────────────────────
     document.querySelectorAll('.nwst-condition-hdr').forEach(hdr => {
-        hdr.onclick = function () {
+        hdr.onclick = async function () {
             const row = this.closest('.nwst-condition-row');
             if (row) row.classList.toggle('nwst-open');
         };
@@ -304,7 +304,7 @@ async function regenCondition(condKey, condLabel) {
         }
 
         const newContent = response.trim();
-        updateConditionContent(chatId, condKey, newContent);
+        await updateConditionContent(chatId, condKey, newContent);
         refreshConditionsUI();
         nwstToast(`${condLabel} condition regenerated.`, 'success');
 
@@ -413,14 +413,14 @@ function refreshCommunitiesUI() {
 function wireCommunityEvents() {
     // ── Expand/collapse toggle ─────────────────────────────────
     document.querySelectorAll('.nwst-community-toggle').forEach(hdr => {
-        hdr.onclick = function () {
+        hdr.onclick = async function () {
             this.closest('.nwst-community-entry').classList.toggle('nwst-open');
         };
     });
 
     // ── Edit button ───────────────────────────────────────────
     document.querySelectorAll('.nwst-community-edit-btn').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const entry = this.closest('.nwst-community-entry');
             entry.querySelector('.nwst-community-summary-text').style.display = 'none';
@@ -431,7 +431,7 @@ function wireCommunityEvents() {
 
     // ── Save ──────────────────────────────────────────────────
     document.querySelectorAll('.nwst-community-save').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const entry = this.closest('.nwst-community-entry');
             const comId = entry.getAttribute('data-community-id');
@@ -445,7 +445,7 @@ function wireCommunityEvents() {
                 };
                 if (nameInput) updates.name = nameInput.value;
                 if (membersInput) updates.members = membersInput.value;
-                updateCommunity(chatId, comId, updates);
+                await updateCommunity(chatId, comId, updates);
                 refreshCommunitiesUI();
                 nwstToast('Community saved.', 'success');
             }
@@ -454,7 +454,7 @@ function wireCommunityEvents() {
 
     // ── Cancel ────────────────────────────────────────────────
     document.querySelectorAll('.nwst-community-cancel').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             refreshCommunitiesUI();
         };
@@ -462,12 +462,12 @@ function wireCommunityEvents() {
 
     // ── Delete ────────────────────────────────────────────────
     document.querySelectorAll('.nwst-community-delete').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const entry = this.closest('.nwst-community-entry');
             const comId = entry.getAttribute('data-community-id');
             const chatId = getChatId();
-            deleteCommunity(chatId, comId);
+            await deleteCommunity(chatId, comId);
             refreshCommunitiesUI();
             nwstToast('Community deleted.', 'info');
         };
@@ -550,7 +550,7 @@ async function regenCommunitySummary(communityId) {
         }
 
         const newSummary = response.trim();
-        updateCommunitySummary(chatId, communityId, newSummary);
+        await updateCommunitySummary(chatId, communityId, newSummary);
         refreshCommunitiesUI();
         nwstToast(`Summary for "${community.name}" regenerated.`, 'success');
 
@@ -566,9 +566,9 @@ function wireWorldStateEvents() {
     // Add community button
     const addBtn = document.getElementById('nwst-community-add');
     if (addBtn) {
-        addBtn.onclick = () => {
+        addBtn.onclick = async () => {
             const chatId = getChatId();
-            addCommunity(chatId, {
+            await addCommunity(chatId, {
                 name: 'New Community',
                 members: '',
                 summary: ''

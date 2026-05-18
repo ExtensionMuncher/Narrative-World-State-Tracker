@@ -117,9 +117,49 @@ function refreshAllUI() {
     }
 }
 
-// Attach to window so index.js can call it
+// Attach to window so index.js and LLM modules can call UI refreshes
+// without importing UI modules directly (avoids circular dependencies).
 if (typeof window !== 'undefined') {
+    // Refresh ALL built tabs (used on chat change and batch scan)
     window.nwstRefreshAllUI = refreshAllUI;
+
+    /**
+     * Refresh specific tabs by name.
+     * LLM modules call this after completing work so the user sees
+     * updated data immediately without having to switch tabs manually.
+     *
+     * Usage: window.nwstRefreshTabs('home', 'events')
+     *
+     * @param {...string} tabNames - Tab names to refresh: 'home'|'events'|'world'|'notebook'|'settings'
+     */
+    /**
+     * Open the shared popout editor from anywhere in the extension.
+     * Used by secret fields and other editable areas that need expanded editing.
+     * @param {string} title - Header title shown in the popout
+     * @param {string} content - Initial textarea content
+     * @param {function} onSave - Callback with saved text when user clicks Save & close
+     */
+    window.openNWSTPopout = function(title, currentContent, onSave) {
+        const overlay = document.getElementById('nwst-popout-overlay');
+        const titleEl = document.getElementById('nwst-popout-title');
+        const textarea = document.getElementById('nwst-popout-textarea');
+        if (!overlay || !titleEl || !textarea) return;
+        titleEl.textContent = title;
+        textarea.value = currentContent || '';
+        overlay._nwstOnSave = onSave || null;
+        overlay.classList.add('nwst-popout-open');
+        setTimeout(() => textarea.focus(), 50);
+    };
+
+    window.nwstRefreshTabs = function(...tabNames) {
+        for (const tabName of tabNames) {
+            try {
+                refreshTab(tabName);
+            } catch (e) {
+                console.warn(`[NWST Panel] Could not refresh tab "${tabName}":`, e);
+            }
+        }
+    };
 }
 
 // ── Popout (⛶) handler ────────────────────────────────────────────────────

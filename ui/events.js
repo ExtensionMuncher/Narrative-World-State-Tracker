@@ -99,7 +99,7 @@ export function refreshEventsUI() {
 // ── Build a single event item's HTML ──────────────────────────────────────
 
 function buildEventItemHTML(event) {
-    const isOpen = event.status === 'pending' || event.status === 'inprogress'; // Open by default if active
+    const isOpen = false; // All events default to collapsed
     const openClass = isOpen ? ' nwst-open' : '';
 
     return `
@@ -112,6 +112,19 @@ function buildEventItemHTML(event) {
             <span class="nwst-badge nwst-badge-${event.status}">${statusLabel(event.status)}</span>
         </div>
         <div class="nwst-event-body">
+            <div style="margin-bottom:6px">
+                <div style="font-size:11px;color:#999;margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Event name</div>
+                <input type="text" class="nwst-events-title" value="${escapeHTML(event.title)}" style="width:100%;font-size:13px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;" placeholder="Event title...">
+            </div>
+            <div style="margin-bottom:8px">
+                <div style="font-size:11px;color:#999;margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Time category</div>
+                <select class="nwst-events-tier" style="width:100%;font-size:13px;padding:5px 8px;">
+                    <option value="immediate"${event.tier === 'immediate' ? ' selected' : ''}>Immediate</option>
+                    <option value="week"${event.tier === 'week' ? ' selected' : ''}>This week</option>
+                    <option value="month"${event.tier === 'month' ? ' selected' : ''}>This month</option>
+                    <option value="undetermined"${event.tier === 'undetermined' ? ' selected' : ''}>Undetermined</option>
+                </select>
+            </div>
             <textarea class="nwst-events-desc" rows="2" style="margin-bottom:8px" id="nwst-event-desc-${event.id}">${escapeHTML(event.description)}</textarea>
             <div style="font-size:11px;color:#999;margin-bottom:6px">Status</div>
             <div class="nwst-btn-row nwst-events-status-btns" style="margin-bottom:10px">
@@ -182,7 +195,7 @@ function wireEventItemEvents() {
                 const description = window._nwstAddEventDesc?.trim() || 'No description provided.';
                 const tier = window._nwstAddEventTier || 'undetermined';
 
-                const newEvent = addEvent(chatId, {
+                const newEvent = await addEvent(chatId, {
                     title: title,
                     description: description,
                     tier: tier,
@@ -216,19 +229,19 @@ function wireEventItemEvents() {
 
     // ── Expand/collapse toggle ─────────────────────────────────
     container.querySelectorAll('.nwst-events-toggle').forEach(hdr => {
-        hdr.onclick = function () {
+        hdr.onclick = async function () {
             this.closest('.nwst-event-item').classList.toggle('nwst-open');
         };
     });
 
     // ── Status buttons ────────────────────────────────────────
     container.querySelectorAll('.nwst-events-status').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const eventId = this.closest('.nwst-event-item').getAttribute('data-event-id');
             const newStatus = this.getAttribute('data-status');
             const chatId = getChatId();
-            setEventStatus(chatId, eventId, newStatus);
+            await setEventStatus(chatId, eventId, newStatus);
             refreshEventsUI();
             nwstToast(`Event status changed to ${statusLabel(newStatus)}.`, 'info');
         };
@@ -236,14 +249,26 @@ function wireEventItemEvents() {
 
     // ── Save button ───────────────────────────────────────────
     container.querySelectorAll('.nwst-events-save').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const item = this.closest('.nwst-event-item');
             const eventId = item.getAttribute('data-event-id');
             const descTextarea = item.querySelector('.nwst-events-desc');
+            const titleInput   = item.querySelector('.nwst-events-title');
+            const tierSelect   = item.querySelector('.nwst-events-tier');
             const chatId = getChatId();
-            if (descTextarea) {
-                updateEvent(chatId, eventId, { description: descTextarea.value });
+
+            const updates = {};
+            if (descTextarea) updates.description = descTextarea.value;
+            if (titleInput)   updates.title = titleInput.value.trim() || 'Untitled event';
+            if (tierSelect)   updates.tier  = tierSelect.value;
+
+            if (Object.keys(updates).length > 0) {
+                await updateEvent(chatId, eventId, updates);
+                // If tier changed, re-render so event moves to correct group
+                if (tierSelect) {
+                    refreshEventsUI();
+                }
                 nwstToast('Event saved.', 'success');
             }
         };
@@ -251,11 +276,11 @@ function wireEventItemEvents() {
 
     // ── Delete button ─────────────────────────────────────────
     container.querySelectorAll('.nwst-events-delete').forEach(btn => {
-        btn.onclick = function (e) {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const eventId = this.closest('.nwst-event-item').getAttribute('data-event-id');
             const chatId = getChatId();
-            deleteEvent(chatId, eventId);
+            await deleteEvent(chatId, eventId);
             refreshEventsUI();
             nwstToast('Event deleted.', 'info');
         };

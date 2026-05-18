@@ -18,7 +18,9 @@ import {
     isPaused, setPaused,
     getConnectionProfiles, setConnectionProfile,
     getScanFrequency, setScanFrequency,
-    getInjectionSettings, setInjectionSetting,
+    getScanMinimumMessages, setScanMinimumMessages,
+    getMaxSnapshotCount, setMaxSnapshotCount,
+    getInjectionSettings, setInjectionSetting, getMaxActiveEvents,
     getPlannerPrompt, setPlannerPrompt, resetPlannerPrompt, getDefaultPlannerPrompt,
     exportGlobalSettings, importGlobalSettings,
     exportChatData, importChatData,
@@ -81,6 +83,38 @@ export function buildSettingsTab() {
                     <div style="display:flex;align-items:center;gap:8px">
                         <input type="number" id="nwst-setting-scanFrequency" value="20" min="1" max="100" style="width:60px;text-align:center">
                         <span style="font-size:12px;color:#666">messages</span>
+                    </div>
+                </div>
+                <div class="nwst-setting-row">
+                    <div>
+                        <div class="nwst-setting-label">Minimum messages before first scan</div>
+                        <div class="nwst-setting-sub">How many messages must exist before the initial scan fires. Ignored if batch scan has already been run.</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                        <input type="number" id="nwst-setting-scanMinimumMessages" value="10" min="1" max="100" style="width:60px;text-align:center">
+                        <span style="font-size:12px;color:#666">messages</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Setting Context (per-chat) ─────────────────────── -->
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-context">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Setting context</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-context">
+                <div class="nwst-card">
+                    <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
+                        Describe your world's climate, geography, and setting. The day advancement LLM reads this when generating weather forecasts so it knows what kind of world it's operating in — real-world location, fantasy biome, or anything in between. <strong>This is saved per-chat</strong> — each roleplay can have a completely different setting.
+                    </div>
+                    <textarea id="nwst-setting-context" rows="4" style="margin-bottom:8px"
+                        placeholder="e.g. Feudal Japan, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
+                    <div class="nwst-btn-row">
+                        <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
                     </div>
                 </div>
             </div>
@@ -232,33 +266,12 @@ export function buildSettingsTab() {
             </div>
         </div>
 
-        <!-- ── Setting Context (per-chat) ─────────────────────── -->
-        <div class="nwst-accordion-section">
-            <div class="nwst-accordion-header" data-accordion="nwst-accordion-context">
-                <div class="nwst-accordion-header-left">
-                    <span class="nwst-accordion-title">Setting context</span>
-                </div>
-                <span class="nwst-accordion-arrow">▶</span>
-            </div>
-            <div class="nwst-accordion-body" id="nwst-accordion-context">
-                <div class="nwst-card">
-                    <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
-                        Describe your world's climate, geography, and setting. The day advancement LLM reads this when generating weather forecasts so it knows what kind of world it's operating in — real-world location, fantasy biome, or anything in between. <strong>This is saved per-chat</strong> — each roleplay can have a completely different setting.
-                    </div>
-                    <textarea id="nwst-setting-context" rows="4" style="margin-bottom:8px"
-                        placeholder="e.g. Feudal Japan, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
-                    <div class="nwst-btn-row">
-                        <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <!-- ── Season Configuration (per-chat) ────────────────── -->
         <div class="nwst-accordion-section">
             <div class="nwst-accordion-header" data-accordion="nwst-accordion-seasons">
                 <div class="nwst-accordion-header-left">
                     <span class="nwst-accordion-title">Season configuration</span>
+                    <span class="nwst-experimental-badge">Experimental</span>
                 </div>
                 <span class="nwst-accordion-arrow">▶</span>
             </div>
@@ -366,6 +379,16 @@ export function buildSettingsTab() {
                         </label>
                     </div>
                     <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Maximum active events</div>
+                            <div class="nwst-setting-sub">Hard cap on the total active event pool. New events won't be added when this is reached. Resolved and missed events don't count.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-maxActiveEvents" value="12" min="4" max="50" style="width:52px;text-align:center">
+                            <span style="font-size:12px;color:#666">events</span>
+                        </div>
+                    </div>
+                    <div class="nwst-setting-row">
                         <div><div class="nwst-setting-label">Injection placement</div></div>
                         <select id="nwst-setting-placement" style="width:180px;flex-shrink:0">
                             <option value="before_main">Before Main Prompt / Story String</option>
@@ -458,7 +481,7 @@ export function buildSettingsTab() {
 
     // Wire accordion toggle behavior
     document.querySelectorAll('.nwst-accordion-header').forEach(header => {
-        header.addEventListener('click', () => {
+        header.addEventListener('click', async () => {
             const bodyId = header.getAttribute('data-accordion');
             const body = document.getElementById(bodyId);
             if (!body) return;
@@ -557,14 +580,14 @@ function renderSeasonBandsList() {
         startInput.addEventListener('change', updateBand);
         endInput.addEventListener('change', updateBand);
 
-        removeBtn.addEventListener('click', () => {
+        removeBtn.addEventListener('click', async () => {
             const cfg = getSeasonConfig(chatId);
             if (cfg.seasons.length <= 1) {
                 nwstToast('Cannot remove the last season band.', 'warning');
                 return;
             }
             cfg.seasons.splice(i, 1);
-            saveSeasonConfig(chatId, cfg);
+            await saveSeasonConfig(chatId, cfg);
             renderSeasonBandsList();
         });
 
@@ -622,11 +645,11 @@ function renderCalendarMonthsList() {
         daysInput.value = config.monthDays[i] || 30;
 
         // Wire live updates to store
-        const updateMonth = () => {
+        const updateMonth = async () => {
             const cfg = getCalendarConfig(chatId);
             cfg.monthNames[i] = nameInput.value.trim() || `Month ${i + 1}`;
             cfg.monthDays[i] = parseInt(daysInput.value, 10) || 30;
-            saveCalendarConfig(chatId, cfg);
+            await saveCalendarConfig(chatId, cfg);
             validateCalendarTotal();
         };
         nameInput.addEventListener('change', updateMonth);
@@ -688,10 +711,10 @@ function renderCalendarDaysList() {
         nameInput.value = config.weekDays[i] || `Day ${i + 1}`;
 
         // Wire live updates to store
-        const updateDay = () => {
+        const updateDay = async () => {
             const cfg = getCalendarConfig(chatId);
             cfg.weekDays[i] = nameInput.value.trim() || `Day ${i + 1}`;
-            saveCalendarConfig(chatId, cfg);
+            await saveCalendarConfig(chatId, cfg);
         };
         nameInput.addEventListener('change', updateDay);
 
@@ -706,6 +729,12 @@ function populateSettingsUI() {
     populateConnectionProfileDropdowns();
 
     // Scan frequency
+    const minMsgInput = document.getElementById('nwst-setting-scanMinimumMessages');
+    if (minMsgInput) minMsgInput.value = getScanMinimumMessages() || 10;
+
+    const maxSnapInput = document.getElementById('nwst-setting-maxSnapshotCount');
+    if (maxSnapInput) maxSnapInput.value = getMaxSnapshotCount() || 30;
+
     const freqInput = document.getElementById('nwst-setting-scanFrequency');
     if (freqInput) freqInput.value = getScanFrequency();
 
@@ -723,6 +752,8 @@ function populateSettingsUI() {
 
     // Injection toggles
     const inj = getInjectionSettings();
+    const maxEvInput = document.getElementById('nwst-setting-maxActiveEvents');
+    if (maxEvInput) maxEvInput.value = getMaxActiveEvents();
     setCheckbox('nwst-setting-injectCurrentDay', inj.injectCurrentDay);
     setCheckbox('nwst-setting-injectEvents', inj.injectEvents);
     setCheckbox('nwst-setting-injectWorldConditions', inj.injectWorldConditions);
@@ -779,7 +810,7 @@ function renderMoonsList() {
         cycleInput.value = moon.cycleDays || 29.53;
 
         // Wire events
-        const updateMoon = () => {
+        const updateMoon = async () => {
             const m = getSetting('moons') || [];
             if (m[i]) {
                 m[i].enabled = cb.checked;
@@ -792,7 +823,7 @@ function renderMoonsList() {
         nameInput.addEventListener('change', updateMoon);
         cycleInput.addEventListener('change', updateMoon);
 
-        removeBtn.addEventListener('click', () => {
+        removeBtn.addEventListener('click', async () => {
             const m = getSetting('moons') || [];
             if (m.length <= 1) {
                 nwstToast('Cannot remove the last moon. Set its cycle length to 0 or disable moons entirely.', 'warning');
@@ -837,7 +868,7 @@ function populateConnectionProfileDropdowns() {
         if (!select) continue;
 
         // Clear and add default option
-        select.innerHTML = '<option value="">— Same as current chat profile —</option>';
+        select.innerHTML = '<option value="">— Not configured (feature disabled) —</option>';
 
         // Add each connection profile as an option
         for (const profile of profiles) {
@@ -865,6 +896,14 @@ function wireSettingsEvents() {
     wireSelect('nwst-setting-narrativeConsistencyLLM', (val) => setConnectionProfile('narrativeConsistencyLLM', val));
 
     // ── Scan frequency ───────────────────────────────────────────
+    wireInput('nwst-setting-scanMinimumMessages', (val) => {
+        setScanMinimumMessages(val);
+    });
+
+    wireInput('nwst-setting-maxSnapshotCount', (val) => {
+        setMaxSnapshotCount(val);
+    });
+
     wireInput('nwst-setting-scanFrequency', (val) => {
         const num = parseInt(val, 10);
         if (num >= 1 && num <= 100) setScanFrequency(num);
@@ -881,7 +920,7 @@ function wireSettingsEvents() {
     // ── Add Moon button ────────────────────────────────────────
     const addMoonBtn = document.getElementById('nwst-setting-addMoon');
     if (addMoonBtn) {
-        addMoonBtn.addEventListener('click', () => {
+        addMoonBtn.addEventListener('click', async () => {
             const moons = getSetting('moons') || [];
             const newId = 'moon_' + Date.now();
             moons.push({ id: newId, name: 'New Moon', cycleDays: 29.53, enabled: true });
@@ -893,11 +932,11 @@ function wireSettingsEvents() {
     // ── Setting context (per-chat) ───────────────────────────────
     const saveContextBtn = document.getElementById('nwst-setting-saveContext');
     if (saveContextBtn) {
-        saveContextBtn.addEventListener('click', () => {
+        saveContextBtn.addEventListener('click', async () => {
             const chatId = getChatId();
             const textarea = document.getElementById('nwst-setting-context');
             if (textarea) {
-                saveSettingContext(chatId, textarea.value);
+                await saveSettingContext(chatId, textarea.value);
                 nwstToast('Setting context saved.', 'success');
             }
         });
@@ -905,6 +944,7 @@ function wireSettingsEvents() {
 
     // ── Injection toggles ────────────────────────────────────────
     wireCheckbox('nwst-setting-injectCurrentDay', (checked) => setInjectionSetting('injectCurrentDay', checked));
+    wireInput('nwst-setting-maxActiveEvents', (val) => setInjectionSetting('maxActiveEvents', Math.max(4, parseInt(val) || 12)));
     wireCheckbox('nwst-setting-injectEvents', (checked) => setInjectionSetting('injectEvents', checked));
     wireCheckbox('nwst-setting-injectWorldConditions', (checked) => setInjectionSetting('injectWorldConditions', checked));
 
@@ -925,7 +965,7 @@ function wireSettingsEvents() {
     // Mode selector — show/hide year length and bands based on mode
     const seasonModeSelect = document.getElementById('nwst-setting-seasonMode');
     if (seasonModeSelect) {
-        seasonModeSelect.addEventListener('change', () => {
+        seasonModeSelect.addEventListener('change', async () => {
             const yearLengthRow = document.getElementById('nwst-season-yearLength-row');
             const bandsSection = document.getElementById('nwst-season-bands-section');
             const isAuto = seasonModeSelect.value === 'auto';
@@ -938,7 +978,7 @@ function wireSettingsEvents() {
     // Add season band button
     const addBandBtn = document.getElementById('nwst-setting-addSeasonBand');
     if (addBandBtn) {
-        addBandBtn.addEventListener('click', () => {
+        addBandBtn.addEventListener('click', async () => {
             const chatId = getChatId();
             if (!chatId) { nwstToast('No active chat.', 'error'); return; }
             const config = getSeasonConfig(chatId);
@@ -951,7 +991,7 @@ function wireSettingsEvents() {
                 defaultEnd = defaultStart + 30;
             }
             config.seasons.push({ name: 'New Season', startDay: defaultStart, endDay: defaultEnd });
-            saveSeasonConfig(chatId, config);
+            await saveSeasonConfig(chatId, config);
             renderSeasonBandsList();
         });
     }
@@ -959,7 +999,7 @@ function wireSettingsEvents() {
     // Save season config button
     const saveSeasonBtn = document.getElementById('nwst-setting-saveSeasonConfig');
     if (saveSeasonBtn) {
-        saveSeasonBtn.addEventListener('click', () => {
+        saveSeasonBtn.addEventListener('click', async () => {
             const chatId = getChatId();
             if (!chatId) { nwstToast('No active chat.', 'error'); return; }
 
@@ -988,7 +1028,7 @@ function wireSettingsEvents() {
                 seasons: seasons.length > 0 ? seasons : [{ name: 'Spring', startDay: 0, endDay: 91 }]
             };
 
-            saveSeasonConfig(chatId, config);
+            await saveSeasonConfig(chatId, config);
             nwstToast('Season configuration saved.', 'success');
         });
     }
@@ -996,18 +1036,18 @@ function wireSettingsEvents() {
     // ── Calendar Configuration ──────────────────────────────────────
     const enableCalToggle = document.getElementById('nwst-setting-enableCalendarConfig');
     if (enableCalToggle) {
-        enableCalToggle.addEventListener('change', () => {
+        enableCalToggle.addEventListener('change', async () => {
             const chatId = getChatId();
             if (!chatId) return;
             const config = getCalendarConfig(chatId);
             config.enabled = enableCalToggle.checked;
-            saveCalendarConfig(chatId, config);
+            await saveCalendarConfig(chatId, config);
         });
     }
 
     const monthCountInput = document.getElementById('nwst-setting-monthCount');
     if (monthCountInput) {
-        monthCountInput.addEventListener('change', () => {
+        monthCountInput.addEventListener('change', async () => {
             const chatId = getChatId();
             if (!chatId) return;
             const num = parseInt(monthCountInput.value, 10);
@@ -1023,7 +1063,7 @@ function wireSettingsEvents() {
             while (config.monthDays.length < num) config.monthDays.push(30);
             config.monthNames = config.monthNames.slice(0, num);
             config.monthDays = config.monthDays.slice(0, num);
-            saveCalendarConfig(chatId, config);
+            await saveCalendarConfig(chatId, config);
             renderCalendarMonthsList();
             validateCalendarTotal();
         });
@@ -1031,7 +1071,7 @@ function wireSettingsEvents() {
 
     const saveCalBtn = document.getElementById('nwst-setting-saveCalendarConfig');
     if (saveCalBtn) {
-        saveCalBtn.addEventListener('click', () => {
+        saveCalBtn.addEventListener('click', async () => {
             const chatId = getChatId();
             if (!chatId) { nwstToast('No active chat.', 'error'); return; }
             // Read current values from DOM
@@ -1059,7 +1099,7 @@ function wireSettingsEvents() {
                 }
             });
 
-            saveCalendarConfig(chatId, config);
+            await saveCalendarConfig(chatId, config);
             // Re-validate and re-populate to ensure consistency
             renderCalendarMonthsList();
             renderCalendarDaysList();
@@ -1071,7 +1111,7 @@ function wireSettingsEvents() {
     // ── Day Count (update instantly on button click) ──────────────
     const saveDayCountBtn = document.getElementById('nwst-setting-saveDayCount');
     if (saveDayCountBtn) {
-        saveDayCountBtn.addEventListener('click', () => {
+        saveDayCountBtn.addEventListener('click', async () => {
             const chatId = getChatId();
             if (!chatId) { nwstToast('No active chat.', 'error'); return; }
             const dayCountInput = document.getElementById('nwst-setting-dayCount');
@@ -1081,7 +1121,7 @@ function wireSettingsEvents() {
                 nwstToast('Day count must be a non-negative integer.', 'warning');
                 return;
             }
-            updateCurrentDay(chatId, { dayCount: newCount });
+            await updateCurrentDay(chatId, { dayCount: newCount });
             nwstToast('Day count updated to ' + newCount + '.', 'success');
         });
     }
@@ -1092,7 +1132,7 @@ function wireSettingsEvents() {
     // Import planner prompt from file
     const importPromptBtn = document.getElementById('nwst-setting-importPrompt');
     if (importPromptBtn) {
-        importPromptBtn.addEventListener('click', () => {
+        importPromptBtn.addEventListener('click', async () => {
             triggerFileImport((text) => {
                 const textarea = document.getElementById('nwst-setting-plannerPrompt');
                 if (textarea) {
@@ -1107,7 +1147,7 @@ function wireSettingsEvents() {
     // Export planner prompt to file
     const exportPromptBtn = document.getElementById('nwst-setting-exportPrompt');
     if (exportPromptBtn) {
-        exportPromptBtn.addEventListener('click', () => {
+        exportPromptBtn.addEventListener('click', async () => {
             const prompt = getPlannerPrompt();
             download(prompt, 'nwst-planner-prompt.txt', 'text/plain');
             nwstToast('Planner prompt exported.', 'info');
@@ -1117,7 +1157,7 @@ function wireSettingsEvents() {
     // Reset planner prompt to default
     const resetPromptBtn = document.getElementById('nwst-setting-resetPrompt');
     if (resetPromptBtn) {
-        resetPromptBtn.addEventListener('click', () => {
+        resetPromptBtn.addEventListener('click', async () => {
             resetPlannerPrompt();
             const textarea = document.getElementById('nwst-setting-plannerPrompt');
             if (textarea) textarea.value = getPlannerPrompt();
@@ -1136,7 +1176,7 @@ function wireSettingsEvents() {
     // ── Import / Export All ──────────────────────────────────────
     const importAllBtn = document.getElementById('nwst-setting-importAll');
     if (importAllBtn) {
-        importAllBtn.addEventListener('click', () => {
+        importAllBtn.addEventListener('click', async () => {
             triggerFileImport((text) => {
                 const chatId = getChatId();
                 const success = importAll(chatId, text);
@@ -1152,7 +1192,7 @@ function wireSettingsEvents() {
 
     const exportAllBtn = document.getElementById('nwst-setting-exportAll');
     if (exportAllBtn) {
-        exportAllBtn.addEventListener('click', () => {
+        exportAllBtn.addEventListener('click', async () => {
             const chatId = getChatId();
             const json = exportAll(chatId);
             download(json, `nwst-export-${chatId}.json`, 'application/json');
@@ -1185,7 +1225,7 @@ function wireSettingsEvents() {
 
             // Restore the Setting Context
             if (preservedContext) {
-                saveSettingContext(chatId, preservedContext);
+                await saveSettingContext(chatId, preservedContext);
             }
 
             nwstToast('All NWST data cleared for this chat (Setting Context preserved).', 'success');
@@ -1257,7 +1297,7 @@ function wireTextarea(id, callback) {
         el.addEventListener('blur', () => callback(el.value));
         // Also save periodically while typing (every 3 seconds of inactivity)
         let debounceTimer;
-        el.addEventListener('input', () => {
+        el.addEventListener('input', async () => {
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => callback(el.value), 3000);
         });

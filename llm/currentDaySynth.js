@@ -106,7 +106,7 @@ export async function synthesizeCurrentDay(chatId, profileOverride) {
         // whatever the LLM wrote — the engine is the authority.
         const finalSeason = computedSeason !== null ? computedSeason : (parsed.season || currentDay.season);
 
-        updateCurrentDay(chatId, {
+        await updateCurrentDay(chatId, {
             season:          finalSeason,
             weatherToday:    parsed.weatherToday    || currentDay.weatherToday,
             flora:           parsed.flora           || currentDay.flora,
@@ -115,6 +115,7 @@ export async function synthesizeCurrentDay(chatId, profileOverride) {
         });
 
         console.log('[NWST CurrentDaySynth] Current Day block updated.');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
         return true;
 
     } catch (err) {

@@ -72,9 +72,9 @@ export function getLunarAngle(chatId) {
  * @param {string} chatId
  * @param {number} angle - Angle in degrees (will be normalized to 0-360)
  */
-export function setLunarAngle(chatId, angle) {
+export async function setLunarAngle(chatId, angle) {
     const normalized = ((angle % 360) + 360) % 360;
-    updateCurrentDay(chatId, { lunarAngle: normalized });
+    await updateCurrentDay(chatId, { lunarAngle: normalized });
 }
 
 /**
@@ -461,11 +461,11 @@ export function getMoonPhenomena(angle, dayIndex, cycleDays, options = {}) {
  * @param {string} phaseName - One of the 8 standard phases
  * @returns {boolean} True on success
  */
-export function setMoonPhaseAnchor(chatId, phaseName) {
+export async function setMoonPhaseAnchor(chatId, phaseName) {
     if (!chatId || !phaseName) return false;
 
     const angle = getPhaseAngle(phaseName);
-    setLunarAngle(chatId, angle);
+    await setLunarAngle(chatId, angle);
 
     // Compute phenomena in context of the current day
     const day = getCurrentDay(chatId);
@@ -476,7 +476,7 @@ export function setMoonPhaseAnchor(chatId, phaseName) {
         cycleDays
     };
     const newMoonPhases = generateMoonPhases(angle, 7, 0, phenOptions);
-    replaceMoonPhases(chatId, newMoonPhases);
+    await replaceMoonPhases(chatId, newMoonPhases);
 
     return true;
 }
@@ -503,7 +503,7 @@ export function setMoonPhaseAnchor(chatId, phaseName) {
  * @param {string} [dateText] - Optional custom date text. If omitted, reads from currentDay.dateDisplay.
  * @returns {boolean} True on success
  */
-export function regenerateMoonPhasesFromDate(chatId, dateText) {
+export async function regenerateMoonPhasesFromDate(chatId, dateText) {
     if (!chatId) return false;
 
     // Use provided text, or fall back to the stored date display
@@ -517,7 +517,7 @@ export function regenerateMoonPhasesFromDate(chatId, dateText) {
 
     // Compute angle from date text
     const angle = computeLunarAngleFromDate(text);
-    setLunarAngle(chatId, angle);
+    await setLunarAngle(chatId, angle);
 
     // Generate new phases from this position (with phenomena computed at generation time)
     const currentDay = getCurrentDay(chatId);
@@ -528,7 +528,7 @@ export function regenerateMoonPhasesFromDate(chatId, dateText) {
         cycleDays
     };
     const newMoonPhases = generateMoonPhases(angle, 7, 0, phenOptions);
-    replaceMoonPhases(chatId, newMoonPhases);
+    await replaceMoonPhases(chatId, newMoonPhases);
 
     const phaseName = getMoonPhaseForAngle(angle).phaseName;
     nwstToast(`Moon phases regenerated from "${text}". Anchored as "${phaseName}" (${angle.toFixed(1)}°).`, 'success');
@@ -702,7 +702,7 @@ export async function regenerateForecast(mode = 'all') {
                 cycleDays
             };
             const newMoonPhases = generateMoonPhases(anchorAngle, 7, 0, phenOptions);
-            replaceMoonPhases(chatId, newMoonPhases);
+            await replaceMoonPhases(chatId, newMoonPhases);
         }
 
         // ── Weather forecast is LLM-generated ──────────────────────────
@@ -728,16 +728,18 @@ export async function regenerateForecast(mode = 'all') {
             if (!forecast || forecast.length === 0) {
                 throw new Error('Failed to parse weather forecast from LLM response.');
             }
-            replaceForecast(chatId, forecast);
+            await replaceForecast(chatId, forecast);
         }
 
         // ── Feedback ───────────────────────────────────────────────────
         if (mode === 'forecast') {
             nwstToast('Weather forecast regenerated.', 'success');
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
         } else if (mode === 'moonPhases') {
             nwstToast('Moon phases regenerated (calculated from lunar cycle).', 'success');
         } else {
             nwstToast('Forecast regenerated. Moon phases recalculated from lunar cycle.', 'success');
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
         }
 
         return true;
@@ -802,7 +804,7 @@ export async function advanceToNextDay() {
         const currentMoonPhases = getMoonPhases(chatId);
 
         // ★ SNAPSHOT FIRST — capture pre-mutation state before anything changes
-        saveDayBoundarySnapshot(chatId);
+        await saveDayBoundarySnapshot(chatId);
 
         // Compute the next season (for the day we're advancing TO) so we can
         // inform the Day Advancement LLM what season the system has determined.
@@ -833,7 +835,7 @@ export async function advanceToNextDay() {
         const computedSeason = computeSeason(newDayCount, seasonConfig);
         const finalSeason = computedSeason !== null ? computedSeason : (result.season || '');
 
-        updateCurrentDay(chatId, {
+        await updateCurrentDay(chatId, {
             dateDisplay: result.dateDisplay,
             dateSub: result.dateSub,
             season: finalSeason,
@@ -842,7 +844,7 @@ export async function advanceToNextDay() {
 
         // ★ PRESERVE EXISTING FORECAST if LLM returned empty/invalid
         if (result.forecast && result.forecast.length > 0) {
-            replaceForecast(chatId, result.forecast);
+            await replaceForecast(chatId, result.forecast);
         } else {
             console.warn('[NWST DayAdvancement] LLM returned empty/invalid forecast — preserving existing forecast');
             // keep existing forecast (snapshot already saved above)
@@ -901,10 +903,11 @@ export async function advanceToNextDay() {
             }
         }
 
-        replaceMoonPhases(chatId, newMoonPhases);
+        await replaceMoonPhases(chatId, newMoonPhases);
         setLunarAngle(chatId, newAngle);
 
         nwstToast('Forecast updated. Moon phases recalculated from lunar cycle.', 'success');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
 
         // 8. Trigger Current Day synthesis (via its own Planning LLM profile)
         nwstToast('Updating current day...', 'info');
@@ -920,9 +923,18 @@ export async function advanceToNextDay() {
 
         // 9. Roll event horizon forward (mark missed, adjust tiers)
         //    This runs AFTER snapshot, so the saved snapshot still has 'pending' events.
-        rollEventHorizonForward(chatId);
+        await rollEventHorizonForward(chatId);
+
+        // 10. World event top-up — if the active world event pool is thin after
+        //     rolling forward, generate a small supplementary batch silently.
+        //     This keeps world events populated without requiring manual regen.
+        //     Fires asynchronously so it doesn't block the day advance completion.
+        topUpWorldEvents(chatId).catch(e =>
+            console.warn('[NWST DayAdvancement] World event top-up failed (non-fatal):', e)
+        );
 
         nwstToast('Day advanced successfully.', 'success');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
         return true;
 
     } catch (err) {
@@ -959,21 +971,22 @@ export async function restorePreviousDay() {
         // Restore world state
         if (snapshot.worldStateSnapshot) {
             const wsModule = await import('../data/worldState.js');
-            wsModule.saveWorldState(chatId, snapshot.worldStateSnapshot);
+            await wsModule.saveWorldState(chatId, snapshot.worldStateSnapshot);
         }
 
         // Restore events
         if (snapshot.eventsSnapshot) {
-            saveAllEvents(chatId, snapshot.eventsSnapshot);
+            await saveAllEvents(chatId, snapshot.eventsSnapshot);
         }
 
         // Restore notebook
         if (snapshot.notebookSnapshot) {
             const nbModule = await import('../data/notebook.js');
-            nbModule.saveNotebook(chatId, snapshot.notebookSnapshot);
+            await nbModule.saveNotebook(chatId, snapshot.notebookSnapshot);
         }
 
         nwstToast('Previous day restored from snapshot.', 'info');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
         return true;
     } catch (err) {
         console.error('[NWST DayAdvancement] Previous day restore failed:', err);
@@ -1163,7 +1176,60 @@ function parseDayAdvancementResponse(response) {
 
 // ── Event horizon roll ────────────────────────────────────────────────────
 
-function rollEventHorizonForward(chatId) {
+/**
+ * Silently top up world events after day advancement if the pool is thin.
+ * Fires asynchronously — does not block day advance completion.
+ * Only generates world events (not NPC) and applies the world event cap (max 2 per tier).
+ * Threshold: if fewer than 2 active world events remain, generate a top-up pass.
+ *
+ * @param {string} chatId
+ */
+async function topUpWorldEvents(chatId) {
+    try {
+        const { getActiveEvents } = await import('../data/events.js');
+        const activeEvents = getActiveEvents(chatId);
+
+        // Count active world events (non-NPC, non-missed, non-resolved)
+        const activeWorldEvents = activeEvents.filter(e =>
+            !e.isNPC &&
+            e.status !== 'missed' &&
+            e.status !== 'resolved'
+        );
+
+        // Only top up if pool is thin
+        const WORLD_EVENT_THRESHOLD = 2;
+        if (activeWorldEvents.length >= WORLD_EVENT_THRESHOLD) {
+            console.log(`[NWST DayAdvancement] World event pool healthy (${activeWorldEvents.length} active) — no top-up needed.`);
+            return;
+        }
+
+        console.log(`[NWST DayAdvancement] World event pool thin (${activeWorldEvents.length} active) — running top-up...`);
+
+        // Import and call event gen for world events only
+        const { regenerateTierEvents } = await import('./eventGen.js');
+
+        // Generate for immediate and week tiers — month events are less time-sensitive
+        // Run sequentially to avoid hammering the LLM
+        const tiersToTopUp = ['immediate', 'week'];
+        for (const tier of tiersToTopUp) {
+            const tierWorldEvents = activeWorldEvents.filter(e => e.tier === tier);
+            if (tierWorldEvents.length < 1) {
+                // This tier has no world events — generate a top-up pass
+                await regenerateTierEvents(tier);
+            }
+        }
+
+        if (typeof window?.nwstRefreshTabs === 'function') {
+            window.nwstRefreshTabs('home', 'events');
+        }
+
+        console.log('[NWST DayAdvancement] World event top-up complete.');
+    } catch (e) {
+        console.warn('[NWST DayAdvancement] topUpWorldEvents error:', e);
+    }
+}
+
+async function rollEventHorizonForward(chatId) {
     // Mark immediate past-due events as missed, shift other tiers as needed
     // This is a structural roll — the Planning LLM may override during next scan
     const events = getAllEvents(chatId);
@@ -1184,7 +1250,7 @@ function rollEventHorizonForward(chatId) {
 
 // ── Snapshot ──────────────────────────────────────────────────────────────
 
-function saveDayBoundarySnapshot(chatId) {
+async function saveDayBoundarySnapshot(chatId) {
     try {
         const worldState = getWorldState(chatId);
         const events = getAllEvents(chatId);
@@ -1192,7 +1258,7 @@ function saveDayBoundarySnapshot(chatId) {
 
         // Use a simple timestamp-based key for day boundary snapshots
         const rangeKey = `day_${Date.now()}`;
-        saveSnapshot(chatId, rangeKey, worldState, events, notebook);
+        await saveSnapshot(chatId, rangeKey, worldState, events, notebook);
         console.log('[NWST DayAdvancement] Day boundary snapshot saved.');
     } catch (e) {
         console.warn('[NWST DayAdvancement] Failed to save snapshot:', e);

@@ -110,6 +110,8 @@ const defaultSettings = {
 
     // Scanner cadence
     scanFrequency: 20,
+    scanMinimumMessages: 10,  // Warmup floor — initial scan fires after this many messages
+    maxSnapshotCount: 30,       // Maximum snapshots stored per chat — oldest are pruned when exceeded
 
     // Moon cycle configuration (fantasy worlds can override the 29.53-day cycle)
     moonCycleDays: 29.53,
@@ -131,6 +133,7 @@ const defaultSettings = {
         injectCurrentDay: true,
         injectEvents: true,
         injectWorldConditions: true,
+        maxActiveEvents: 12,       // Maximum total active events in the pool at any time
         placement: 'before_main',   // 'before_main' | 'after_main' | 'top_an' | 'bottom_an' | 'at_depth'
         depth: 2,
         depthRole: 'system',        // 'system' | 'user' | 'assistant'
@@ -225,6 +228,155 @@ async function registerPanel() {
         errorLog('Failed to register panel:', err);
         nwstToast('Failed to load NWST panel. Check the console for details.', 'error');
     }
+}
+
+// ── Magic wand menu ─────────────────────────────────────────────────────────
+
+/**
+ * Opens a standalone floating popup (like TypefaceR's popout) that contains
+ * the NWST panel content.  This is the pattern used by ALL third-party
+ * extensions in ST's magic wand menu — they open their own independent
+ * floating UI, NOT the sidebar extensions drawer.
+ *
+ * IMPORTANT: The drawer content is MOVED (not cloned) to the popout to avoid
+ * duplicate-ID issues.  The `buildTab()` functions in ui/panel.js use
+ * document.getElementById() which only finds the FIRST element with that ID.
+ * Cloning creates duplicates — buildTab() would populate the hidden original
+ * instead of the visible clone.  Moving avoids this entirely.  When the popout
+ * closes, the content is moved back to the sidebar drawer.
+ *
+ * References:
+ *   - TypefaceR:  openPopout() clones drawer content into a draggable popup
+ *   - Notebook:   creates a panel in #movingDivs and toggles its visibility
+ */
+let nwstPopoutVisible = false;   // eslint-disable-line no-var
+let $nwstPopout = null;          // eslint-disable-line no-var
+
+function openNwstPopout() {
+    if (nwstPopoutVisible) return;
+
+    const $drawerContent = $('.nwst-extension-drawer .inline-drawer-content');
+    if ($drawerContent.length === 0) {
+        debug('[wand] NWST drawer content not found — cannot open popout.');
+        return;
+    }
+
+    // Create the floating popup container (matches TypefaceR pattern)
+    $nwstPopout = $(`
+        <div id="nwst-popout" class="draggable">
+            <div id="nwst-popout-header" class="nwst-popout-header">
+                <div class="nwst-popout-title">
+                    <i class="fa-solid fa-globe"></i>
+                    <span>Narrative World State Tracker</span>
+                </div>
+                <div class="nwst-popout-close" title="Close">
+                    <i class="fa-solid fa-xmark"></i>
+                </div>
+            </div>
+            <div id="nwst-popout-content"></div>
+        </div>
+    `);
+
+    // Append to body
+    $('body').append($nwstPopout);
+
+    // ── MOVE the drawer content into the popout (do NOT clone) ──
+    // Cloning creates duplicate IDs, and buildTab() uses document.getElementById()
+    // which only finds the first (hidden) element.  Moving ensures no duplicates.
+    const popoutContent = $nwstPopout.find('#nwst-popout-content')[0];
+    const drawerContentEl = $drawerContent[0];
+    // Detach from sidebar drawer and append to popout
+    popoutContent.appendChild(drawerContentEl);
+
+    // Close button handler
+    $nwstPopout.find('.nwst-popout-close').on('click', closeNwstPopout);
+
+    // Close on Escape key
+    $(document).on('keydown.nwst_popout', (e) => {
+        if (e.key === 'Escape') {
+            closeNwstPopout();
+        }
+    });
+
+    // Make draggable using ST's built-in dragElement (from RossAscends-mods.js)
+    if (typeof window.dragElement === 'function') {
+        window.dragElement($nwstPopout);
+    }
+
+    // Fade in
+    $nwstPopout.fadeIn(200);
+    nwstPopoutVisible = true;
+    log('[wand] NWST popout opened.');
+}
+
+function closeNwstPopout() {
+    if (!nwstPopoutVisible || !$nwstPopout) return;
+
+    // ── Move the content back to the sidebar drawer ──
+    const popoutContent = document.getElementById('nwst-popout-content');
+    const drawerContent = popoutContent?.firstElementChild; // .inline-drawer-content
+
+    $nwstPopout.fadeOut(200, () => {
+        // Move content back to the original sidebar drawer
+        if (drawerContent) {
+            const $originalDrawer = $('.nwst-extension-drawer');
+            if ($originalDrawer.length > 0) {
+                $originalDrawer.append(drawerContent);
+            }
+        }
+        $nwstPopout.remove();
+        $nwstPopout = null;
+    });
+
+    nwstPopoutVisible = false;
+    $(document).off('keydown.nwst_popout');
+    log('[wand] NWST popout closed.');
+}
+
+/**
+ * Adds an entry for NWST in ST's magic wand dropdown (#extensionsMenu).
+ * Third-party extensions are NOT auto-discovered in the wand menu — each
+ * extension must self-register.  This follows the same pattern used by
+ * TypefaceR, Extension-Notebook, and other third-party extensions.
+ *
+ * Clicking the wand entry toggles a standalone floating popup (TypefaceR
+ * pattern) — it does NOT open the sidebar extensions drawer.
+ */
+function registerMagicWandMenuEntry() {
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu) {
+        debug('Magic wand menu (#extensionsMenu) not found — cannot register wand entry.');
+        return;
+    }
+
+    // Prevent duplicate entries if init is somehow called again
+    if (document.getElementById('nwst-wand-entry')) {
+        return;
+    }
+
+    const entry = document.createElement('div');
+    entry.id = 'nwst-wand-entry';
+    entry.className = 'list-group-item flex-container flexGap5 interactable';
+    entry.title = 'Open Narrative World State Tracker';
+    entry.tabIndex = 0;
+    entry.innerHTML = `
+        <i class="fa-solid fa-globe"></i>
+        <span>Narrative World State</span>
+    `;
+
+    entry.addEventListener('click', function (e) {
+        e.stopPropagation();
+
+        // Toggle the standalone floating popup — NOT the sidebar drawer
+        if (nwstPopoutVisible) {
+            closeNwstPopout();
+        } else {
+            openNwstPopout();
+        }
+    });
+
+    menu.appendChild(entry);
+    log('Magic wand menu entry registered.');
 }
 
 // ── Tab switching ──────────────────────────────────────────────────────────
@@ -370,9 +522,30 @@ export function updatePauseButton() {
  * NOTE: Do NOT cache chatMetadata between chats — the reference changes.
  * Always call SillyTavern.getContext().chatMetadata fresh.
  */
-function onChatChanged() {
-    const { chatMetadata } = SillyTavern.getContext();
+async function onChatChanged() {
+    const { chatMetadata, chatId } = SillyTavern.getContext();
     log('Chat changed — reloading NWST data for new chat.');
+
+    // Reset per-session profile warnings so the user is re-notified
+    // if profiles are still missing in the new chat context
+    try {
+        const { resetProfileWarnings } = await import('./llm/connections.js');
+        resetProfileWarnings();
+    } catch (e) { /* non-fatal */ }
+
+    // Run one-time migration for this chat if it has data in the old
+    // extensionSettings location (from builds prior to chatMetadata switch)
+    if (chatId) {
+        try {
+            const { migrateLegacyData } = await import('./data/storage.js');
+            const migrated = await migrateLegacyData(chatId);
+            if (migrated) {
+                log(`Legacy data migrated for chat: ${chatId}`);
+            }
+        } catch (e) {
+            console.warn('[NWST] Migration check failed (non-fatal):', e);
+        }
+    }
 
     // Refresh the UI with data from the new chat's metadata
     // Uses window-level refreshAllUI provided by ui/panel.js
@@ -410,10 +583,26 @@ async function init() {
     // 1. Initialize settings
     initSettings();
 
-    // 2. Register the panel in ST's extensions dropdown
+    // 2. Run one-time migration for the currently open chat (if needed)
+    //    This handles the case where the user opens ST with a chat already active
+    try {
+        const { chatId } = SillyTavern.getContext();
+        if (chatId) {
+            const { migrateLegacyData } = await import('./data/storage.js');
+            const migrated = await migrateLegacyData(chatId);
+            if (migrated) log(`Legacy data migrated for current chat: ${chatId}`);
+        }
+    } catch (e) {
+        console.warn('[NWST] Init migration check failed (non-fatal):', e);
+    }
+
+    // 3. Register the panel in ST's extensions dropdown
     await registerPanel();
 
-    // 3. Dynamically import UI modules to avoid circular dependency
+    // 3a. Register the entry in ST's magic wand menu (chatbar dropdown)
+    registerMagicWandMenuEntry();
+
+    // 3b. Dynamically import UI modules to avoid circular dependency
     //    (sub-modules like ui/home.js import from index.js, so they must
     //     be loaded AFTER index.js is fully evaluated)
     const { initializeTabs } = await import('./ui/panel.js');

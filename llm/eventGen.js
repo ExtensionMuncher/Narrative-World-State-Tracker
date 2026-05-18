@@ -24,6 +24,7 @@ import { getAllEvents, addEvent, getActiveEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { getAllCommunities } from '../data/communities.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
+import { getMaxActiveEvents } from '../settings.js';
 
 // ── Internal prompts ──────────────────────────────────────────────────────
 
@@ -74,6 +75,13 @@ PLAUSIBILITY RULES:
   - Cross-reference world conditions — do not generate events that contradict the current world state
   - Seasonal/cultural events must match the current season, date, and setting context
 
+EVENT COUNT LIMITS — STRICTLY ENFORCED PER CATEGORY:
+  - WORLD EVENTS: maximum 2 per tier per regen call. These are background texture — less is more.
+  - GENERATED NPC EVENTS (npcOrigin: "generated"): maximum 3 per tier per regen call.
+  - DETECTED NPC EVENTS (npcOrigin: "detected"): NO CAP — if a character explicitly stated it, capture it.
+  - Fewer is better. 2 strong world events beat 4 weak ones.
+  - If a tier genuinely cannot support the maximum, generate fewer rather than padding.
+
 STYLE:
   - Write event descriptions with atmospheric, narrative detail
   - NPC events should feel character-specific and grounded in personality
@@ -98,7 +106,7 @@ Respond with a JSON array:
   }
 ]
 
-Generate 3-6 events mixing NPC and World types equally. If a tier genuinely has nothing plausible, leave it out rather than forcing a weak entry. Return [] only if no events whatsoever can be plausibly generated.
+Generate events per category limits: max 2 WORLD events, max 3 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have no cap — capture all of them. Quality over quantity. If a tier genuinely has nothing plausible, leave it out rather than forcing a weak entry. Return [] only if no events whatsoever can be plausibly generated.
 
 REMEMBER: World events should feel like a living world. The characters may or may not engage with them, but they exist regardless. NPC events should feel like natural character behavior, not scripted plot points.`;
 
@@ -164,27 +172,73 @@ export async function regenerateTierEvents(tier) {
         const response = await generateWithProfile(profile, messages);
         const events = parseEventGenResponse(response);
 
+        // Category-aware caps (applied before plausibility check):
+        //   Detected NPC events  — no cap (facts extracted from chat)
+        //   Generated NPC events — max 3 per tier
+        //   World events         — max 2 per tier
+        const categoryCounts = { detected_npc: 0, generated_npc: 0, world: 0 };
+        const cappedEvents = events.filter(event => {
+            if (event.isNPC && event.npcOrigin === 'detected') {
+                // No cap on detected NPC events
+                return true;
+            } else if (event.isNPC) {
+                // Generated NPC — max 3
+                if (categoryCounts.generated_npc >= 3) return false;
+                categoryCounts.generated_npc++;
+                return true;
+            } else {
+                // World event — max 2
+                if (categoryCounts.world >= 2) return false;
+                categoryCounts.world++;
+                return true;
+            }
+        });
+
         // Plausibility check against notebook and active events
-        const validEvents = runPlausibilityCheck(chatId, events);
+        const validEvents = runPlausibilityCheck(chatId, cappedEvents);
+
+        // Check active pool cap before committing events.
+        // EXCEPTION: detected NPC events (explicit plans from chat) always bypass the cap —
+        // they are facts, not generated content, and should never be silently dropped.
+        const poolCap = getMaxActiveEvents();
+        const currentActive = getAllEvents(chatId).filter(e =>
+            e.status === 'pending' || e.status === 'inprogress'
+        ).length;
+        const slotsAvailable = Math.max(0, poolCap - currentActive);
+
+        // Separate detected (cap-exempt) from generated (cap-subject)
+        const detectedEvents = validEvents.filter(e => e.isNPC && e.npcOrigin === 'detected');
+        const generatedEvents = validEvents.filter(e => !(e.isNPC && e.npcOrigin === 'detected'));
+
+        if (slotsAvailable === 0 && generatedEvents.length > 0) {
+            nwstToast(`Event pool is full (${poolCap} active events). Resolve or dismiss existing events to make room.`, 'warning');
+        }
+
+        // Commit detected events unconditionally
+        // Commit generated events only up to available slots
+        const generatedToAdd = generatedEvents.slice(0, slotsAvailable);
+        const eventsToAdd = [...detectedEvents, ...generatedToAdd];
 
         let added = 0;
-        for (const event of validEvents) {
-            addEvent(chatId, {
+        for (const event of eventsToAdd) {
+            await addEvent(chatId, {
                 title: event.title,
                 description: event.description,
                 tier: event.tier || tier,
                 status: 'pending',
                 isNPC: event.isNPC || false,
-                npcOrigin: event.isNPC ? 'generated' : null,
-                origin: 'generated'
+                npcOrigin: event.isNPC ? (event.npcOrigin || 'generated') : null,
+                origin: event.npcOrigin === 'detected' ? 'detected' : 'generated'
             });
             added++;
         }
 
         if (added > 0) {
             nwstToast(`${added} ${tier} event(s) generated.`, 'success');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
         } else {
             nwstToast(`No new ${tier} events generated — all candidates failed plausibility check or LLM returned none.`, 'info');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
         }
 
         return added;
@@ -395,10 +449,11 @@ function buildEventGenPrompt(context, tier) {
     }
 
     prompt += `Generate ${tier} events. Remember:\n`;
-    prompt += `  1. At minimum 1 WORLD EVENT and 1 NPC EVENT (where plausible)\n`;
-    prompt += `  2. World events should feel like organic world rhythms, not extractions from chat text\n`;
-    prompt += `  3. Consider: seasonal festivals, cultural practices, environmental shifts, political rhythms\n`;
-    prompt += `  4. Forward-facing only. Respond with valid JSON array only.\n`;
+    prompt += `  1. CATEGORY CAPS: max 2 WORLD events, max 3 GENERATED NPC events per tier. Detected NPC events (explicitly stated) have no cap.\n`;
+    prompt += `  2. At minimum 1 WORLD EVENT and 1 NPC EVENT (where plausible)\n`;
+    prompt += `  3. World events should feel like organic world rhythms, not extractions from chat text\n`;
+    prompt += `  4. Consider: seasonal festivals, cultural practices, environmental shifts, political rhythms\n`;
+    prompt += `  5. Forward-facing only. Respond with valid JSON array only.\n`;
     prompt += `  5. CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the USER CHARACTER's personal or mundane actions (getting coffee, leaving their desk, daily routines, etc.) unless the story narrative explicitly establishes them as plot-relevant. Events must describe what the WORLD and NPCs are doing, what natural/societal forces are unfolding, and what plot hooks exist — NOT what the user character will do.\n`;
 
     return prompt;

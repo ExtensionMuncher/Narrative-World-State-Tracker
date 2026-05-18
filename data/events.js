@@ -56,8 +56,8 @@ export function getAllEvents(chatId) {
  * @param {string} chatId
  * @param {object[]} events - Complete events array
  */
-export function saveAllEvents(chatId, events) {
-    setChatData(chatId, 'events', events);
+export async function saveAllEvents(chatId, events) {
+    await setChatData(chatId, 'events', events);
 }
 
 /**
@@ -78,7 +78,7 @@ export function getEventById(chatId, eventId) {
  * @param {object} eventData - Event fields (id and timestamp auto-generated if not provided)
  * @returns {object} The newly created event
  */
-export function addEvent(chatId, eventData) {
+export async function addEvent(chatId, eventData) {
     const events = getAllEvents(chatId);
     const newEvent = {
         id: eventData.id || generateEventId(),
@@ -92,7 +92,7 @@ export function addEvent(chatId, eventData) {
         timestamp: eventData.timestamp || Date.now()
     };
     events.push(newEvent);
-    saveAllEvents(chatId, events);
+    await saveAllEvents(chatId, events);
     return newEvent;
 }
 
@@ -103,13 +103,13 @@ export function addEvent(chatId, eventData) {
  * @param {object} updates - Partial event fields to update
  * @returns {object|null} The updated event, or null if not found
  */
-export function updateEvent(chatId, eventId, updates) {
+export async function updateEvent(chatId, eventId, updates) {
     const events = getAllEvents(chatId);
     const index = events.findIndex(e => e.id === eventId);
     if (index === -1) return null;
 
     events[index] = { ...events[index], ...updates };
-    saveAllEvents(chatId, events);
+    await saveAllEvents(chatId, events);
     return events[index];
 }
 
@@ -119,13 +119,13 @@ export function updateEvent(chatId, eventId, updates) {
  * @param {string} eventId
  * @returns {boolean} True if deleted, false if not found
  */
-export function deleteEvent(chatId, eventId) {
+export async function deleteEvent(chatId, eventId) {
     const events = getAllEvents(chatId);
     const index = events.findIndex(e => e.id === eventId);
     if (index === -1) return false;
 
     events.splice(index, 1);
-    saveAllEvents(chatId, events);
+    await saveAllEvents(chatId, events);
     return true;
 }
 
@@ -138,7 +138,7 @@ export function deleteEvent(chatId, eventId) {
  * @param {string} newStatus - 'pending' | 'inprogress' | 'resolved' | 'missed'
  * @returns {object|null} The updated event
  */
-export function setEventStatus(chatId, eventId, newStatus) {
+export async function setEventStatus(chatId, eventId, newStatus) {
     const validStatuses = ['pending', 'inprogress', 'resolved', 'missed'];
     if (!validStatuses.includes(newStatus)) {
         console.error(`[NWST Events] Invalid status: ${newStatus}`);
@@ -153,7 +153,7 @@ export function setEventStatus(chatId, eventId, newStatus) {
  * @param {string} eventId
  * @returns {object|null}
  */
-export function resolveEvent(chatId, eventId) {
+export async function resolveEvent(chatId, eventId) {
     return setEventStatus(chatId, eventId, 'resolved');
 }
 
@@ -163,7 +163,7 @@ export function resolveEvent(chatId, eventId) {
  * @param {string} eventId
  * @returns {object|null}
  */
-export function missEvent(chatId, eventId) {
+export async function missEvent(chatId, eventId) {
     return setEventStatus(chatId, eventId, 'missed');
 }
 
@@ -176,7 +176,7 @@ export function missEvent(chatId, eventId) {
  * @param {string} newTier - 'immediate' | 'week' | 'month' | 'undetermined'
  * @returns {object|null}
  */
-export function setEventTier(chatId, eventId, newTier) {
+export async function setEventTier(chatId, eventId, newTier) {
     const validTiers = ['immediate', 'week', 'month', 'undetermined'];
     if (!validTiers.includes(newTier)) {
         console.error(`[NWST Events] Invalid tier: ${newTier}`);
@@ -275,7 +275,7 @@ export function getEventsGroupedByTier(chatId) {
  * @param {object} tierChanges - Object mapping event IDs to their new tiers
  *   e.g., { "evt_123": "missed", "evt_456": "immediate" }
  */
-export function rollEventHorizon(chatId, tierChanges) {
+export async function rollEventHorizon(chatId, tierChanges) {
     const events = getAllEvents(chatId);
     for (const event of events) {
         if (tierChanges[event.id]) {
@@ -287,7 +287,7 @@ export function rollEventHorizon(chatId, tierChanges) {
             }
         }
     }
-    saveAllEvents(chatId, events);
+    await saveAllEvents(chatId, events);
 }
 
 // ── Bulk operations ───────────────────────────────────────────────────────

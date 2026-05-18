@@ -89,7 +89,10 @@ export function buildNotebookTab() {
                     <strong style="color:#333">Who knows / who does not know</strong> is the most critical field.
                 </div>
                 <div id="nwst-nb-secrets-container"></div>
-                <button class="menu_button nwst-btn nwst-nb-add-secret" style="margin-top:4px">+ Add secret</button>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+                    <button class="menu_button nwst-btn" id="nwst-nb-scan-secrets">🔍 Scan for secrets</button>
+                    <button class="menu_button nwst-btn nwst-nb-add-secret">+ Add secret</button>
+                </div>
             </div>
         </div>
 
@@ -194,7 +197,7 @@ function wireBulletEvents(container) {
 
     // ── Add bullet on Enter ────────────────────────────────────
     container.querySelectorAll('.nwst-nb-add-input').forEach(input => {
-        input.addEventListener('keydown', function (e) {
+        input.addEventListener('keydown', async function (e) {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 const text = this.value.trim();
@@ -205,10 +208,10 @@ function wireBulletEvents(container) {
                 const chatId = getChatId();
 
                 if (section === 'core') {
-                    addCoreBullet(chatId, fieldKey, text);
+                    await addCoreBullet(chatId, fieldKey, text);
                     refreshCoreSection();
                 } else if (section === 'mystery') {
-                    addMysteryBullet(chatId, fieldKey, text);
+                    await addMysteryBullet(chatId, fieldKey, text);
                     refreshMysterySection();
                 }
 
@@ -220,7 +223,7 @@ function wireBulletEvents(container) {
 
     // ── Delete bullet ──────────────────────────────────────────
     container.querySelectorAll('.nwst-bullet-delete').forEach(btn => {
-        btn.addEventListener('click', function () {
+        btn.addEventListener('click', async function () {
             const bullet = this.closest('.nwst-nb-bullet');
             const field = this.closest('.nwst-nb-field');
             const section = field.getAttribute('data-section');
@@ -229,10 +232,10 @@ function wireBulletEvents(container) {
             const chatId = getChatId();
 
             if (section === 'core') {
-                deleteCoreBullet(chatId, fieldKey, index);
+                await deleteCoreBullet(chatId, fieldKey, index);
                 refreshCoreSection();
             } else if (section === 'mystery') {
-                deleteMysteryBullet(chatId, fieldKey, index);
+                await deleteMysteryBullet(chatId, fieldKey, index);
                 refreshMysterySection();
             }
 
@@ -242,7 +245,7 @@ function wireBulletEvents(container) {
 
     // ── Save edited bullet on blur ─────────────────────────────
     container.querySelectorAll('.nwst-nb-bullet-text').forEach(span => {
-        span.addEventListener('blur', function () {
+        span.addEventListener('blur', async function () {
             const bullet = this.closest('.nwst-nb-bullet');
             const field = this.closest('.nwst-nb-field');
             const section = field.getAttribute('data-section');
@@ -252,14 +255,14 @@ function wireBulletEvents(container) {
             const chatId = getChatId();
 
             if (section === 'core') {
-                updateCoreBullet(chatId, fieldKey, index, newText);
+                await updateCoreBullet(chatId, fieldKey, index, newText);
             } else if (section === 'mystery') {
-                updateMysteryBullet(chatId, fieldKey, index, newText);
+                await updateMysteryBullet(chatId, fieldKey, index, newText);
             }
         });
 
         // ── ⛶ popout button on focus ───────────────────────────
-        span.addEventListener('focus', function () {
+        span.addEventListener('focus', async function () {
             const bullet = this.closest('.nwst-nb-bullet');
             // Remove existing popout button if any
             const existing = bullet.querySelector('.nwst-nb-bullet-expand');
@@ -278,7 +281,7 @@ function wireBulletEvents(container) {
             bullet.insertBefore(popoutBtn, bullet.querySelector('.nwst-nb-bullet-del'));
         });
 
-        span.addEventListener('blur', function () {
+        span.addEventListener('blur', async function () {
             // Remove popout button after a short delay (allows click to register)
             setTimeout(() => {
                 const bullet = this.closest('.nwst-nb-bullet');
@@ -314,16 +317,18 @@ function refreshSecretsSection() {
         <div class="nwst-secret-entry${isOpen ? ' nwst-open' : ''}" data-secret-id="${secret.id}">
             <div class="nwst-secret-hdr nwst-secret-toggle">
                 <span class="nwst-secret-type ${typeDef.cssClass}">${typeDef.label}</span>
-                <span style="flex:1;font-weight:500;font-size:13px;margin-left:6px">${escapeHTML(secret.title)}</span>
+                <span class="nwst-secret-title" contenteditable="true" style="flex:1;font-weight:500;font-size:13px;margin-left:6px;outline:none;cursor:text" spellcheck="false">${escapeHTML(secret.title)}</span>
                 <div class="nwst-btn-row" style="gap:4px" onclick="event.stopPropagation()">
                     <button class="nwst-nb-bullet-del nwst-secret-delete-btn" style="width:auto;font-size:12px">✕</button>
                 </div>
             </div>
             <div class="nwst-secret-body">
-                <div class="nwst-secret-field">
-                    <div class="nwst-secret-field-label">Secret</div>
+                <div class="nwst-secret-field" style="margin-bottom:8px">
+                    <div class="nwst-secret-field-label">Secret
+                        <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="secret">⛶</button>
+                    </div>
                     <div class="nwst-secret-field-content" contenteditable="true"
-                        style="font-size:13px;color:#333;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text"
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text"
                         data-field="secret">${escapeHTML(secret.secret)}</div>
                 </div>
 
@@ -358,30 +363,41 @@ function refreshSecretsSection() {
                 </div>
 
                 <!-- Evidence shown -->
-                <div class="nwst-secret-field">
-                    <div class="nwst-secret-field-label">Evidence already shown</div>
+                <div class="nwst-secret-field" style="margin-bottom:8px">
+                    <div class="nwst-secret-field-label">Evidence already shown
+                        <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="evidenceShown">⛶</button>
+                    </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="evidenceShown"
-                        style="font-size:13px;color:#333;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.evidenceShown)}</div>
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.evidenceShown)}</div>
                 </div>
 
                 <!-- Pressure / risk -->
-                <div class="nwst-secret-field" style="margin-top:8px">
-                    <div class="nwst-secret-field-label">Pressure / risk</div>
+                <div class="nwst-secret-field" style="margin-bottom:8px">
+                    <div class="nwst-secret-field-label">Pressure / risk
+                        <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="pressureRisk">⛶</button>
+                    </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="pressureRisk"
-                        style="font-size:13px;color:#333;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.pressureRisk)}</div>
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.pressureRisk)}</div>
                 </div>
 
                 <!-- Reveal conditions -->
-                <div class="nwst-secret-field" style="margin-top:8px">
-                    <div class="nwst-secret-field-label">Reveal conditions</div>
+                <div class="nwst-secret-field" style="margin-bottom:8px">
+                    <div class="nwst-secret-field-label">Reveal conditions
+                        <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="revealConditions">⛶</button>
+                    </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="revealConditions"
-                        style="font-size:13px;color:#333;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.revealConditions)}</div>
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.revealConditions)}</div>
                 </div>
 
-                <!-- Type selector + delete -->
+                <!-- Type selector + priority + delete -->
                 <div class="nwst-btn-row" style="margin-top:10px">
                     <select class="nwst-secret-type-select" style="width:auto;font-size:11px;padding:3px 6px">
                         ${SECRET_TYPES.map(t => `<option value="${t.value}"${secret.type === t.value ? ' selected' : ''}>${t.label}</option>`).join('')}
+                    </select>
+                    <select class="nwst-secret-priority-select" title="Injection priority — controls when this secret is injected into the main prompt" style="width:auto;font-size:11px;padding:3px 6px;border-color:${secret.injectionPriority === 'high' ? '#1D9E75' : secret.injectionPriority === 'low' ? '#999' : '#AFA9EC'};color:${secret.injectionPriority === 'high' ? '#0F6E56' : secret.injectionPriority === 'low' ? '#999' : '#3C3489'}">
+                        <option value="high"${(secret.injectionPriority || 'normal') === 'high' ? ' selected' : ''}>⬆ High — always inject</option>
+                        <option value="normal"${(secret.injectionPriority || 'normal') === 'normal' ? ' selected' : ''}>◈ Normal — inject when at risk</option>
+                        <option value="low"${(secret.injectionPriority || 'normal') === 'low' ? ' selected' : ''}>⬇ Low — monitor only, never inject</option>
                     </select>
                     <button class="menu_button nwst-btn-danger nwst-secret-delete" style="font-size:11px;padding:3px 9px;margin-left:auto">Delete secret</button>
                 </div>
@@ -398,7 +414,7 @@ function refreshSecretsSection() {
 function wireNotebookEvents() {
     // ── Accordion toggle ───────────────────────────────────────
     document.querySelectorAll('.nwst-nb-toggle').forEach(hdr => {
-        hdr.onclick = function () {
+        hdr.onclick = async function () {
             const sectionId = this.getAttribute('data-section');
             const section = document.getElementById(`nwst-nb-${sectionId}`);
             if (section) section.classList.toggle('nwst-open');
@@ -408,172 +424,231 @@ function wireNotebookEvents() {
     // ── Clear all ──────────────────────────────────────────────
     const clearBtn = document.getElementById('nwst-nb-clearAll');
     if (clearBtn) {
-        clearBtn.onclick = () => {
+        clearBtn.onclick = async () => {
             const chatId = getChatId();
-            clearNotebook(chatId);
+            await clearNotebook(chatId);
             refreshNotebookUI();
             nwstToast('Notebook cleared.', 'warning');
         };
     }
 
     // ── Add secret button ──────────────────────────────────────
-    // Use event delegation so this survives re-renders without re-wiring
-    const secretsBody = document.getElementById('nwst-nb-secrets-body');
-    if (secretsBody && !secretsBody._nwstAddSecretWired) {
-        secretsBody._nwstAddSecretWired = true;
-        secretsBody.addEventListener('click', (e) => {
-            if (e.target.classList.contains('nwst-nb-add-secret')) {
-                const chatId = getChatId();
-                addSecret(chatId, {
-                    title: 'New secret',
-                    type: 'character',
-                    secret: '',
-                    whoKnows: [],
-                    whoDoesNotKnow: []
-                });
-                refreshSecretsSection();
-                wireSecretEvents();
-                nwstToast('Secret added.', 'info');
-            }
-        });
+    // Direct onclick assignment — self-deduplicating, survives re-renders
+    const addSecretBtn = document.querySelector('.nwst-nb-add-secret');
+    if (addSecretBtn) {
+        addSecretBtn.onclick = async function () {
+            const chatId = getChatId();
+            await addSecret(chatId, {
+                title: 'New secret',
+                type: 'character',
+                secret: '',
+                whoKnows: [],
+                whoDoesNotKnow: []
+            });
+            refreshSecretsSection();
+            nwstToast('Secret added.', 'info');
+        };
     }
 
-    // Always re-wire secret events after notebook events are wired
+    // ── Scan for secrets button ────────────────────────────────
+    const scanBtn = document.getElementById('nwst-nb-scan-secrets');
+    if (scanBtn) {
+        scanBtn.onclick = async function () {
+            const chatId = getChatId();
+            scanBtn.disabled = true;
+            scanBtn.textContent = '⏳ Scanning...';
+            try {
+                const { scanForSecrets } = await import('../llm/secretScan.js');
+                const count = await scanForSecrets(chatId);
+                refreshSecretsSection();
+                if (count > 0) {
+                    nwstToast(`Found ${count} new secret(s) from full history scan.`, 'success');
+                } else {
+                    nwstToast('No new secrets detected in the chat history.', 'info');
+                }
+            } catch (e) {
+                console.error('[NWST Notebook] Secrets scan failed:', e);
+                nwstToast('Secrets scan failed. Check console.', 'error');
+            } finally {
+                scanBtn.disabled = false;
+                scanBtn.textContent = '🔍 Scan for secrets';
+            }
+        };
+    }
+
     wireSecretEvents();
 }
 
 // ── Wire secret-specific events ───────────────────────────────────────────
+// Single clean wiring — no duplicate registrations.
 
 function wireSecretEvents() {
+    const container = document.getElementById('nwst-nb-secrets-container');
+    if (!container) return;
+
     // ── Expand/collapse toggle ─────────────────────────────────
-    document.querySelectorAll('.nwst-secret-toggle').forEach(hdr => {
+    container.querySelectorAll('.nwst-secret-toggle').forEach(hdr => {
         hdr.onclick = function () {
             this.closest('.nwst-secret-entry').classList.toggle('nwst-open');
         };
     });
 
-    // ── Delete secret (header ✕ and body Delete button) ────────
-    document.querySelectorAll('.nwst-secret-delete-btn, .nwst-secret-delete').forEach(btn => {
-        btn.onclick = function (e) {
+    // ── Delete secret (✕ header button and body Delete button) ─
+    container.querySelectorAll('.nwst-secret-delete-btn, .nwst-secret-delete').forEach(btn => {
+        btn.onclick = async function (e) {
             e.stopPropagation();
             const entry = this.closest('.nwst-secret-entry');
-            const secretId = entry.getAttribute('data-secret-id');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!secretId) return;
             const chatId = getChatId();
-            deleteSecret(chatId, secretId);
+            await deleteSecret(chatId, secretId);
             refreshSecretsSection();
-            wireNotebookEvents();
             nwstToast('Secret deleted.', 'info');
         };
     });
 
-    // ── Save secret fields on blur ─────────────────────────────
-    document.querySelectorAll('.nwst-secret-field-content[contenteditable]').forEach(el => {
-        el.addEventListener('blur', function () {
+    // ── Save contenteditable secret fields on blur ─────────────
+    container.querySelectorAll('.nwst-secret-field-content[contenteditable]').forEach(el => {
+        el.onblur = async function () {
             const entry = this.closest('.nwst-secret-entry');
-            const secretId = entry.getAttribute('data-secret-id');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!secretId) return;
             const field = this.getAttribute('data-field');
             const value = this.textContent.trim();
             const chatId = getChatId();
-
-            if (field === 'secret') {
-                updateSecret(chatId, secretId, { secret: value });
-            } else if (field === 'evidenceShown') {
-                updateSecret(chatId, secretId, { evidenceShown: value });
-            } else if (field === 'pressureRisk') {
-                updateSecret(chatId, secretId, { pressureRisk: value });
-            } else if (field === 'revealConditions') {
-                updateSecret(chatId, secretId, { revealConditions: value });
-            }
-        });
+            await updateSecret(chatId, secretId, { [field]: value });
+        };
     });
 
-    // ── Save secret title (editable span in header) ────────────
-    document.querySelectorAll('.nwst-secret-hdr span[contenteditable]').forEach(span => {
-        span.addEventListener('blur', function () {
+    // ── Save secret title on blur ──────────────────────────────
+    container.querySelectorAll('.nwst-secret-title').forEach(span => {
+        span.onblur = async function () {
             const entry = this.closest('.nwst-secret-entry');
-            const secretId = entry.getAttribute('data-secret-id');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!secretId) return;
             const chatId = getChatId();
-            updateSecret(chatId, secretId, { title: this.textContent.trim() });
-        });
+            const newTitle = this.textContent.trim() || 'Untitled secret';
+            await updateSecret(chatId, secretId, { title: newTitle });
+        };
     });
 
     // ── Type selector ──────────────────────────────────────────
-    document.querySelectorAll('.nwst-secret-type-select').forEach(select => {
-        select.addEventListener('change', function () {
+    container.querySelectorAll('.nwst-secret-type-select').forEach(select => {
+        select.onchange = async function () {
             const entry = this.closest('.nwst-secret-entry');
-            const secretId = entry.getAttribute('data-secret-id');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!secretId) return;
             const chatId = getChatId();
-            updateSecret(chatId, secretId, { type: this.value });
-            // Update the type badge visually
+            await updateSecret(chatId, secretId, { type: this.value });
             const typeDef = SECRET_TYPES.find(t => t.value === this.value);
             const badge = entry.querySelector('.nwst-secret-type');
             if (badge && typeDef) {
                 badge.textContent = typeDef.label;
                 badge.className = `nwst-secret-type ${typeDef.cssClass}`;
             }
-        });
+        };
     });
 
-    // ── Add Who Knows ──────────────────────────────────────────
-    document.querySelectorAll('.nwst-who-knows-add').forEach(input => {
-        input.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                const name = this.value.trim();
-                if (!name) return;
-                const secretId = this.getAttribute('data-secret-id');
-                const chatId = getChatId();
-                addWhoKnows(chatId, secretId, name);
-                refreshSecretsSection();
-                wireNotebookEvents();
-            }
-        });
+    // ── Injection priority selector ────────────────────────────
+    container.querySelectorAll('.nwst-secret-priority-select').forEach(select => {
+        select.onchange = async function () {
+            const entry = this.closest('.nwst-secret-entry');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!secretId) return;
+            const chatId = getChatId();
+            await updateSecret(chatId, secretId, { injectionPriority: this.value });
+            // Update border/color to reflect priority visually
+            const colors = {
+                high:   { border: '#1D9E75', color: '#0F6E56' },
+                normal: { border: '#AFA9EC', color: '#3C3489' },
+                low:    { border: '#999',    color: '#999'    }
+            };
+            const c = colors[this.value] || colors.normal;
+            this.style.borderColor = c.border;
+            this.style.color = c.color;
+        };
     });
 
-    // ── Add Who Does NOT Know ──────────────────────────────────
-    document.querySelectorAll('.nwst-who-not-know-add').forEach(input => {
-        input.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                const name = this.value.trim();
-                if (!name) return;
-                const secretId = this.getAttribute('data-secret-id');
-                const chatId = getChatId();
-                addWhoDoesNotKnow(chatId, secretId, name);
-                refreshSecretsSection();
-                wireNotebookEvents();
-            }
-        });
+    // ── Add Who Knows (Enter key) ──────────────────────────────
+    container.querySelectorAll('.nwst-who-knows-add').forEach(input => {
+        input.onkeydown = async function (e) {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            const name = this.value.trim();
+            if (!name) return;
+            const secretId = this.getAttribute('data-secret-id');
+            const chatId = getChatId();
+            await addWhoKnows(chatId, secretId, name);
+            this.value = '';
+            refreshSecretsSection();
+        };
+    });
+
+    // ── Add Who Does NOT Know (Enter key) ─────────────────────
+    container.querySelectorAll('.nwst-who-not-know-add').forEach(input => {
+        input.onkeydown = async function (e) {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            const name = this.value.trim();
+            if (!name) return;
+            const secretId = this.getAttribute('data-secret-id');
+            const chatId = getChatId();
+            await addWhoDoesNotKnow(chatId, secretId, name);
+            this.value = '';
+            refreshSecretsSection();
+        };
     });
 
     // ── Remove Who Knows ───────────────────────────────────────
-    document.querySelectorAll('.nwst-who-knows-del').forEach(btn => {
-        btn.addEventListener('click', function () {
+    container.querySelectorAll('.nwst-who-knows-del').forEach(btn => {
+        btn.onclick = async function () {
             const nameEl = this.parentElement.querySelector('.nwst-nb-bullet-text');
             const name = nameEl ? nameEl.textContent.trim() : '';
             const entry = this.closest('.nwst-secret-entry');
-            const secretId = entry.getAttribute('data-secret-id');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!name || !secretId) return;
             const chatId = getChatId();
-            if (name) removeWhoKnows(chatId, secretId, name);
+            await removeWhoKnows(chatId, secretId, name);
             refreshSecretsSection();
-            wireNotebookEvents();
-        });
+        };
     });
 
     // ── Remove Who Does NOT Know ───────────────────────────────
-    document.querySelectorAll('.nwst-who-not-know-del').forEach(btn => {
-        btn.addEventListener('click', function () {
+    container.querySelectorAll('.nwst-who-not-know-del').forEach(btn => {
+        btn.onclick = async function () {
             const nameEl = this.parentElement.querySelector('.nwst-nb-bullet-text');
             const name = nameEl ? nameEl.textContent.trim() : '';
             const entry = this.closest('.nwst-secret-entry');
-            const secretId = entry.getAttribute('data-secret-id');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!name || !secretId) return;
             const chatId = getChatId();
-            if (name) removeWhoDoesNotKnow(chatId, secretId, name);
+            await removeWhoDoesNotKnow(chatId, secretId, name);
             refreshSecretsSection();
-            wireNotebookEvents();
-        });
+        };
+    });
+
+    // ── ⛶ Popout buttons on secret fields ─────────────────────
+    container.querySelectorAll('.nwst-expand-btn[data-popout-field]').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const field = this.getAttribute('data-popout-field');
+            const secretEntry = this.closest('.nwst-secret-entry');
+            const secretId = secretEntry?.getAttribute('data-secret-id');
+            const contentEl = this.closest('.nwst-secret-field')?.querySelector('.nwst-secret-field-content');
+            const currentText = contentEl ? contentEl.textContent.trim() : '';
+            const fieldLabel = this.getAttribute('title') || field;
+
+            if (typeof window.openNWSTPopout === 'function') {
+                window.openNWSTPopout(fieldLabel, currentText, async (saved) => {
+                    if (contentEl) contentEl.textContent = saved;
+                    const chatId = getChatId();
+                    if (secretId) await updateSecret(chatId, secretId, { [field]: saved });
+                });
+            }
+        };
     });
 }
+
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 

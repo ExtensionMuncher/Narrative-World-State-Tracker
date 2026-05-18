@@ -92,6 +92,18 @@ export function getScanFrequency() { return getSetting('scanFrequency'); }
 /** Set the scan frequency. @param {number} value */
 export function setScanFrequency(value) { setSetting('scanFrequency', value); }
 
+/** Get the minimum messages before the first scan fires (warmup floor). @returns {number} */
+export function getScanMinimumMessages() { return getSetting('scanMinimumMessages'); }
+
+/** Set the minimum messages floor. @param {number} value */
+export function setScanMinimumMessages(value) { setSetting('scanMinimumMessages', Math.max(1, parseInt(value) || 10)); }
+
+/** Get the maximum number of snapshots to keep per chat. @returns {number} */
+export function getMaxSnapshotCount() { return getSetting('maxSnapshotCount') || 30; }
+
+/** Set the maximum snapshot count. @param {number} value */
+export function setMaxSnapshotCount(value) { setSetting('maxSnapshotCount', Math.max(1, parseInt(value) || 30)); }
+
 // ── Injection settings ────────────────────────────────────────────────────
 
 /** Get all injection settings. @returns {object} */
@@ -114,6 +126,9 @@ export function getInjectionDepth() { return getSetting('injection').depth; }
 
 /** Get injection depth role. @returns {string} 'system' | 'user' | 'assistant' */
 export function getInjectionDepthRole() { return getSetting('injection').depthRole; }
+
+/** Get maximum active events pool size. @returns {number} */
+export function getMaxActiveEvents() { return getSetting('injection').maxActiveEvents ?? 12; }
 
 /**
  * Set a single injection setting.

@@ -8,24 +8,45 @@
 //   - Community summaries
 //   - World conditions
 //   - Flags NPC detected events (proposed to user, never auto-committed)
+//   - Detects new secrets forming in the narrative (auto-created, with dedup)
 //
 // The scanner does NOT update the Current Day block or auto-commit event changes.
 // =============================================================================
 
 import { generateWithProfile } from './connections.js';
 import { getChatId, nwstToast } from '../index.js';
-import { getScanFrequency, isPaused, isEnabled } from '../settings.js';
+import { getScanFrequency, getScanMinimumMessages, isPaused, isEnabled } from '../settings.js';
+import { chatHasData } from '../data/storage.js';
 import { getWorldState, getEnabledConditions, getSettingContext, updateConditionContent } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
-import { getNotebook, addCoreBullet, addMysteryBullet } from '../data/notebook.js';
+import { getNotebook, addCoreBullet, addMysteryBullet, addSecret, getAllSecrets } from '../data/notebook.js';
 import { getAllCommunities, updateCommunitySummary, addCommunity } from '../data/communities.js';
 import { resolveProfile } from './connections.js';
 import { runConsistencyCheck } from './narrativeConsistency.js';
 import { detectNPCEventsFromChat } from './eventGen.js';
 
 // ── Scanner state ─────────────────────────────────────────────────────────
+//
+// TWO-PHASE SCAN LIFECYCLE:
+//
+// PHASE 1 — WARMUP (no batch scan has been run for this chat):
+//   The scanner counts messages silently until the minimum floor is reached
+//   (default 10, configurable). At that point it fires the INITIAL SCAN,
+//   which grounds the world state for the first time.
+//   The cadence counter does NOT start until the initial scan completes.
+//
+// PHASE 2 — NORMAL CADENCE (after initial scan OR after batch scan):
+//   Scanner fires every N messages as configured. Batch scan completing
+//   mid-warmup immediately transitions to Phase 2 — no initial scan needed
+//   because batch scan already did the grounding pass.
+//
+// KEY INVARIANT: messageCountAtLastScan is only set after an actual scan
+// completes (either initial or cadence). This ensures the cadence counter
+// always starts from a clean boundary, never from the warmup count.
 
-let messageCountAtLastScan = 0;
+let messageCountAtLastScan = 0;  // Set after each completed scan
+let warmupMessageCount = 0;      // Counts messages during Phase 1 warmup
+let scanPhase = 'warmup';        // 'warmup' | 'cadence'
 let scanTimer = null;
 let isScanning = false;
 
@@ -78,6 +99,29 @@ WHAT YOU DO:
    Only flag events where a character explicitly states or clearly implies something will happen.
    Do NOT infer or extrapolate — only flag what is directly stated.
 
+5. SECRET DETECTION & KNOWLEDGE TRACKING — Two responsibilities:
+
+   a) CONSIDER EXISTING SECRETS when making notebook updates:
+      - Character knowledge states affect what notebook fields should reflect (e.g., concealment pressure → offscreenPressure; a secret revealed on-screen → establishedFacts; ongoing concealment → unresolvedDetail)
+      - A secret's whoKnows/whoDoesNotKnow lists determine which characters can act on that knowledge
+
+   b) DETECT NEW SECRETS forming in the recent messages:
+      - Identify when a character is actively concealing something, makes a hidden agreement, or when information is deliberately withheld
+      - Detect secrets that form organically from the narrative (hidden past, concealed plan, forbidden relationship)
+      - Check the existing secrets list to avoid duplicates — do NOT recreate secrets that already exist
+      - A new secret should include: title, type, core content, who knows it, and who does NOT know it
+
+      TYPE GUIDE:
+      "npc": A secret kept by an NPC (default)
+      "character": A secret about a character's nature, past, or abilities
+      "user_pc": A secret the {{user}} character (the PC) is keeping, or a secret about them
+      "environmental": A secret about the world or setting
+
+      RULES for new secrets:
+      - Do NOT include the literal label "User" (the real-world person at the keyboard) in whoKnows or whoDoesNotKnow lists — "User" is the OOC author, not a narrative participant
+      - The named {{user}} character (the PC) IS a legitimate narrative participant and CAN appear in whoKnows/whoDoesNotKnow
+      - When a secret involves the {{user}} character, use type "user_pc", NOT "character"
+
 RESPONSE FORMAT — respond with a JSON object:
 {
   "notebookUpdates": {
@@ -112,12 +156,25 @@ RESPONSE FORMAT — respond with a JSON object:
       "detectedFrom": "brief reference to what in the chat indicates this"
     }
   ],
+  "newSecrets": [
+    {
+      "title": "Secret title",
+      "type": "npc" | "character" | "user_pc" | "environmental",
+      "secret": "The hidden knowledge content",
+      "whoKnows": ["Character A"],
+      "whoDoesNotKnow": ["Character B"],
+      "evidenceShown": "optional evidence visible in chat",
+      "pressureRisk": "optional risk level",
+      "revealConditions": "optional conditions for reveal"
+    }
+  ],
   "noChanges": false
 }
 
 If nothing meaningful changed, return {"noChanges": true} and nothing else.
 Only include fields that have actual updates — empty arrays and null values are fine for unchanged fields.
-For notebookUpdates: only include NEW bullets to add. Do not repeat bullets already in the notebook.`;
+For notebookUpdates: only include NEW bullets to add. Do not repeat bullets already in the notebook.
+For newSecrets: only include secrets that are genuinely new. Do not recreate secrets that already exist in the provided list.`;
 
 // ── Community synthesis prompt (dedicated, richer pass) ───────────────────
 
@@ -156,20 +213,33 @@ Respond with a JSON array of community summaries:
 
 export function startScanner() {
     if (scanTimer) return;
-    console.log(`[NWST Scanner] Starting (frequency: every ${getScanFrequency()} messages)...`);
-    messageCountAtLastScan = getCurrentMessageCount();
+
+    const chatId = getChatId();
+
+    // Determine starting phase:
+    // If batch scan has already been run (chatHasData returns true),
+    // skip warmup and go straight to normal cadence.
+    // Otherwise start in warmup phase.
+    if (chatHasData(chatId)) {
+        scanPhase = 'cadence';
+        messageCountAtLastScan = getCurrentMessageCount();
+        console.log('[NWST Scanner] Batch scan data detected — starting in cadence phase.');
+    } else {
+        scanPhase = 'warmup';
+        warmupMessageCount = getCurrentMessageCount();
+        console.log(`[NWST Scanner] No batch scan data — starting in warmup phase (floor: ${getScanMinimumMessages()} messages).`);
+    }
+
     const { eventSource, event_types } = SillyTavern.getContext();
-    eventSource.on(event_types.MESSAGE_SENT, checkAndScan);
     eventSource.on(event_types.MESSAGE_RECEIVED, checkAndScan);
     scanTimer = 'event-driven';
-    console.log('[NWST Scanner] Started (event-driven).');
+    console.log(`[NWST Scanner] Started (cadence: every ${getScanFrequency()} messages).`);
 }
 
 export function stopScanner() {
     if (!scanTimer) return;
     try {
         const { eventSource, event_types } = SillyTavern.getContext();
-        eventSource.removeListener(event_types.MESSAGE_SENT, checkAndScan);
         eventSource.removeListener(event_types.MESSAGE_RECEIVED, checkAndScan);
     } catch (e) {
         console.warn('[NWST Scanner] Error detaching listeners:', e);
@@ -183,15 +253,67 @@ export function restartScanner() {
     startScanner();
 }
 
+/**
+ * Called externally when the user completes a batch scan mid-warmup.
+ * Immediately transitions to cadence phase without running an initial scan —
+ * batch scan already did the grounding pass.
+ */
+export function notifyBatchScanComplete() {
+    if (scanPhase === 'warmup') {
+        scanPhase = 'cadence';
+        messageCountAtLastScan = getCurrentMessageCount();
+        console.log('[NWST Scanner] Batch scan completed during warmup — transitioning to cadence phase.');
+    }
+}
+
 // ── Scan check ────────────────────────────────────────────────────────────
 
 async function checkAndScan() {
     if (!isEnabled() || isPaused() || isScanning) return;
+
     const currentCount = getCurrentMessageCount();
+
+    // ── PHASE 1: WARMUP ──────────────────────────────────────────────────
+    // Count messages silently until the minimum floor is reached.
+    // Do not fire any LLM calls during warmup.
+    if (scanPhase === 'warmup') {
+        const messagesSinceStart = currentCount - warmupMessageCount;
+        const floor = getScanMinimumMessages();
+
+        // Check if batch scan was run externally mid-warmup
+        // (e.g. user clicked Run Batch Scan before the floor was hit)
+        const chatId = getChatId();
+        if (chatHasData(chatId)) {
+            // Batch scan done — skip initial scan, go straight to cadence
+            scanPhase = 'cadence';
+            messageCountAtLastScan = currentCount;
+            console.log('[NWST Scanner] Batch scan detected mid-warmup — skipping initial scan, entering cadence.');
+            return;
+        }
+
+        if (messagesSinceStart < floor) {
+            console.log(`[NWST Scanner] Warmup: ${messagesSinceStart}/${floor} messages.`);
+            return; // Not ready yet
+        }
+
+        // Floor reached — fire the initial scan
+        console.log(`[NWST Scanner] Warmup complete (${messagesSinceStart} messages). Running initial scan...`);
+        nwstToast('Running initial world state scan...', 'info');
+        await runScan();
+
+        // Transition to cadence phase — cadence counter starts fresh from here
+        scanPhase = 'cadence';
+        messageCountAtLastScan = getCurrentMessageCount();
+        console.log('[NWST Scanner] Initial scan complete. Entering cadence phase.');
+        return;
+    }
+
+    // ── PHASE 2: NORMAL CADENCE ──────────────────────────────────────────
+    // Fire every N messages as configured.
     const messagesSinceLastScan = currentCount - messageCountAtLastScan;
     if (messagesSinceLastScan >= getScanFrequency()) {
         await runScan();
-        messageCountAtLastScan = currentCount;
+        messageCountAtLastScan = getCurrentMessageCount();
     }
 }
 
@@ -235,8 +357,8 @@ async function runScan() {
 
         if (hadUpdates) {
             nwstToast('World state updated.', 'info');
-            if (typeof window?.nwstRefreshAllUI === 'function') {
-                window.nwstRefreshAllUI();
+            if (typeof window?.nwstRefreshTabs === 'function') {
+                window.nwstRefreshTabs('home', 'world', 'notebook', 'events');
             }
         }
 
@@ -309,6 +431,20 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
     prompt += `=== CURRENT NOTEBOOK ===\n`;
     prompt += formatNotebookForPrompt(notebook);
     prompt += '\n';
+
+    // Existing secrets (for knowledge-aware tracking)
+    const allSecrets = notebook.secrets || [];
+    if (allSecrets.length > 0) {
+        prompt += `=== EXISTING SECRETS & HIDDEN KNOWLEDGE ===\n`;
+        for (const secret of allSecrets) {
+            prompt += `- "${secret.title}" (${secret.type})\n`;
+            prompt += `  Known by: ${secret.whoKnows?.join(', ') || '(none)'}\n`;
+            prompt += `  NOT known by: ${secret.whoDoesNotKnow?.join(', ') || '(none)'}\n`;
+            if (secret.secret) prompt += `  Details: ${secret.secret}\n`;
+            if (secret.revealConditions) prompt += `  Reveal conditions: ${secret.revealConditions}\n`;
+            prompt += '\n';
+        }
+    }
 
     // Community summaries
     if (communities.length > 0) {
@@ -404,7 +540,7 @@ async function applyScanResults(chatId, response, recentMessages) {
         if (Array.isArray(bullets) && bullets.length > 0) {
             for (const bullet of bullets) {
                 if (bullet && typeof bullet === 'string' && bullet.trim()) {
-                    addCoreBullet(chatId, field, bullet.trim());
+                    await addCoreBullet(chatId, field, bullet.trim());
                     hadUpdates = true;
                 }
             }
@@ -416,7 +552,7 @@ async function applyScanResults(chatId, response, recentMessages) {
         if (Array.isArray(bullets) && bullets.length > 0) {
             for (const bullet of bullets) {
                 if (bullet && typeof bullet === 'string' && bullet.trim()) {
-                    addMysteryBullet(chatId, field, bullet.trim());
+                    await addMysteryBullet(chatId, field, bullet.trim());
                     hadUpdates = true;
                 }
             }
@@ -428,7 +564,7 @@ async function applyScanResults(chatId, response, recentMessages) {
     for (const [condName, content] of Object.entries(condUpdates)) {
         if (content && typeof content === 'string' && content.trim() &&
             ['political', 'social', 'spiritual', 'environmental'].includes(condName)) {
-            updateConditionContent(chatId, condName, content.trim());
+            await updateConditionContent(chatId, condName, content.trim());
             hadUpdates = true;
             console.log(`[NWST Scanner] Updated world condition: ${condName}`);
         }
@@ -442,10 +578,10 @@ async function applyScanResults(chatId, response, recentMessages) {
         if (!update.name || !update.summary) continue;
         const existing = existingCommunities.find(c => c.name.toLowerCase() === update.name.toLowerCase());
         if (existing) {
-            updateCommunitySummary(chatId, existing.id, update.summary.trim());
+            await updateCommunitySummary(chatId, existing.id, update.summary.trim());
         } else {
             // New community detected — create it
-            addCommunity(chatId, {
+            await addCommunity(chatId, {
                 name: update.name,
                 members: update.members || '',
                 summary: update.summary.trim()
@@ -485,6 +621,44 @@ async function applyScanResults(chatId, response, recentMessages) {
             console.log(`[NWST Scanner] ${detectedEvents.length} NPC event(s) proposed for review.`);
         } catch (e) {
             console.error('[NWST Scanner] Failed to store pending events:', e);
+        }
+    }
+
+    // ── Apply new secret creation ──────────────────────────────────────────
+    const newSecrets = result.newSecrets || [];
+    if (newSecrets.length > 0) {
+        const existingSecrets = getAllSecrets(chatId);
+        const existingTitles = new Set(existingSecrets.map(s => s.title?.toLowerCase().trim()));
+
+        for (const secretData of newSecrets) {
+            if (!secretData.title || !secretData.secret) continue;
+
+            // Deduplicate by title
+            const titleLower = secretData.title.toLowerCase().trim();
+            if (existingTitles.has(titleLower)) continue;
+
+            // Also check fuzzy overlap on core secret text
+            const secretLower = secretData.secret.toLowerCase().trim();
+            const isDuplicate = existingSecrets.some(s =>
+                (s.secret?.toLowerCase() || '').includes(secretLower) ||
+                secretLower.includes(s.secret?.toLowerCase() || '')
+            );
+            if (isDuplicate) continue;
+
+            await addSecret(chatId, {
+                title: secretData.title.trim(),
+                type: secretData.type || 'npc',
+                secret: secretData.secret.trim(),
+                evidenceShown: secretData.evidenceShown || '',
+                pressureRisk: secretData.pressureRisk || '',
+                revealConditions: secretData.revealConditions || '',
+                whoKnows: Array.isArray(secretData.whoKnows) ? secretData.whoKnows : [],
+                whoDoesNotKnow: Array.isArray(secretData.whoDoesNotKnow) ? secretData.whoDoesNotKnow : []
+            });
+
+            existingTitles.add(titleLower);
+            hadUpdates = true;
+            console.log(`[NWST Scanner] Detected new secret: "${secretData.title}" (${secretData.type})`);
         }
     }
 
@@ -564,9 +738,9 @@ export async function synthesizeCommunities(chatId, messages) {
             if (!com.name || !com.summary) continue;
             const existing = existingList.find(c => c.name.toLowerCase() === com.name.toLowerCase());
             if (existing) {
-                updateCommunitySummary(chatId, existing.id, com.summary.trim());
+                await updateCommunitySummary(chatId, existing.id, com.summary.trim());
             } else {
-                addCommunity(chatId, {
+                await addCommunity(chatId, {
                     name: com.name,
                     members: com.members || '',
                     summary: com.summary.trim()

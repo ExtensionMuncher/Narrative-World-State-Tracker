@@ -39,7 +39,8 @@
 import {
     getChatData,
     setChatData,
-    deleteChatData
+    deleteChatData,
+    DEFAULT_NOTEBOOK
 } from './storage.js';
 
 // ── Unique ID generator ───────────────────────────────────────────────────
@@ -63,7 +64,25 @@ function generateSecretId() {
  * @returns {object} The notebook object (deep cloned)
  */
 export function getNotebook(chatId) {
-    return getChatData(chatId, 'notebook');
+    const nb = getChatData(chatId, 'notebook');
+    // Merge with DEFAULT_NOTEBOOK to ensure all fields exist
+    // (handles migration for chats stored before secrets feature was added)
+    return {
+        core: {
+            unresolvedDetail: Array.isArray(nb.core?.unresolvedDetail) ? nb.core.unresolvedDetail : [],
+            promiseThreatDeadline: Array.isArray(nb.core?.promiseThreatDeadline) ? nb.core.promiseThreatDeadline : [],
+            offscreenPressure: Array.isArray(nb.core?.offscreenPressure) ? nb.core.offscreenPressure : [],
+            doNotForget: Array.isArray(nb.core?.doNotForget) ? nb.core.doNotForget : []
+        },
+        mystery: {
+            establishedFacts: Array.isArray(nb.mystery?.establishedFacts) ? nb.mystery.establishedFacts : [],
+            plantedDetails: Array.isArray(nb.mystery?.plantedDetails) ? nb.mystery.plantedDetails : [],
+            characterWhereabouts: Array.isArray(nb.mystery?.characterWhereabouts) ? nb.mystery.characterWhereabouts : [],
+            inconsistenciesFlagged: Array.isArray(nb.mystery?.inconsistenciesFlagged) ? nb.mystery.inconsistenciesFlagged : [],
+            currentToneAtmosphere: Array.isArray(nb.mystery?.currentToneAtmosphere) ? nb.mystery.currentToneAtmosphere : []
+        },
+        secrets: Array.isArray(nb.secrets) ? nb.secrets : []
+    };
 }
 
 /**
@@ -71,8 +90,8 @@ export function getNotebook(chatId) {
  * @param {string} chatId
  * @param {object} notebook - Complete notebook object
  */
-export function saveNotebook(chatId, notebook) {
-    setChatData(chatId, 'notebook', notebook);
+export async function saveNotebook(chatId, notebook) {
+    await setChatData(chatId, 'notebook', notebook);
 }
 
 // ── Core section ──────────────────────────────────────────────────────────
@@ -104,14 +123,14 @@ export function getCoreField(chatId, fieldName) {
  * @param {string} fieldName - The Core field name
  * @param {string} bulletText - The text to add
  */
-export function addCoreBullet(chatId, fieldName, bulletText) {
+export async function addCoreBullet(chatId, fieldName, bulletText) {
     const nb = getNotebook(chatId);
     if (!nb.core[fieldName]) {
         console.error(`[NWST Notebook] Unknown core field: ${fieldName}`);
         return;
     }
     nb.core[fieldName].push(bulletText);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 /**
@@ -121,11 +140,11 @@ export function addCoreBullet(chatId, fieldName, bulletText) {
  * @param {number} index - 0-based index into the bullet array
  * @param {string} newText - The new bullet text
  */
-export function updateCoreBullet(chatId, fieldName, index, newText) {
+export async function updateCoreBullet(chatId, fieldName, index, newText) {
     const nb = getNotebook(chatId);
     if (!nb.core[fieldName] || index < 0 || index >= nb.core[fieldName].length) return;
     nb.core[fieldName][index] = newText;
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 /**
@@ -134,11 +153,11 @@ export function updateCoreBullet(chatId, fieldName, index, newText) {
  * @param {string} fieldName
  * @param {number} index - 0-based index
  */
-export function deleteCoreBullet(chatId, fieldName, index) {
+export async function deleteCoreBullet(chatId, fieldName, index) {
     const nb = getNotebook(chatId);
     if (!nb.core[fieldName] || index < 0 || index >= nb.core[fieldName].length) return;
     nb.core[fieldName].splice(index, 1);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 /**
@@ -147,11 +166,11 @@ export function deleteCoreBullet(chatId, fieldName, index) {
  * @param {string} fieldName
  * @param {string[]} bullets - New array of bullet strings
  */
-export function replaceCoreField(chatId, fieldName, bullets) {
+export async function replaceCoreField(chatId, fieldName, bullets) {
     const nb = getNotebook(chatId);
     if (!nb.core[fieldName]) return;
     nb.core[fieldName] = bullets;
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 // ── Mystery section ───────────────────────────────────────────────────────
@@ -183,14 +202,14 @@ export function getMysteryField(chatId, fieldName) {
  * @param {string} fieldName
  * @param {string} bulletText
  */
-export function addMysteryBullet(chatId, fieldName, bulletText) {
+export async function addMysteryBullet(chatId, fieldName, bulletText) {
     const nb = getNotebook(chatId);
     if (!nb.mystery[fieldName]) {
         console.error(`[NWST Notebook] Unknown mystery field: ${fieldName}`);
         return;
     }
     nb.mystery[fieldName].push(bulletText);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 /**
@@ -200,11 +219,11 @@ export function addMysteryBullet(chatId, fieldName, bulletText) {
  * @param {number} index
  * @param {string} newText
  */
-export function updateMysteryBullet(chatId, fieldName, index, newText) {
+export async function updateMysteryBullet(chatId, fieldName, index, newText) {
     const nb = getNotebook(chatId);
     if (!nb.mystery[fieldName] || index < 0 || index >= nb.mystery[fieldName].length) return;
     nb.mystery[fieldName][index] = newText;
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 /**
@@ -213,11 +232,11 @@ export function updateMysteryBullet(chatId, fieldName, index, newText) {
  * @param {string} fieldName
  * @param {number} index
  */
-export function deleteMysteryBullet(chatId, fieldName, index) {
+export async function deleteMysteryBullet(chatId, fieldName, index) {
     const nb = getNotebook(chatId);
     if (!nb.mystery[fieldName] || index < 0 || index >= nb.mystery[fieldName].length) return;
     nb.mystery[fieldName].splice(index, 1);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 /**
@@ -226,11 +245,11 @@ export function deleteMysteryBullet(chatId, fieldName, index) {
  * @param {string} fieldName
  * @param {string[]} bullets
  */
-export function replaceMysteryField(chatId, fieldName, bullets) {
+export async function replaceMysteryField(chatId, fieldName, bullets) {
     const nb = getNotebook(chatId);
     if (!nb.mystery[fieldName]) return;
     nb.mystery[fieldName] = bullets;
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
 }
 
 // ── Secrets section ───────────────────────────────────────────────────────
@@ -255,6 +274,7 @@ export function getAllSecrets(chatId) {
  */
 export function getSecretById(chatId, secretId) {
     const nb = getNotebook(chatId);
+    if (!nb.secrets) return null;
     return nb.secrets.find(s => s.id === secretId) || null;
 }
 
@@ -264,8 +284,9 @@ export function getSecretById(chatId, secretId) {
  * @param {object} secretData - Secret fields (id auto-generated if not provided)
  * @returns {object} The newly created secret
  */
-export function addSecret(chatId, secretData) {
+export async function addSecret(chatId, secretData) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) nb.secrets = [];
     const newSecret = {
         id: secretData.id || generateSecretId(),
         type: secretData.type || 'character',
@@ -275,10 +296,15 @@ export function addSecret(chatId, secretData) {
         whoDoesNotKnow: secretData.whoDoesNotKnow || [],
         evidenceShown: secretData.evidenceShown || '',
         pressureRisk: secretData.pressureRisk || '',
-        revealConditions: secretData.revealConditions || ''
+        revealConditions: secretData.revealConditions || '',
+        // Injection priority:
+        //   'high'   — always inject when a whoKnows character is present
+        //   'normal' — inject only when a whoDoesNotKnow character is ALSO present (active risk)
+        //   'low'    — never inject into main prompt; consistency monitor only
+        injectionPriority: secretData.injectionPriority || 'normal'
     };
     nb.secrets.push(newSecret);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
     return newSecret;
 }
 
@@ -289,12 +315,13 @@ export function addSecret(chatId, secretData) {
  * @param {object} updates - Partial secret fields
  * @returns {object|null} The updated secret
  */
-export function updateSecret(chatId, secretId, updates) {
+export async function updateSecret(chatId, secretId, updates) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return null;
     const index = nb.secrets.findIndex(s => s.id === secretId);
     if (index === -1) return null;
     nb.secrets[index] = { ...nb.secrets[index], ...updates };
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
     return nb.secrets[index];
 }
 
@@ -304,12 +331,13 @@ export function updateSecret(chatId, secretId, updates) {
  * @param {string} secretId
  * @returns {boolean} True if deleted
  */
-export function deleteSecret(chatId, secretId) {
+export async function deleteSecret(chatId, secretId) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return false;
     const index = nb.secrets.findIndex(s => s.id === secretId);
     if (index === -1) return false;
     nb.secrets.splice(index, 1);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
     return true;
 }
 
@@ -320,13 +348,14 @@ export function deleteSecret(chatId, secretId) {
  * @param {string} characterName
  * @returns {object|null} Updated secret
  */
-export function addWhoKnows(chatId, secretId, characterName) {
+export async function addWhoKnows(chatId, secretId, characterName) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return null;
     const secret = nb.secrets.find(s => s.id === secretId);
     if (!secret) return null;
     if (!secret.whoKnows.includes(characterName)) {
         secret.whoKnows.push(characterName);
-        saveNotebook(chatId, nb);
+        await saveNotebook(chatId, nb);
     }
     return secret;
 }
@@ -338,12 +367,13 @@ export function addWhoKnows(chatId, secretId, characterName) {
  * @param {string} characterName
  * @returns {object|null}
  */
-export function removeWhoKnows(chatId, secretId, characterName) {
+export async function removeWhoKnows(chatId, secretId, characterName) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return null;
     const secret = nb.secrets.find(s => s.id === secretId);
     if (!secret) return null;
     secret.whoKnows = secret.whoKnows.filter(n => n !== characterName);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
     return secret;
 }
 
@@ -354,13 +384,14 @@ export function removeWhoKnows(chatId, secretId, characterName) {
  * @param {string} characterName
  * @returns {object|null}
  */
-export function addWhoDoesNotKnow(chatId, secretId, characterName) {
+export async function addWhoDoesNotKnow(chatId, secretId, characterName) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return null;
     const secret = nb.secrets.find(s => s.id === secretId);
     if (!secret) return null;
     if (!secret.whoDoesNotKnow.includes(characterName)) {
         secret.whoDoesNotKnow.push(characterName);
-        saveNotebook(chatId, nb);
+        await saveNotebook(chatId, nb);
     }
     return secret;
 }
@@ -372,12 +403,13 @@ export function addWhoDoesNotKnow(chatId, secretId, characterName) {
  * @param {string} characterName
  * @returns {object|null}
  */
-export function removeWhoDoesNotKnow(chatId, secretId, characterName) {
+export async function removeWhoDoesNotKnow(chatId, secretId, characterName) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return null;
     const secret = nb.secrets.find(s => s.id === secretId);
     if (!secret) return null;
     secret.whoDoesNotKnow = secret.whoDoesNotKnow.filter(n => n !== characterName);
-    saveNotebook(chatId, nb);
+    await saveNotebook(chatId, nb);
     return secret;
 }
 
@@ -390,6 +422,7 @@ export function removeWhoDoesNotKnow(chatId, secretId, characterName) {
  */
 export function getSecretsKnownBy(chatId, characterName) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return [];
     return nb.secrets.filter(s => s.whoKnows.includes(characterName));
 }
 
@@ -402,6 +435,7 @@ export function getSecretsKnownBy(chatId, characterName) {
  */
 export function getSecretsUnknownTo(chatId, characterName) {
     const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets)) return [];
     return nb.secrets.filter(s => s.whoDoesNotKnow.includes(characterName));
 }
 

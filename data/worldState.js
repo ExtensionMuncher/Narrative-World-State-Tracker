@@ -30,6 +30,7 @@ import {
     DEFAULT_SEASON_CONFIG,
     DEFAULT_CALENDAR_CONFIG
 } from './storage.js';
+import { getMaxSnapshotCount } from '../settings.js';
 
 // ── Current Day ───────────────────────────────────────────────────────────
 
@@ -47,8 +48,8 @@ export function getWorldState(chatId) {
  * @param {string} chatId
  * @param {object} worldState - Complete world state object
  */
-export function saveWorldState(chatId, worldState) {
-    setChatData(chatId, 'worldState', worldState);
+export async function saveWorldState(chatId, worldState) {
+    await setChatData(chatId, 'worldState', worldState);
 }
 
 /**
@@ -67,10 +68,10 @@ export function getCurrentDay(chatId) {
  * @param {string} chatId
  * @param {object} dayData - Partial currentDay fields to update
  */
-export function updateCurrentDay(chatId, dayData) {
+export async function updateCurrentDay(chatId, dayData) {
     const ws = getWorldState(chatId);
     ws.currentDay = { ...ws.currentDay, ...dayData };
-    saveWorldState(chatId, ws);
+    await saveWorldState(chatId, ws);
 }
 
 /**
@@ -78,10 +79,10 @@ export function updateCurrentDay(chatId, dayData) {
  * @param {string} chatId
  * @param {object} newCurrentDay - Complete new currentDay object
  */
-export function replaceCurrentDay(chatId, newCurrentDay) {
+export async function replaceCurrentDay(chatId, newCurrentDay) {
     const ws = getWorldState(chatId);
     ws.currentDay = newCurrentDay;
-    saveWorldState(chatId, ws);
+    await saveWorldState(chatId, ws);
 }
 
 // ── Forecast ──────────────────────────────────────────────────────────────
@@ -101,10 +102,10 @@ export function getForecast(chatId) {
  * @param {string} chatId
  * @param {object[]} forecast - Array of 7 forecast entries
  */
-export function replaceForecast(chatId, forecast) {
+export async function replaceForecast(chatId, forecast) {
     const ws = getWorldState(chatId);
     ws.forecast = forecast;
-    saveWorldState(chatId, ws);
+    await saveWorldState(chatId, ws);
 }
 
 // ── Moon Phases ───────────────────────────────────────────────────────────
@@ -124,10 +125,10 @@ export function getMoonPhases(chatId) {
  * @param {string} chatId
  * @param {object[]} moonPhases - Array of 7 moon phase entries
  */
-export function replaceMoonPhases(chatId, moonPhases) {
+export async function replaceMoonPhases(chatId, moonPhases) {
     const ws = getWorldState(chatId);
     ws.moonPhases = moonPhases;
-    saveWorldState(chatId, ws);
+    await saveWorldState(chatId, ws);
 }
 
 // ── World Conditions ──────────────────────────────────────────────────────
@@ -159,11 +160,11 @@ export function getCondition(chatId, conditionName) {
  * @param {string} conditionName - 'political' | 'social' | 'spiritual' | 'environmental'
  * @param {object} conditionData - Partial condition fields { enabled?, content? }
  */
-export function updateCondition(chatId, conditionName, conditionData) {
+export async function updateCondition(chatId, conditionName, conditionData) {
     const ws = getWorldState(chatId);
     if (ws.conditions[conditionName]) {
         ws.conditions[conditionName] = { ...ws.conditions[conditionName], ...conditionData };
-        saveWorldState(chatId, ws);
+        await saveWorldState(chatId, ws);
     }
 }
 
@@ -174,11 +175,11 @@ export function updateCondition(chatId, conditionName, conditionData) {
  * @param {string} conditionName
  * @returns {boolean} The new enabled state
  */
-export function toggleConditionEnabled(chatId, conditionName) {
+export async function toggleConditionEnabled(chatId, conditionName) {
     const ws = getWorldState(chatId);
     if (ws.conditions[conditionName]) {
         ws.conditions[conditionName].enabled = !ws.conditions[conditionName].enabled;
-        saveWorldState(chatId, ws);
+        await saveWorldState(chatId, ws);
         return ws.conditions[conditionName].enabled;
     }
     return false;
@@ -190,8 +191,8 @@ export function toggleConditionEnabled(chatId, conditionName) {
  * @param {string} conditionName
  * @param {string} content - The new condition text
  */
-export function updateConditionContent(chatId, conditionName, content) {
-    updateCondition(chatId, conditionName, { content });
+export async function updateConditionContent(chatId, conditionName, content) {
+    await updateCondition(chatId, conditionName, { content });
 }
 
 /**
@@ -228,8 +229,8 @@ export function getSettingContext(chatId) {
  * @param {string} chatId
  * @param {string} context - The setting context text
  */
-export function saveSettingContext(chatId, context) {
-    setChatData(chatId, 'settingContext', context);
+export async function saveSettingContext(chatId, context) {
+    await setChatData(chatId, 'settingContext', context);
 }
 
 // ── Season Configuration (per-chat) ───────────────────────────────────────
@@ -260,8 +261,8 @@ export function getSeasonConfig(chatId) {
  * @param {string} chatId
  * @param {object} config - Season config object { mode, yearLength, seasons }
  */
-export function saveSeasonConfig(chatId, config) {
-    setChatData(chatId, 'seasonConfig', config);
+export async function saveSeasonConfig(chatId, config) {
+    await setChatData(chatId, 'seasonConfig', config);
 }
 
 // ── Calendar Configuration ────────────────────────────────────────────────
@@ -297,8 +298,8 @@ export function getCalendarConfig(chatId) {
  * @param {string} chatId
  * @param {object} config - Calendar config object { enabled, months, monthNames, monthDays }
  */
-export function saveCalendarConfig(chatId, config) {
-    setChatData(chatId, 'calendarConfig', config);
+export async function saveCalendarConfig(chatId, config) {
+    await setChatData(chatId, 'calendarConfig', config);
 }
 
 // ── Snapshots ─────────────────────────────────────────────────────────────
@@ -322,21 +323,61 @@ export function getSnapshots(chatId) {
  * @param {object[]} eventsSnapshot - Full events array at this boundary
  * @param {object} notebookSnapshot - Full notebook at this boundary
  */
-export function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsSnapshot, notebookSnapshot) {
+export async function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsSnapshot, notebookSnapshot) {
     const snapshots = getSnapshots(chatId);
+
     // Handle both range keys ("123-456") and non-range keys ("day_1234567890", "batch_scan")
     const parts = rangeKey.split('-');
     const parsedStart = parts.length >= 2 ? parseInt(parts[0], 10) : NaN;
-    const parsedEnd = parts.length >= 2 ? parseInt(parts[1], 10) : NaN;
+    const parsedEnd   = parts.length >= 2 ? parseInt(parts[1], 10) : NaN;
+
     snapshots[rangeKey] = {
         // For non-range keys, use Date.now() as sortable fallback so getLatestSnapshot() works correctly
         messageRangeStart: isNaN(parsedStart) ? 0 : parsedStart,
-        messageRangeEnd: isNaN(parsedEnd) ? Date.now() : parsedEnd,
+        messageRangeEnd:   isNaN(parsedEnd)   ? Date.now() : parsedEnd,
         worldStateSnapshot,
         eventsSnapshot,
-        notebookSnapshot
+        notebookSnapshot,
+        savedAt: Date.now()
     };
-    setChatData(chatId, 'snapshots', snapshots);
+
+    // ── Prune oldest snapshots if over the cap ────────────────────────────
+    // Keeps the per-chat file size bounded. Oldest snapshots are pruned first
+    // since they represent the most distant past and are least likely to be needed.
+    // batch_scan and pre_skip snapshots are always preserved — they are landmarks,
+    // not regular cadence snapshots, and are explicitly meaningful to the user.
+    const maxCount = getMaxSnapshotCount();
+    const allKeys = Object.keys(snapshots);
+
+    if (allKeys.length > maxCount) {
+        // Separate protected snapshots from pruneable ones
+        const protected_keys = allKeys.filter(k =>
+            k.startsWith('batch_scan') || k.startsWith('pre_skip')
+        );
+        const pruneable = allKeys
+            .filter(k => !k.startsWith('batch_scan') && !k.startsWith('pre_skip'))
+            .sort((a, b) => {
+                // Sort ascending by messageRangeEnd (oldest first = lowest end)
+                const endA = snapshots[a]?.messageRangeEnd ?? 0;
+                const endB = snapshots[b]?.messageRangeEnd ?? 0;
+                return endA - endB;
+            });
+
+        // Prune oldest pruneable snapshots until we're within the limit
+        const totalProtected = protected_keys.length;
+        const allowedPruneable = Math.max(0, maxCount - totalProtected);
+        const toPrune = pruneable.slice(0, pruneable.length - allowedPruneable);
+
+        for (const k of toPrune) {
+            delete snapshots[k];
+        }
+
+        if (toPrune.length > 0) {
+            console.log(`[NWST Storage] Pruned ${toPrune.length} old snapshot(s) — kept ${Object.keys(snapshots).length}/${maxCount} (${protected_keys.length} protected).`);
+        }
+    }
+
+    await setChatData(chatId, 'snapshots', snapshots);
 }
 
 /**

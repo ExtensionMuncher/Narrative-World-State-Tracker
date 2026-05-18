@@ -71,8 +71,8 @@ export function getAllCommunities(chatId) {
  * @param {string} chatId
  * @param {object[]} communities
  */
-export function saveAllCommunities(chatId, communities) {
-    setChatData(chatId, 'communities', communities);
+export async function saveAllCommunities(chatId, communities) {
+    await setChatData(chatId, 'communities', communities);
 }
 
 /**
@@ -99,7 +99,7 @@ export function getCommunityById(chatId, communityId) {
  * @param {object} [communityData.avatarColors] - Override auto-assigned colors
  * @returns {object} The newly created community
  */
-export function addCommunity(chatId, communityData) {
+export async function addCommunity(chatId, communityData) {
     const communities = getAllCommunities(chatId);
 
     // Auto-generate avatar initials from the community name (first letter of first two words)
@@ -119,7 +119,7 @@ export function addCommunity(chatId, communityData) {
     };
 
     communities.push(newCommunity);
-    saveAllCommunities(chatId, communities);
+    await saveAllCommunities(chatId, communities);
     return newCommunity;
 }
 
@@ -130,13 +130,13 @@ export function addCommunity(chatId, communityData) {
  * @param {object} updates - Partial community fields
  * @returns {object|null} The updated community
  */
-export function updateCommunity(chatId, communityId, updates) {
+export async function updateCommunity(chatId, communityId, updates) {
     const communities = getAllCommunities(chatId);
     const index = communities.findIndex(c => c.id === communityId);
     if (index === -1) return null;
 
     communities[index] = { ...communities[index], ...updates };
-    saveAllCommunities(chatId, communities);
+    await saveAllCommunities(chatId, communities);
     return communities[index];
 }
 
@@ -146,13 +146,13 @@ export function updateCommunity(chatId, communityId, updates) {
  * @param {string} communityId
  * @returns {boolean} True if deleted
  */
-export function deleteCommunity(chatId, communityId) {
+export async function deleteCommunity(chatId, communityId) {
     const communities = getAllCommunities(chatId);
     const index = communities.findIndex(c => c.id === communityId);
     if (index === -1) return false;
 
     communities.splice(index, 1);
-    saveAllCommunities(chatId, communities);
+    await saveAllCommunities(chatId, communities);
     return true;
 }
 
@@ -163,7 +163,7 @@ export function deleteCommunity(chatId, communityId) {
  * @param {string} summary - New summary text
  * @returns {object|null}
  */
-export function updateCommunitySummary(chatId, communityId, summary) {
+export async function updateCommunitySummary(chatId, communityId, summary) {
     return updateCommunity(chatId, communityId, { summary });
 }
 
@@ -174,7 +174,7 @@ export function updateCommunitySummary(chatId, communityId, summary) {
  * @param {string} members - Comma-separated member string
  * @returns {object|null}
  */
-export function updateCommunityMembers(chatId, communityId, members) {
+export async function updateCommunityMembers(chatId, communityId, members) {
     return updateCommunity(chatId, communityId, { members });
 }
 
@@ -184,7 +184,7 @@ export function updateCommunityMembers(chatId, communityId, members) {
  * Delete all communities for a chat.
  * @param {string} chatId
  */
-export function clearAllCommunities(chatId) {
+export async function clearAllCommunities(chatId) {
     deleteChatData(chatId, 'communities');
 }
 

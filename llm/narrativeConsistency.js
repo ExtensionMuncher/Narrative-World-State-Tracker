@@ -50,6 +50,7 @@ IMPORTANT RULES:
 - Be precise — cite the specific message and character.
 - A character merely being in the same room as secret-related activity is NOT a violation.
 - The character must actively demonstrate knowledge they should not have.
+- Messages labeled as just "User" (no character name) are from the real-world person at the keyboard — the OOC author, not a narrative participant. Do not flag "User" messages as knowledge violations.
 - If you find no issues, report "No consistency violations detected."
 
 Output format:
@@ -94,10 +95,33 @@ export function getSelectiveSecretInjection(chatId) {
     // Detect characters in the current scene from recent message metadata
     const sceneCharacters = detectSceneCharacters();
 
-    // Filter to secrets where at least one whoKnows character is scene-present
+    // Filter secrets by presence + priority:
+    //   high   — inject if any whoKnows character is present
+    //   normal — inject only if a whoDoesNotKnow character is ALSO present (active risk)
+    //   low    — never inject (consistency monitor only)
     const activeSecrets = secrets.filter(secret => {
+        const priority = secret.injectionPriority || 'normal';
+
+        // Low priority: never inject
+        if (priority === 'low') return false;
+
+        // Must have at least one whoKnows character present
         if (!secret.whoKnows || secret.whoKnows.length === 0) return false;
-        return secret.whoKnows.some(name =>
+        const knowsCharacterPresent = secret.whoKnows.some(name =>
+            sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
+        );
+        if (!knowsCharacterPresent) return false;
+
+        // High priority: inject whenever a whoKnows character is present
+        if (priority === 'high') return true;
+
+        // Normal priority: only inject when a whoDoesNotKnow character is ALSO present
+        // This means the secret is at active risk of leaking in this scene
+        if (!secret.whoDoesNotKnow || secret.whoDoesNotKnow.length === 0) {
+            // No one who doesn't know — still inject so the LLM has context
+            return true;
+        }
+        return secret.whoDoesNotKnow.some(name =>
             sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
         );
     });
@@ -138,7 +162,7 @@ function detectSceneCharacters() {
         const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
         // Look at the last 8 messages as "scene context"
-        const recentCount = Math.min(8, chat.length);
+        const recentCount = Math.min(15, chat.length);
         const recentMessages = chat.slice(-recentCount);
 
         const characters = new Set();
@@ -207,6 +231,7 @@ export async function runConsistencyCheck() {
         if (hasViolations && !hasNoIssues) {
             flagViolations(chatId, response);
             nwstToast('Narrative consistency violations flagged — check the Notebook.', 'warning');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
             return true;
         }
 
@@ -229,6 +254,7 @@ function getRecentSceneMessages() {
         const start = Math.max(0, chat.length - 15);
         return chat.slice(start).filter(msg => {
             if (msg.is_system && msg.extra?.hidden) return false;
+            if (msg.extra?.display === 'none') return false;
             return true;
         });
     } catch (e) {
@@ -280,7 +306,7 @@ function buildConsistencyPrompt(secrets, recentMessages, sceneCharacters) {
 
 // ── Flag violations in notebook ───────────────────────────────────────────
 
-function flagViolations(chatId, response) {
+async function flagViolations(chatId, response) {
     // Parse violation lines from the response
     const lines = response.split('\n').filter(line =>
         line.trim().toLowerCase().startsWith('violation')
@@ -288,12 +314,12 @@ function flagViolations(chatId, response) {
 
     for (const line of lines) {
         const flagText = `[Narrative Consistency] ${line.trim()}`;
-        addMysteryBullet(chatId, 'inconsistenciesFlagged', flagText);
+        await addMysteryBullet(chatId, 'inconsistenciesFlagged', flagText);
     }
 
     // If we couldn't parse specific lines, add the whole response as one flag
     if (lines.length === 0 && response.trim()) {
-        addMysteryBullet(chatId, 'inconsistenciesFlagged',
+        await addMysteryBullet(chatId, 'inconsistenciesFlagged',
             `[Narrative Consistency] ${response.trim().substring(0, 200)}`);
     }
 }
