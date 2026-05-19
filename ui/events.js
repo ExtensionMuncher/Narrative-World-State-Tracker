@@ -107,6 +107,7 @@ function buildEventItemHTML(event) {
         <div class="nwst-event-item-hdr nwst-events-toggle">
             <div class="nwst-event-dot nwst-${event.tier}"></div>
             <div class="nwst-event-title">${escapeHTML(event.title)}</div>
+            ${event.scheduledDate ? `<span class="nwst-event-time" title="Click to edit scheduled time">${escapeHTML(event.scheduledDate)}</span>` : ''}
             <span class="nwst-badge nwst-badge-${event.tier}">${capitalize(event.tier)}</span>
             ${event.isNPC ? '<span class="nwst-badge nwst-badge-npc">NPC</span>' : ''}
             <span class="nwst-badge nwst-badge-${event.status}">${statusLabel(event.status)}</span>
@@ -117,13 +118,16 @@ function buildEventItemHTML(event) {
                 <input type="text" class="nwst-events-title" value="${escapeHTML(event.title)}" style="width:100%;font-size:13px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;" placeholder="Event title...">
             </div>
             <div style="margin-bottom:8px">
-                <div style="font-size:11px;color:#999;margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Time category</div>
-                <select class="nwst-events-tier" style="width:100%;font-size:13px;padding:5px 8px;">
-                    <option value="immediate"${event.tier === 'immediate' ? ' selected' : ''}>Immediate</option>
-                    <option value="week"${event.tier === 'week' ? ' selected' : ''}>This week</option>
-                    <option value="month"${event.tier === 'month' ? ' selected' : ''}>This month</option>
-                    <option value="undetermined"${event.tier === 'undetermined' ? ' selected' : ''}>Undetermined</option>
-                </select>
+                <div style="font-size:11px;color:#999;margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Time</div>
+                <div style="display:flex;gap:8px;align-items:start">
+                    <select class="nwst-events-tier" style="flex:1;font-size:13px;padding:5px 8px;">
+                        <option value="immediate"${event.tier === 'immediate' ? ' selected' : ''}>Immediate</option>
+                        <option value="week"${event.tier === 'week' ? ' selected' : ''}>This week</option>
+                        <option value="month"${event.tier === 'month' ? ' selected' : ''}>This month</option>
+                        <option value="undetermined"${event.tier === 'undetermined' ? ' selected' : ''}>Undetermined</option>
+                    </select>
+                    <input type="text" class="nwst-events-scheduled" value="${event.scheduledDate ? escapeHTML(event.scheduledDate) : ''}" style="flex:1;font-size:13px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;" placeholder="e.g. Day 3, March 15...">
+                </div>
             </div>
             <textarea class="nwst-events-desc" rows="2" style="margin-bottom:8px" id="nwst-event-desc-${event.id}">${escapeHTML(event.description)}</textarea>
             <div style="font-size:11px;color:#999;margin-bottom:6px">Status</div>
@@ -136,7 +140,7 @@ function buildEventItemHTML(event) {
             <div class="nwst-btn-row">
                 <button class="menu_button nwst-btn nwst-events-save">Save</button>
                 <button class="menu_button nwst-btn-danger nwst-events-delete">Delete</button>
-                <button class="editor_maximize nwst-expand-btn nwst-events-popout" data-for="nwst-event-desc-${event.id}" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                <button class="editor_maximize nwst-expand-btn nwst-cond-popout" data-for="nwst-event-desc-${event.id}" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
             </div>
         </div>
     </div>`;
@@ -167,7 +171,7 @@ function wireEventItemEvents() {
                         <textarea class="text_pole" rows="3" style="width:100%" placeholder="Describe the event..."
                             oninput="window._nwstAddEventDesc=this.value"></textarea>
                     </div>
-                    <div>
+                    <div style="margin-bottom:14px">
                         <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Category</label>
                         <select class="text_pole" style="width:100%"
                             onchange="window._nwstAddEventTier=this.value">
@@ -177,6 +181,21 @@ function wireEventItemEvents() {
                             <option value="undetermined" selected>Undetermined</option>
                         </select>
                     </div>
+                    <div style="margin-bottom:14px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Scheduled date / time <span style="color:#ccc;font-style:italic">(optional)</span></label>
+                        <input type="text" class="text_pole" style="width:100%" placeholder="e.g. Day 3, March 15, Evening of the festival..."
+                            oninput="window._nwstAddEventScheduled=this.value">
+                    </div>
+                    <div style="padding:6px 0">
+                        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none">
+                            <input type="checkbox" id="nwst-add-event-isnpc" class="checkbox_input"
+                                style="width:16px;height:16px;flex-shrink:0;cursor:pointer">
+                            <div>
+                                <div style="font-size:13px;font-weight:500">NPC event</div>
+                                <div style="font-size:11px;color:#999;margin-top:2px">Check if this event is driven by a character rather than the world. NPC events bypass the active event pool cap.</div>
+                            </div>
+                        </label>
+                    </div>
                 </div>
             `;
 
@@ -184,6 +203,7 @@ function wireEventItemEvents() {
             window._nwstAddEventTitle = '';
             window._nwstAddEventDesc = '';
             window._nwstAddEventTier = 'undetermined';
+            window._nwstAddEventScheduled = '';
 
             const result = await callGenericPopup(formHtml, POPUP_TYPE.TEXT, '', {
                 okButton: 'Add event',
@@ -195,13 +215,19 @@ function wireEventItemEvents() {
                 const description = window._nwstAddEventDesc?.trim() || 'No description provided.';
                 const tier = window._nwstAddEventTier || 'undetermined';
 
+                // Read directly from DOM — onchange globals don't fire reliably inside ST's popup
+                const npcCheckbox = document.getElementById('nwst-add-event-isnpc');
+                const isNPC = npcCheckbox ? npcCheckbox.checked : false;
+                const scheduledDate = window._nwstAddEventScheduled?.trim() || null;
                 const newEvent = await addEvent(chatId, {
                     title: title,
                     description: description,
                     tier: tier,
                     status: 'pending',
-                    isNPC: false,
-                    origin: 'detected'
+                    isNPC: isNPC,
+                    npcOrigin: isNPC ? 'detected' : null,
+                    origin: 'detected',
+                    scheduledDate: scheduledDate
                 });
                 refreshEventsUI();
                 nwstToast(`Event "${title}" added (${tier}).`, 'success');
@@ -234,6 +260,42 @@ function wireEventItemEvents() {
         };
     });
 
+    // ── Header time: click-to-edit inline ─────────────────────
+    container.querySelectorAll('.nwst-event-time').forEach(el => {
+        el.onclick = async function (e) {
+            e.stopPropagation();
+            const item = this.closest('.nwst-event-item');
+            const eventId = item.getAttribute('data-event-id');
+            const isEmpty = this.querySelector('.nwst-event-time-empty') !== null;
+            const currentTime = isEmpty ? '' : this.textContent.trim();
+
+            // Replace with inline input
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'nwst-event-time-input';
+            input.value = currentTime;
+            input.placeholder = 'e.g. Day 3, March 15...';
+            input.style.width = '130px';
+
+            this.replaceWith(input);
+            input.focus();
+            input.select();
+
+            const saveTime = async () => {
+                const chatId = getChatId();
+                const val = input.value.trim();
+                await updateEvent(chatId, eventId, { scheduledDate: val || null });
+                refreshEventsUI();
+            };
+
+            input.onblur = saveTime;
+            input.onkeydown = (ev) => {
+                if (ev.key === 'Enter') { input.blur(); }
+                if (ev.key === 'Escape') { refreshEventsUI(); }
+            };
+        };
+    });
+
     // ── Status buttons ────────────────────────────────────────
     container.querySelectorAll('.nwst-events-status').forEach(btn => {
         btn.onclick = async function (e) {
@@ -258,10 +320,13 @@ function wireEventItemEvents() {
             const tierSelect   = item.querySelector('.nwst-events-tier');
             const chatId = getChatId();
 
+            const scheduledInput = item.querySelector('.nwst-events-scheduled');
+
             const updates = {};
             if (descTextarea) updates.description = descTextarea.value;
             if (titleInput)   updates.title = titleInput.value.trim() || 'Untitled event';
             if (tierSelect)   updates.tier  = tierSelect.value;
+            if (scheduledInput) updates.scheduledDate = scheduledInput.value.trim() || null;
 
             if (Object.keys(updates).length > 0) {
                 await updateEvent(chatId, eventId, updates);

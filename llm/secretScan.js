@@ -17,7 +17,7 @@
 // does NOT require chatHasData() to be false — it can be run multiple times.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../index.js';
+import { getChatId, nwstToast } from '../utils.js';;
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getNotebook, addSecret } from '../data/notebook.js';
 
@@ -64,7 +64,8 @@ Each secret object must follow this exact schema:
   "whoDoesNotKnow": ["Character name who does NOT know this secret"],
   "evidenceShown": "What evidence has been shown in the chat so far (if any)",
   "pressureRisk": "What pressure or risk would be created if this secret were revealed",
-  "revealConditions": "Under what circumstances this secret might be revealed"
+  "revealConditions": "Under what circumstances this secret might be revealed",
+  "injectionPriority": "high" | "normal" | "low"
 }
 
 IMPORTANT RULES:
@@ -83,6 +84,11 @@ TYPE GUIDE:
 - "world": A world-level secret — conspiracies, concealed history, forbidden knowledge
 - "dramatic_irony": The audience/user knows something the characters don't
 - "unconfirmed_suspicion": A character suspects something but hasn't confirmed it
+
+INJECTION PRIORITY GUIDE:
+- "high" — secrets whose revelation would cause immediate, major consequences (active ticking bomb, imminent betrayal)
+- "normal" — standard secrets with clear dramatic potential (default)
+- "low" — minor secrets, background details, or secrets with low immediate impact
 
 When the secret involves the {{user}} character, ALWAYS use type "user_pc", NOT "character".
 
@@ -178,7 +184,8 @@ function buildSynthesisPrompt(accumulatedContext, existingSecrets) {
     "whoDoesNotKnow": ["CharacterName"],
     "evidenceShown": "What evidence has been shown",
     "pressureRisk": "Risk if revealed",
-    "revealConditions": "When it might be revealed"
+    "revealConditions": "When it might be revealed",
+    "injectionPriority": "high|normal|low"
   }
 ]\n\n`;
     prompt += `CRITICAL — QUALITY CHECKLIST:\n`;
@@ -369,7 +376,8 @@ export async function scanForSecrets(chatId) {
                 whoDoesNotKnow: Array.isArray(secret.whoDoesNotKnow) ? secret.whoDoesNotKnow : [],
                 evidenceShown: secret.evidenceShown || '',
                 pressureRisk: secret.pressureRisk || '',
-                revealConditions: secret.revealConditions || ''
+                revealConditions: secret.revealConditions || '',
+                injectionPriority: secret.injectionPriority || 'normal'
             });
             addedCount++;
         } catch (err) {

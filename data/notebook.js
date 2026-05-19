@@ -301,7 +301,14 @@ export async function addSecret(chatId, secretData) {
         //   'high'   — always inject when a whoKnows character is present
         //   'normal' — inject only when a whoDoesNotKnow character is ALSO present (active risk)
         //   'low'    — never inject into main prompt; consistency monitor only
-        injectionPriority: secretData.injectionPriority || 'normal'
+        injectionPriority: secretData.injectionPriority || 'normal',
+        // Relevance scoring fields (used by getSelectiveSecretInjection):
+        //   lastInjectionMsgIndex — message counter from chat.length at time of last injection.
+        //   -1 means never injected. Used for cooldown and stale-bonus calculations.
+        lastInjectionMsgIndex: secretData.lastInjectionMsgIndex ?? -1,
+        //   relevanceKeywords — comma-separated keywords auto-extracted from title + evidence +
+        //   revealConditions on creation. Used for keyword matching against recent chat messages.
+        relevanceKeywords: secretData.relevanceKeywords || extractRelevanceKeywords(secretData)
     };
     nb.secrets.push(newSecret);
     await saveNotebook(chatId, nb);
@@ -437,6 +444,47 @@ export function getSecretsUnknownTo(chatId, characterName) {
     const nb = getNotebook(chatId);
     if (!Array.isArray(nb.secrets)) return [];
     return nb.secrets.filter(s => s.whoDoesNotKnow.includes(characterName));
+}
+
+// ── Relevance keyword extraction ───────────────────────────────────────────
+
+const STOP_WORDS = new Set([
+    'the','a','an','is','are','was','were','be','been','being',
+    'have','has','had','do','does','did','will','would','could',
+    'should','may','might','shall','can','need','dare','ought',
+    'used','to','of','in','for','on','with','at','by','from',
+    'as','into','through','during','before','after','above','below',
+    'between','out','off','over','under','again','further','then',
+    'once','here','there','when','where','why','how','all','each',
+    'every','both','few','more','most','other','some','such','no',
+    'nor','not','only','own','same','so','than','too','very',
+    'just','because','but','and','or','if','while','about','up'
+]);
+
+/**
+ * Extract meaningful keywords from a secret's text fields for relevance matching.
+ * @param {object} secretData - Secret data object
+ * @returns {string} Comma-separated list of unique lowercase keywords
+ */
+function extractRelevanceKeywords(secretData) {
+    const words = new Set();
+    const sources = [
+        secretData.title,
+        secretData.evidenceShown,
+        secretData.revealConditions,
+        secretData.secret
+    ];
+    for (const source of sources) {
+        if (!source) continue;
+        // Split on non-alphanumeric (keep apostrophes for possessives)
+        const tokens = source.toLowerCase().split(/[^a-zA-Z0-9']+/).filter(Boolean);
+        for (const token of tokens) {
+            if (token.length < 3) continue;           // Skip very short words
+            if (STOP_WORDS.has(token)) continue;       // Skip common words
+            words.add(token);
+        }
+    }
+    return Array.from(words).join(', ');
 }
 
 // ── Bulk operations ───────────────────────────────────────────────────────

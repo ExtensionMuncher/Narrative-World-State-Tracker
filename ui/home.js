@@ -37,6 +37,19 @@ import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateFor
 import { executeTimeSkip } from '../llm/timeskip.js';
 import { synthesizeCurrentDay } from '../llm/currentDaySynth.js';
 
+// ── Moon phenomenon descriptions (UI-only — NOT injected into prompts) ────
+const MOON_PHENOMENA_DESCRIPTIONS = {
+    '🌕 Super Moon': 'Full moon at closest orbital point — appears larger and brighter than usual',
+    '🌕 Blood Moon': 'Full moon darkened to a deep red by atmospheric scattering during alignment',
+    '🌕 Micro Moon': 'Full moon at farthest orbital point — appears smaller and dimmer than usual',
+    '🌾 Harvest Moon': 'Full moon nearest the autumnal equinox — rises soon after sunset for several consecutive nights',
+    '🏹 Hunter Moon': 'The full moon following the Harvest Moon — historically marked the start of hunting season',
+    '☀️ Solar Eclipse': 'Moon passes directly between Earth and Sun, casting a shadow across the land',
+    '🌑 Lunar Eclipse': 'Earth passes between Sun and Moon, bathing the moon in a deep red shadow',
+    '🌌 Moonbow': 'A nighttime rainbow formed by moonlight refracting through water droplets in the air',
+    '🌙 Lunar Ring': 'A luminous halo of ice crystals refracting moonlight at high altitude'
+};
+
 // ── Build the Home tab HTML ───────────────────────────────────────────────
 
 /**
@@ -662,6 +675,69 @@ function refreshMoonDisplay() {
     }
 
     strip.innerHTML = html;
+
+    // Wire click handlers for moon phenomena tags — shows inline tooltip bubble
+    strip.querySelectorAll('.nwst-phen-tag').forEach(tag => {
+        tag.addEventListener('click', function (e) {
+            e.stopPropagation();
+
+            // Remove any existing tooltip
+            const oldTip = document.querySelector('.nwst-phen-tooltip');
+            if (oldTip) oldTip.remove();
+
+            // If clicking the same tag that already has a tooltip, toggle off
+            if (this.dataset.nwstTooltipOpen === '1') {
+                this.dataset.nwstTooltipOpen = '0';
+                return;
+            }
+
+            const phenText = this.textContent.trim();
+            const desc = MOON_PHENOMENA_DESCRIPTIONS[phenText];
+            if (!desc) return;
+
+            // Create tooltip element
+            const tip = document.createElement('div');
+            tip.className = 'nwst-phen-tooltip';
+            tip.textContent = desc;
+
+            // Position in viewport — fixed positioning, append to body so it floats over everything
+            const rect = this.getBoundingClientRect();
+            let left = rect.left;
+            let top = rect.bottom + 4;
+
+            // Clamp to viewport edges so tooltip isn't cut off
+            const estimatedWidth = 260;
+            const estimatedHeight = 60;
+            if (left + estimatedWidth > window.innerWidth - 8) {
+                left = window.innerWidth - estimatedWidth - 8;
+            }
+            if (top + estimatedHeight > window.innerHeight - 8) {
+                // Show above instead of below
+                top = rect.top - estimatedHeight - 4;
+            }
+            if (left < 8) left = 8;
+            if (top < 8) top = rect.bottom + 4; // fallback if both directions fail
+
+            tip.style.left = left + 'px';
+            tip.style.top = top + 'px';
+
+            document.body.appendChild(tip);
+
+            // Mark this tag as having an open tooltip
+            this.dataset.nwstTooltipOpen = '1';
+
+            // Dismiss on any click outside
+            const dismiss = (dismissEvent) => {
+                if (!tip.contains(dismissEvent.target) && dismissEvent.target !== this) {
+                    tip.remove();
+                    this.dataset.nwstTooltipOpen = '0';
+                    document.removeEventListener('click', dismiss);
+                }
+            };
+            // Delay attaching so the current click doesn't immediately dismiss
+            setTimeout(() => document.addEventListener('click', dismiss), 10);
+        });
+    });
 }
 
 // ── Events digest (read-only summary) ─────────────────────────────────────
@@ -779,7 +855,8 @@ async function approvePendingEvent(pendingId) {
             status: 'pending',
             isNPC: true,
             npcOrigin: 'detected',
-            origin: 'detected'
+            origin: 'detected',
+            scheduledDate: ev.scheduledDate || null
         });
 
         // Remove from pending
@@ -841,7 +918,8 @@ async function approveAllPending() {
                 status: 'pending',
                 isNPC: true,
                 npcOrigin: 'detected',
-                origin: 'detected'
+                origin: 'detected',
+                scheduledDate: ev.scheduledDate || null
             });
             if (!isDetected) currentActive++;
             added++;

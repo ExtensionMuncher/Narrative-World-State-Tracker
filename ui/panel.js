@@ -171,6 +171,9 @@ if (typeof window !== 'undefined') {
  */
 function wirePopoutHandler() {
     $(document).on('click', '.nwst-expand-btn', async function () {
+        // Skip if ST's native editor_maximize handler will handle this button
+        if ($(this).hasClass('editor_maximize')) return;
+
         const targetId = $(this).data('for');
         if (!targetId) return;
 

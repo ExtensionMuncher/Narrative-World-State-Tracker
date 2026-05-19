@@ -21,6 +21,7 @@ import {
     getScanMinimumMessages, setScanMinimumMessages,
     getMaxSnapshotCount, setMaxSnapshotCount,
     getInjectionSettings, setInjectionSetting, getMaxActiveEvents,
+    getSecretBudgetTokens, setSecretBudgetTokens,
     getPlannerPrompt, setPlannerPrompt, resetPlannerPrompt, getDefaultPlannerPrompt,
     exportGlobalSettings, importGlobalSettings,
     exportChatData, importChatData,
@@ -412,6 +413,17 @@ export function buildSettingsTab() {
                             </select>
                         </div>
                     </div>
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Secret budget tokens</div>
+                            <div class="nwst-setting-sub">Max tokens of secret text to inject per message. Higher = more secrets in context. Lower = tighter focus on the most relevant few.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                            <input type="range" id="nwst-setting-secretBudget" min="100" max="2000" step="100" value="600" style="width:100px">
+                            <span id="nwst-setting-secretBudget-value" style="font-size:12px;min-width:40px;text-align:center">600</span>
+                            <span style="font-size:12px;color:#666">tokens</span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -471,6 +483,40 @@ export function buildSettingsTab() {
                     <button class="menu_button nwst-btn" id="nwst-setting-importAll">Import all</button>
                     <button class="menu_button nwst-btn" id="nwst-setting-exportAll">Export all</button>
                     <button class="menu_button nwst-btn" id="nwst-setting-clearAll" style="font-size:11px;padding:3px 9px">Clear all</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Debug accordion -->
+        <div class="nwst-accordion">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-debug">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Debug</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-debug">
+                <div class="nwst-setting-sub" style="margin-bottom:8px">Manual trigger buttons for testing LLM functions. These run immediately and may use API credits.</div>
+                <div class="nwst-btn-row" style="margin-top:4px">
+                    <button class="menu_button nwst-btn" id="nwst-debug-scan-secrets">🔍 Scan for secrets</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-scan-communities">👥 Scan for communities</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-scan-worldstate">🌍 Scan world state</button>
+                </div>
+                <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
+                    <div class="nwst-setting-label" style="margin-bottom:4px">Adjust Secret Priority</div>
+                    <div class="nwst-setting-sub" style="margin-bottom:8px">Bulk-override the injection priority of ALL existing secrets. Useful for testing the priority system — resets all secrets to a single level.</div>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <select id="nwst-debug-priority-target" style="width:auto;font-size:11px;padding:3px 6px;flex:1">
+                            <option value="high">⬆ High — always inject</option>
+                            <option value="normal">◈ Normal — inject when at risk</option>
+                            <option value="low">⬇ Low — monitor only</option>
+                        </select>
+                        <button class="menu_button nwst-btn" id="nwst-debug-apply-priority" style="flex-shrink:0">Apply to all</button>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+                        <span style="font-size:11px;color:var(--SmartThemeBodyColor,#ddd);flex:1">Or let the AI evaluate narrative context and assign priorities automatically:</span>
+                        <button class="menu_button nwst-btn" id="nwst-debug-auto-priority" style="flex-shrink:0">🤖 AI Auto-Adjust</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -758,6 +804,15 @@ function populateSettingsUI() {
     setCheckbox('nwst-setting-injectEvents', inj.injectEvents);
     setCheckbox('nwst-setting-injectWorldConditions', inj.injectWorldConditions);
 
+    // Secret budget tokens
+    const budgetSlider = document.getElementById('nwst-setting-secretBudget');
+    const budgetVal = document.getElementById('nwst-setting-secretBudget-value');
+    if (budgetSlider) {
+        const val = getSecretBudgetTokens();
+        budgetSlider.value = val;
+        if (budgetVal) budgetVal.textContent = val;
+    }
+
     // Injection placement
     const placementSelect = document.getElementById('nwst-setting-placement');
     if (placementSelect) {
@@ -947,6 +1002,16 @@ function wireSettingsEvents() {
     wireInput('nwst-setting-maxActiveEvents', (val) => setInjectionSetting('maxActiveEvents', Math.max(4, parseInt(val) || 12)));
     wireCheckbox('nwst-setting-injectEvents', (checked) => setInjectionSetting('injectEvents', checked));
     wireCheckbox('nwst-setting-injectWorldConditions', (checked) => setInjectionSetting('injectWorldConditions', checked));
+
+    // ── Secret budget tokens ─────────────────────────────────────
+    const budgetSlider = document.getElementById('nwst-setting-secretBudget');
+    const budgetVal = document.getElementById('nwst-setting-secretBudget-value');
+    if (budgetSlider && budgetVal) {
+        budgetSlider.addEventListener('input', () => {
+            budgetVal.textContent = budgetSlider.value;
+            setSecretBudgetTokens(parseInt(budgetSlider.value) || 600);
+        });
+    }
 
     // ── Injection placement ──────────────────────────────────────
     wireSelect('nwst-setting-placement', (val) => {
@@ -1233,10 +1298,281 @@ function wireSettingsEvents() {
             populateSettingsUI();
         });
     }
+
+    // ── Debug buttons ─────────────────────────────────────────────────────
+
+    const debugScanSecrets = document.getElementById('nwst-debug-scan-secrets');
+    if (debugScanSecrets) {
+        debugScanSecrets.addEventListener('click', async () => {
+            debugScanSecrets.textContent = '⏳ Scanning...';
+            debugScanSecrets.disabled = true;
+            try {
+                const { scanForSecrets } = await import('../llm/secretScan.js');
+                const chatId = getChatId();
+                const count = await scanForSecrets(chatId);
+                nwstToast(`Secrets scan complete — ${count} new secret(s) found.`, 'success');
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
+            } catch (err) {
+                nwstToast(`Secrets scan failed: ${err.message}`, 'error');
+            } finally {
+                debugScanSecrets.textContent = '🔍 Scan for secrets';
+                debugScanSecrets.disabled = false;
+            }
+        });
+    }
+
+    const debugScanCommunities = document.getElementById('nwst-debug-scan-communities');
+    if (debugScanCommunities) {
+        debugScanCommunities.addEventListener('click', async () => {
+            debugScanCommunities.textContent = '⏳ Scanning...';
+            debugScanCommunities.disabled = true;
+            try {
+                const { synthesizeCommunities } = await import('../llm/scanner.js');
+                const chatId = getChatId();
+                const ctx = SillyTavern.getContext();
+                const messages = (ctx.chat || []).filter(m => !(m.is_system && m.extra?.hidden) && m.extra?.display !== 'none');
+                await synthesizeCommunities(chatId, messages);
+                nwstToast('Community scan complete.', 'success');
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('world');
+            } catch (err) {
+                nwstToast(`Community scan failed: ${err.message}`, 'error');
+            } finally {
+                debugScanCommunities.textContent = '👥 Scan for communities';
+                debugScanCommunities.disabled = false;
+            }
+        });
+    }
+
+    const debugScanWorldState = document.getElementById('nwst-debug-scan-worldstate');
+    if (debugScanWorldState) {
+        debugScanWorldState.addEventListener('click', async () => {
+            debugScanWorldState.textContent = '⏳ Scanning...';
+            debugScanWorldState.disabled = true;
+            try {
+                const { runScan } = await import('../llm/scanner.js');
+                await runScan();
+                nwstToast('World state scan complete.', 'success');
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'world', 'notebook');
+            } catch (err) {
+                nwstToast(`World state scan failed: ${err.message}`, 'error');
+            } finally {
+                debugScanWorldState.textContent = '🌍 Scan world state';
+                debugScanWorldState.disabled = false;
+            }
+        });
+    }
+
+    // ── Debug: Adjust Secret Priority ──────────────────────────────
+    const debugApplyPriority = document.getElementById('nwst-debug-apply-priority');
+    if (debugApplyPriority) {
+        debugApplyPriority.addEventListener('click', async () => {
+            const targetSelect = document.getElementById('nwst-debug-priority-target');
+            if (!targetSelect) return;
+            const priority = targetSelect.value;
+            const label = targetSelect.options[targetSelect.selectedIndex]?.text || priority;
+
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+            const confirm = await callGenericPopup(
+                `Set ALL secrets to <b>${label}</b>?<br><br><span style="font-size:11px;color:#999">This will override the injection priority of every secret in the current chat. This cannot be undone manually — you would need to reselect each secret's priority individually.</span>`,
+                POPUP_TYPE.CONFIRM,
+                '',
+                { okButton: 'Apply', cancelButton: 'Cancel' }
+            );
+            if (!confirm) return;
+
+            const chatId = getChatId();
+            const { getAllSecrets, updateSecret } = await import('../data/notebook.js');
+            const allSecrets = getAllSecrets(chatId);
+            if (!allSecrets || allSecrets.length === 0) {
+                nwstToast('No secrets found to update.', 'warning');
+                return;
+            }
+
+            let count = 0;
+            for (const secret of allSecrets) {
+                await updateSecret(chatId, secret.id, { injectionPriority: priority });
+                count++;
+            }
+
+            nwstToast(`Updated ${count} secret(s) to ${label}.`, 'success');
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
+        });
+    }
+
+    // ── Debug: AI Auto-Adjust Secret Priority ───────────────────────
+    const debugAutoPriority = document.getElementById('nwst-debug-auto-priority');
+    if (debugAutoPriority) {
+        debugAutoPriority.addEventListener('click', async () => {
+            const chatId = getChatId();
+            if (!chatId) {
+                nwstToast('No active chat.', 'warning');
+                return;
+            }
+
+            // Dynamic imports
+            const { getAllSecrets, updateSecret } = await import('../data/notebook.js');
+            const { resolveProfile, generateWithProfile } = await import('../llm/connections.js');
+            const secrets = getAllSecrets(chatId);
+            if (!secrets || secrets.length === 0) {
+                nwstToast('No secrets found to evaluate.', 'warning');
+                return;
+            }
+
+            // Resolve the Planning LLM profile
+            const profile = resolveProfile('planningLLM');
+            if (!profile) {
+                nwstToast(
+                    'Cannot auto-adjust priorities: No Planning LLM profile configured. ' +
+                    'Set one in Settings → Connection Profiles.',
+                    'warning'
+                );
+                return;
+            }
+
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+            const confirm = await callGenericPopup(
+                `Use the AI to evaluate <b>${secrets.length}</b> secret(s) and reassign their injection priorities?` +
+                `<br><br>` +
+                `<span style="font-size:11px;color:#999">The Planning LLM will analyze each secret's title, description, whoKnows/whoDoesNotKnow lists,` +
+                ` and current priority, then assign <b>high</b> (always inject), <b>normal</b> (inject when at risk), or <b>low</b> (monitor only) based on` +
+                ` narrative urgency and context. This will use API credits.</span>`,
+                POPUP_TYPE.CONFIRM,
+                '',
+                { okButton: 'Run Auto-Adjust', cancelButton: 'Cancel' }
+            );
+            if (!confirm) return;
+
+            nwstToast(`Evaluating ${secrets.length} secret(s) with Planning LLM...`, 'info');
+
+            // Build the priority system guide
+            const priorityGuide = [
+                'INJECTION PRIORITY SYSTEM:',
+                '  high   — Always inject the secret into the prompt whenever a whoKnows character is present.',
+                '           Use for critical, time-sensitive secrets with major consequences if revealed.',
+                '  normal — Inject only when a whoDoesNotKnow character is ALSO present (active risk).',
+                '           Use for standard secrets that are relevant but not immediately critical.',
+                '  low    — Never inject into the main prompt; consistency monitor only.',
+                '           Use for minor, background, or resolved secrets that don\'t need active tracking.'
+            ].join('\n');
+
+            // Format each secret for the prompt
+            const secretList = secrets.map((s, i) => {
+                const fields = [
+                    `[${i + 1}] ID: ${s.id}`,
+                    `    Title: ${s.title || '(untitled)'}`,
+                    `    Type: ${s.type || 'unknown'}`,
+                    `    Description: ${(s.secret || '').substring(0, 300)}`,
+                    `    whoKnows: ${(s.whoKnows || []).join(', ') || '(none)'}`,
+                    `    whoDoesNotKnow: ${(s.whoDoesNotKnow || []).join(', ') || '(none)'}`,
+                    `    Current Priority: ${s.injectionPriority || 'normal'}`
+                ];
+                return fields.join('\n');
+            }).join('\n\n');
+
+            const systemMessage = {
+                role: 'system',
+                content: `You are a narrative analysis assistant for an RPG world state tracker. Your task is to evaluate secrets and assign appropriate injection priorities based on narrative urgency and dramatic potential.
+
+${priorityGuide}
+
+Respond with ONLY a valid JSON object in the following format, no other text:
+{
+  "secrets": [
+    {
+      "id": "secret-id-here",
+      "injectionPriority": "high|normal|low",
+      "reasoning": "Brief explanation for this assignment"
+    }
+  ]
+}
+
+Analyze each secret carefully. Consider:
+- Is the secret time-sensitive or about to be revealed? → high
+- Does the secret have active tension (characters who know vs. characters who don't)? → normal
+- Is the secret resolved, background, or no longer relevant to current events? → low
+- WhoKnows and WhoDoesNotKnow lists — secrets with both present are actively relevant`
+            };
+
+            const userMessage = {
+                role: 'user',
+                content: `Evaluate the following ${secrets.length} secret(s) and assign appropriate injection priorities:\n\n${secretList}`
+            };
+
+            try {
+                const response = await generateWithProfile(profile, [systemMessage, userMessage], { maxTokens: 4096 });
+                if (!response) {
+                    nwstToast('AI Auto-Adjust failed — LLM returned empty response.', 'error');
+                    return;
+                }
+
+                // Parse JSON from response
+                let parsed;
+                try {
+                    // Try direct parse first
+                    parsed = JSON.parse(response);
+                } catch {
+                    // Fall back: extract JSON block from markdown
+                    const jsonMatch = response.match(/\{[\s\S]*\}/);
+                    if (jsonMatch) {
+                        try {
+                            parsed = JSON.parse(jsonMatch[0]);
+                        } catch {
+                            nwstToast('AI Auto-Adjust failed — could not parse LLM response as JSON.', 'error');
+                            console.error('[NWST AutoPriority] Failed to parse:', response);
+                            return;
+                        }
+                    } else {
+                        nwstToast('AI Auto-Adjust failed — could not parse LLM response as JSON.', 'error');
+                        console.error('[NWST AutoPriority] No JSON found in:', response);
+                        return;
+                    }
+                }
+
+                if (!parsed?.secrets || !Array.isArray(parsed.secrets)) {
+                    nwstToast('AI Auto-Adjust failed — response missing "secrets" array.', 'error');
+                    console.error('[NWST AutoPriority] Unexpected structure:', parsed);
+                    return;
+                }
+
+                // Apply the updates
+                let updated = 0;
+                let skipped = 0;
+                for (const entry of parsed.secrets) {
+                    if (!entry.id || !entry.injectionPriority) {
+                        skipped++;
+                        continue;
+                    }
+                    const valid = ['high', 'normal', 'low'];
+                    if (!valid.includes(entry.injectionPriority)) {
+                        skipped++;
+                        continue;
+                    }
+                    const secret = secrets.find(s => s.id === entry.id);
+                    if (!secret) {
+                        skipped++;
+                        continue;
+                    }
+                    // Only update if the priority actually changed
+                    if (secret.injectionPriority === entry.injectionPriority) {
+                        skipped++;
+                        continue;
+                    }
+                    await updateSecret(chatId, entry.id, { injectionPriority: entry.injectionPriority });
+                    updated++;
+                }
+
+                nwstToast(`AI Auto-Adjust complete: ${updated} updated, ${skipped} skipped.`, updated > 0 ? 'success' : 'info');
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
+            } catch (err) {
+                console.error('[NWST AutoPriority] Error during auto-adjust:', err);
+                nwstToast('AI Auto-Adjust failed with an unexpected error. Check console.', 'error');
+            }
+        });
+    }
+
 }
 
 // ── Helper: Show/hide the depth row based on placement selection ──────────
-
 function toggleDepthRow(placement) {
     const depthRow = document.getElementById('nwst-depth-row');
     if (depthRow) {

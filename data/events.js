@@ -15,7 +15,8 @@
 //   isNPC: boolean,
 //   npcOrigin: "detected" | "generated" | null,  // null when isNPC is false
 //   origin: "detected" | "generated",              // applies to all events
-//   timestamp: number
+//   timestamp: number,                             // auto-set on creation
+//   scheduledDate: string | null                   // free-form narrative time, e.g. "Day 3", "March 15"
 // }
 // =============================================================================
 
@@ -89,7 +90,8 @@ export async function addEvent(chatId, eventData) {
         isNPC: eventData.isNPC || false,
         npcOrigin: eventData.isNPC ? (eventData.npcOrigin || 'detected') : null,
         origin: eventData.origin || 'detected',
-        timestamp: eventData.timestamp || Date.now()
+        timestamp: eventData.timestamp || Date.now(),
+        scheduledDate: eventData.scheduledDate || null
     };
     events.push(newEvent);
     await saveAllEvents(chatId, events);

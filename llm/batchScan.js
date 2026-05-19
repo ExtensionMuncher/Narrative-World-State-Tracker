@@ -19,7 +19,7 @@ import { generateWithProfile } from './connections.js';
 //   7. Runs once — non-compounding
 // =============================================================================
 
-import { getChatId, nwstToast } from '../index.js';
+import { getChatId, nwstToast } from '../utils.js';;
 import { chatHasData } from '../data/storage.js';
 import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig } from '../data/worldState.js';
 import { getAllEvents } from '../data/events.js';
@@ -135,13 +135,21 @@ DO NOT include:
 The Current Day fields (season, weatherToday, flora, fauna, spiritualClimate) describe ambient world conditions only — what the world looks like, smells like, feels like at this moment.
 
 === WORLD CONDITIONS — CHARACTER PROHIBITION ===
-Same rule applies. World conditions describe the macro state of the world — the political atmosphere, the social climate, the spiritual texture. They do NOT describe what specific named characters are doing or have done. Write conditions as atmospheric narratives an observer would perceive, not as summaries of character actions.
+World conditions describe macro-level states — the political atmosphere, social climate, spiritual texture. Characters and factions MAY be named when they define the condition (e.g. 'the syndicate's surveillance network'). What should NOT appear is specific character actions or personal states that belong in the chat log. Write as a perceptive observer describing forces at work, not events that occurred.
 
 === COMMUNITY SUMMARIES — ANALYTICAL DEPTH ===
 Community summaries are not plot recaps. They are analytical portraits of social groupings — the power dynamics, unspoken tensions, what characters are maneuvering around, what is really happening beneath the surface. Write them with insight and specificity. Reference specific moments that reveal something meaningful. Avoid generic observations.
 
 === EVENTS — FORWARD FACING ONLY ===
-Events describe what is COMING, not what has already happened. Past events belong in the notebook (established facts, planted details). If something already occurred, do not put it in the events array.`;
+Events describe what is COMING, not what has already happened. Past events belong in the notebook (established facts, planted details). If something already occurred, do not put it in the events array.
+
+=== EVENT SCHEDULED DATES ===
+Use the dayCount you compute below as a temporal reference. An event happening "tomorrow" would be scheduledDate "Day N+1" (relative to dayCount), "next week" = "Day N+7", etc. Calendar dates like "3/15" also accepted.
+
+CRITICAL RULES:
+- Events where timing IS clear (festival in 3 days, delivery due tomorrow, named date from chat) MUST include scheduledDate.
+- Events with vague/uncertain timing MUST omit scheduledDate — not every event needs a pinned date.
+- scheduledDate appears in the event header in the UI for immediate temporal context.`;
 
 // ── Execute Batch Scan ────────────────────────────────────────────────────
 
@@ -399,6 +407,7 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example (environmental): "The river's rise threatens low-lying farmlands as spring melt accelerates"\n`;
     prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
     prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 2 WORLD events per tier, max 3 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
+    prompt += `  scheduledDate — Use the dayCount above as reference. Events with clear timing (festival in 3 days, delivery tomorrow, named date) MUST include scheduledDate. Events with vague timing OMIT it.\n\n`;
     prompt += `  CRITICAL — PROPORTION: Quality over quantity. 1 strong world event beats 3 thin ones.\n\n`;
     prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
     prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;
@@ -408,18 +417,22 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `  - A secret must have clear narrative support in the messages — do not invent unrelated secrets.\n`;
     prompt += `  - When a secret involves the {{user}} character (the PC), use type "user_pc" — NOT "character".\n`;
     prompt += `  - Quality over quantity — 2-5 well-developed secrets are better than 10 shallow ones.\n`;
-    prompt += `  - If no secrets are present, return an empty array [].\n\n`;
+    prompt += `  - If no secrets are present, return an empty array [].\n`;
+    prompt += `  - Set injectionPriority based on narrative urgency:\n`;
+    prompt += `    "high" — secrets whose revelation would cause immediate, major consequences (active ticking bomb, imminent betrayal)\n`;
+    prompt += `    "normal" — standard secrets with clear dramatic potential (default)\n`;
+    prompt += `    "low" — minor secrets, background details, or secrets with low immediate impact\n\n`;
 
     prompt += `Use this EXACT JSON structure:\n\n`;
     prompt += `{
   "currentDay": {
     "dateDisplay": "MUST start with day-of-week followed by ', Month Date, Year'. No pipe characters. Modern: 'Monday, April 15th, 2024'. Historical: 'Kin'yōbi, Chrysanthemum Month · Sixth Day of the Waxing Moon'.",
     "dateSub": "Era context only — e.g. 'Reiwa 6', 'Heian Era · 1125 CE', '21st Century'. Leave empty if no applicable era.",
-    "season": "Current season — evocative, sensory, grounded in the setting. NO character names.",
-    "weatherToday": "Today's weather as a physical experience. NO character names.",
-    "flora": "What is growing or changing in the natural world. NO character names.",
-    "fauna": "Animal activity and presence. NO character names.",
-    "spiritualClimate": "Metaphysical atmosphere if applicable. NO character names. Omit if no spiritual elements.",
+    "season": "Current season — evocative, sensory, grounded in the setting. Faction names fine if relevant; individual character actions should not appear.",
+    "weatherToday": "Today's weather as a physical experience. Faction names fine if relevant; individual character actions should not appear.",
+    "flora": "What is growing or changing in the natural world. Faction names fine if relevant; individual character actions should not appear.",
+    "fauna": "Animal activity and presence. Faction names fine if relevant; individual character actions should not appear.",
+    "spiritualClimate": "Metaphysical atmosphere if applicable. Faction names fine if relevant; individual character actions should not appear. Omit if no spiritual elements.",
     "dayCount": "DAYS SINCE STORY START (integer). CRITICAL: If a concrete date is present (e.g. 'April 15th, 2024'), compute the day-of-year. Example: April 15 in a leap year = Jan(31) + Feb(29) + Mar(31) + Apr(15) = day 106. If no date exists, estimate from story progression or default to 1."
   },
   "events": [
@@ -427,14 +440,15 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
       "title": "Forward-facing event title — what is COMING, not what happened",
       "description": "What is expected or planned. Future-facing only.",
       "tier": "immediate|week|month|undetermined",
-      "isNPC": false
+      "isNPC": false,
+      "scheduledDate": "REQUIRED when timing is clear — reference the dayCount above. Format: relative 'Day N+1' (story days) or absolute 'Month/Date' (calendar). OMIT for vague/uncertain timing — not all events need a pinned date."
     }
   ],
   "conditions": {
-    "political": "Atmospheric narrative of the political climate. NO character names or specific character actions. Describe the macro mood, tensions, movements.",
-    "social": "Atmospheric narrative of the social climate. NO character names. Describe dynamics, hierarchies, undercurrents.",
-    "spiritual": "Metaphysical texture. NO character names. Describe what the spiritually aware would perceive, not who perceives it.",
-    "environmental": "Physical world state — landscape, season, climate conditions. NO character names."
+    "political": "Atmospheric narrative of the political climate. Characters and factions may be named when they shape the condition. Describe macro mood, tensions, movements — not specific character actions or personal states.",
+    "social": "Atmospheric narrative of the social climate. Characters may be named when relevant. Describe dynamics, hierarchies, undercurrents — not what specific characters did or felt.",
+    "spiritual": "Metaphysical texture and atmosphere. Describe what the spiritually sensitive would perceive. Characters may be named if their presence defines the spiritual climate.",
+    "environmental": "Physical world state — landscape, season, climate conditions. Focus on the world itself rather than character actions within it."
   },
   "notebook": {
     "core": {
@@ -460,14 +474,15 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
       "whoDoesNotKnow": ["Character name who does NOT know this secret"],
       "evidenceShown": "What evidence has been shown in the chat so far (if any)",
       "pressureRisk": "What pressure or risk would be created if this secret were revealed",
-      "revealConditions": "Under what circumstances this secret might be revealed"
+      "revealConditions": "Under what circumstances this secret might be revealed",
+      "injectionPriority": "high|normal|low"
     }
   ],
   "communities": [
     {
-      "name": "Community or faction name",
+      "name": "Community or faction name — CRITICAL: Check the existing communities list above. If this community already exists under a different name, MERGE into the existing entry instead. Do NOT create duplicates.",
       "members": "Comma-separated character names",
-      "summary": "Analytical portrait of power dynamics and unspoken tensions — not a plot recap"
+      "summary": "Analytical portrait of power dynamics and unspoken tensions — not a plot recap. Use bullet points (•) for observations, each a specific concrete observation. Do not pad — output only as many bullets as the community genuinely warrants. An optional 1-2 sentence overview paragraph may precede the bullets."
     }
   ]
 }
@@ -518,7 +533,8 @@ async function applyBatchResults(chatId, result) {
                     whoDoesNotKnow: Array.isArray(secret.whoDoesNotKnow) ? secret.whoDoesNotKnow : [],
                     evidenceShown: secret.evidenceShown || '',
                     pressureRisk: secret.pressureRisk || '',
-                    revealConditions: secret.revealConditions || ''
+                    revealConditions: secret.revealConditions || '',
+                    injectionPriority: secret.injectionPriority || 'normal'
                 });
                 addedCount++;
             } catch (err) {

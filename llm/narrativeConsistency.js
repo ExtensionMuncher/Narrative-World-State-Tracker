@@ -25,10 +25,10 @@
 //    - Does NOT intervene in the story — only flags
 // =============================================================================
 
-import { getChatId, nwstToast } from '../index.js';
+import { getChatId, nwstToast } from '../utils.js';;
 import { getNotebook, getAllSecrets, addMysteryBullet, getMysteryField } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
-import { isEnabled, isPaused } from '../settings.js';
+import { isEnabled, isPaused, getSecretBudgetTokens } from '../settings.js';
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -81,6 +81,113 @@ If no violations:
  * @param {string} chatId
  * @returns {string} Injection text for active secrets, or empty string
  */
+/**
+ * Score a secret for relevance in the current scene context.
+ * All criteria are pure JS — no LLM calls.
+ *
+ * @param {object} secret - Secret object
+ * @param {string[]} sceneCharacters - Character names in current scene
+ * @param {string[]} recentMessageTexts - Raw text of recent messages
+ * @param {number} currentMsgIndex - Current message index (chat.length)
+ * @returns {number} Relevance score (0 = skip; higher = more relevant)
+ */
+function scoreSecretRelevance(secret, sceneCharacters, recentMessageTexts, currentMsgIndex) {
+    const SCORE = {
+        BASELINE_PRESENCE:        1,
+        ACTIVE_RISK:              3,
+        KEYWORD_MATCH:            4,
+        REVEAL_CONDITIONS_ACTIVE: 2,
+        COOLDOWN_PENALTY:        -5,
+        STALE_BONUS:              2,
+    };
+
+    const priority = secret.injectionPriority || 'normal';
+
+    // Low priority: never inject
+    if (priority === 'low') return 0;
+
+    // Must have at least one whoKnows character present (baseline)
+    if (!secret.whoKnows || secret.whoKnows.length === 0) return 0;
+    const knowsPresent = secret.whoKnows.some(name =>
+        sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
+    );
+    if (!knowsPresent) return 0;
+
+    let score = SCORE.BASELINE_PRESENCE;
+
+    // High priority: boost baseline so it usually wins over normal
+    if (priority === 'high') {
+        score += 2;
+    }
+
+    // Active risk: whoDoesNotKnow character is ALSO present
+    if (secret.whoDoesNotKnow && secret.whoDoesNotKnow.length > 0) {
+        const unknowingPresent = secret.whoDoesNotKnow.some(name =>
+            sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
+        );
+        if (unknowingPresent) {
+            score += SCORE.ACTIVE_RISK;
+        }
+    }
+
+    // Reveal conditions populated — secret is designed to be actionable
+    if (secret.revealConditions && secret.revealConditions.trim().length > 0) {
+        score += SCORE.REVEAL_CONDITIONS_ACTIVE;
+    }
+
+    // Keyword matching against recent messages
+    if (secret.relevanceKeywords && recentMessageTexts.length > 0) {
+        const keywords = secret.relevanceKeywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+        if (keywords.length > 0) {
+            const combinedText = recentMessageTexts.join(' ').toLowerCase();
+            let matchCount = 0;
+            for (const keyword of keywords) {
+                if (combinedText.includes(keyword)) {
+                    matchCount++;
+                }
+            }
+            // Cap keyword bonus to prevent runaway scoring from common words
+            score += Math.min(matchCount, 3) * SCORE.KEYWORD_MATCH;
+        }
+    }
+
+    // Cooldown: penalize if injected recently
+    if (secret.lastInjectionMsgIndex >= 0) {
+        const messagesSinceLastInjection = currentMsgIndex - secret.lastInjectionMsgIndex;
+        if (messagesSinceLastInjection <= 5) {
+            score += SCORE.COOLDOWN_PENALTY;
+        } else if (messagesSinceLastInjection >= 20) {
+            // Stale bonus: hasn't been injected in a while
+            score += SCORE.STALE_BONUS;
+        }
+    } else {
+        // Never injected before — stale bonus applies
+        score += SCORE.STALE_BONUS;
+    }
+
+    return Math.max(0, score);
+}
+
+/**
+ * Estimate the token count of a formatted secret block.
+ * Rough approximation: ~0.25 tokens per character for English text.
+ * @param {object} secret
+ * @returns {number} Estimated token count
+ */
+function estimateSecretTokens(secret) {
+    let text = `📜 "${secret.title || ''}" (${secret.type || ''})\n`;
+    text += `   Known by: ${(secret.whoKnows || []).join(', ')}\n`;
+    text += `   NOT known by: ${(secret.whoDoesNotKnow || []).join(', ')}\n`;
+    if (secret.secret) {
+        text += `   Details: ${secret.secret}\n`;
+    }
+    if (secret.revealConditions) {
+        text += `   Reveal conditions: ${secret.revealConditions}\n`;
+    }
+    // Rough token estimate: ~4 chars per token for English
+    return Math.ceil(text.length / 4);
+}
+
 export function getSelectiveSecretInjection(chatId) {
     // Respect pause/disable state — secrets are sensitive info
     if (!isEnabled()) return '';
@@ -95,45 +202,57 @@ export function getSelectiveSecretInjection(chatId) {
     // Detect characters in the current scene from recent message metadata
     const sceneCharacters = detectSceneCharacters();
 
-    // Filter secrets by presence + priority:
-    //   high   — inject if any whoKnows character is present
-    //   normal — inject only if a whoDoesNotKnow character is ALSO present (active risk)
-    //   low    — never inject (consistency monitor only)
-    const activeSecrets = secrets.filter(secret => {
-        const priority = secret.injectionPriority || 'normal';
+    // Get current message index for cooldown/stale tracking
+    let currentMsgIndex = 0;
+    try {
+        const ctx = SillyTavern.getContext();
+        currentMsgIndex = (ctx.chat || []).length;
+    } catch (e) {
+        // Fallback: just use 0 if context unavailable
+    }
 
-        // Low priority: never inject
-        if (priority === 'low') return false;
+    // Get recent message texts for keyword matching
+    const recentMessageTexts = getRecentMessageTexts();
 
-        // Must have at least one whoKnows character present
-        if (!secret.whoKnows || secret.whoKnows.length === 0) return false;
-        const knowsCharacterPresent = secret.whoKnows.some(name =>
-            sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
-        );
-        if (!knowsCharacterPresent) return false;
-
-        // High priority: inject whenever a whoKnows character is present
-        if (priority === 'high') return true;
-
-        // Normal priority: only inject when a whoDoesNotKnow character is ALSO present
-        // This means the secret is at active risk of leaking in this scene
-        if (!secret.whoDoesNotKnow || secret.whoDoesNotKnow.length === 0) {
-            // No one who doesn't know — still inject so the LLM has context
-            return true;
+    // ── Score all non-low secrets ──────────────────────────────────────
+    const scored = [];
+    for (const secret of secrets) {
+        const score = scoreSecretRelevance(secret, sceneCharacters, recentMessageTexts, currentMsgIndex);
+        if (score > 0) {
+            scored.push({ secret, score });
         }
-        return secret.whoDoesNotKnow.some(name =>
-            sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
-        );
-    });
+    }
 
-    if (activeSecrets.length === 0) return '';
+    if (scored.length === 0) return '';
 
-    // Build constrained secret blocks — one per active secret
+    // Sort by score descending (highest relevance first)
+    scored.sort((a, b) => b.score - a.score);
+
+    // ── Budget cap ────────────────────────────────────────────────────
+    // Use the setting's token budget. Default 600.
+    const budgetTokens = getSecretBudgetTokens();
+
+    const injectedSecrets = [];
+    let usedTokens = 0;
+    const OVERHEAD_TOKENS = 30; // Account for wrapper text: [ACTIVE SECRETS...] + [/ACTIVE SECRETS]
+
+    for (const { secret } of scored) {
+        const secretTokens = estimateSecretTokens(secret);
+        if (usedTokens + secretTokens + OVERHEAD_TOKENS > budgetTokens) {
+            continue; // Skip — would exceed budget
+        }
+        injectedSecrets.push(secret);
+        usedTokens += secretTokens;
+    }
+
+    if (injectedSecrets.length === 0) return '';
+
+    // ── Build formatted block ─────────────────────────────────────────
     let block = '\n[ACTIVE SECRETS — FOR INTERNAL USE ONLY]\n';
     block += 'The following secrets are known by characters present in the current scene. ';
     block += 'Characters who do NOT know these secrets must not act on this information:\n';
 
-    for (const secret of activeSecrets) {
+    for (const secret of injectedSecrets) {
         block += `\n📜 "${secret.title}" (${secret.type})\n`;
         block += `   Known by: ${secret.whoKnows.join(', ')}\n`;
         block += `   NOT known by: ${secret.whoDoesNotKnow.join(', ')}\n`;
@@ -147,7 +266,50 @@ export function getSelectiveSecretInjection(chatId) {
 
     block += '\n[/ACTIVE SECRETS]\n';
 
+    // ── Update lastInjectionMsgIndex (fire-and-forget) ────────────────
+    // Save the message index so next invocation can apply cooldown/stale bonuses.
+    // Fire-and-forget to avoid blocking prompt injection.
+    if (currentMsgIndex > 0) {
+        setTimeout(async () => {
+            try {
+                const { updateSecret } = await import('../data/notebook.js');
+                for (const secret of injectedSecrets) {
+                    if (secret.lastInjectionMsgIndex !== currentMsgIndex) {
+                        await updateSecret(chatId, secret.id, { lastInjectionMsgIndex: currentMsgIndex });
+                        secret.lastInjectionMsgIndex = currentMsgIndex; // Update in-memory copy
+                    }
+                }
+            } catch (e) {
+                // Silently fail — injection already happened
+            }
+        }, 0);
+    }
+
     return block;
+}
+
+/**
+ * Get raw text from recent messages for keyword matching.
+ * @returns {string[]} Array of message text strings (last 10 non-system messages)
+ */
+function getRecentMessageTexts() {
+    try {
+        const ctx = SillyTavern.getContext();
+        const chat = ctx.chat || [];
+        // Look at last 10 messages (skip system/hidden)
+        const texts = [];
+        for (let i = chat.length - 1; i >= 0 && texts.length < 10; i--) {
+            const msg = chat[i];
+            if (msg.is_system && msg.extra?.hidden) continue;
+            if (msg.extra?.display === 'none') continue;
+            if (msg.mes) {
+                texts.push(msg.mes);
+            }
+        }
+        return texts;
+    } catch (e) {
+        return [];
+    }
 }
 
 /**

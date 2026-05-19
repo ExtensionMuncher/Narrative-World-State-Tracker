@@ -9,7 +9,7 @@
 // This transforms raw date/weather data into an atmospheric, narrative block.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../index.js';
+import { getChatId, nwstToast } from '../utils.js';;
 import {
     getCurrentDay, updateCurrentDay, getForecast, getMoonPhases,
     getEnabledConditions, getSettingContext, getCalendarConfig
@@ -193,7 +193,7 @@ function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents
         prompt += `NOTE: Spiritual/Supernatural condition is DISABLED. Do NOT include a "Spiritual Climate" section.\n\n`;
     }
 
-    prompt += `Write the Current Day block now. Remember: describe the world, not the characters. No named characters. No story events. No plot recaps.`;
+    prompt += `Write the Current Day block now. Describe the world's ambient texture — season, weather, environment, metaphysical climate. Faction names are fine when they define world texture. Individual character actions and personal states should not appear. No story event recaps.`;
 
     return prompt;
 }

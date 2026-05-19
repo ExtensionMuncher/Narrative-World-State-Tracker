@@ -13,7 +13,8 @@
 // Previous Day: NO API calls — restores saved snapshot exactly.
 // =============================================================================
 
-import { getChatId, nwstToast, getSetting } from '../index.js';
+import { getChatId, nwstToast } from '../utils.js';
+import { getSetting } from '../index.js';;
 import { getSettingContext, getCurrentDay, replaceCurrentDay, updateCurrentDay,
          getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
          saveSnapshot, getLatestSnapshot, getWorldState,

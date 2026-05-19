@@ -90,8 +90,9 @@ function getChatId() {
     }
 }
 
-// Export for use by other NWST modules
-export { MODULE_NAME, nwstToast, getChatId };
+// Re-export utils for modules that import from index.js directly
+export { nwstToast, getChatId } from './utils.js';
+export { MODULE_NAME };
 
 // ── Default settings (global, NOT per-chat) ────────────────────────────────
 
@@ -137,6 +138,7 @@ const defaultSettings = {
         placement: 'before_main',   // 'before_main' | 'after_main' | 'top_an' | 'bottom_an' | 'at_depth'
         depth: 2,
         depthRole: 'system',        // 'system' | 'user' | 'assistant'
+        secretBudgetTokens: 600,    // Max tokens of secret text to inject per generation (relevance budget)
     },
 
     // The ONLY user-editable LLM prompt in the extension

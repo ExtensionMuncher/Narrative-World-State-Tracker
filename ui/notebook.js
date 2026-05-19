@@ -59,7 +59,7 @@ export function buildNotebookTab() {
         </div>
 
         <!-- Core section -->
-        <div class="nwst-nb-section nwst-open" id="nwst-nb-core">
+        <div class="nwst-nb-section" id="nwst-nb-core">
             <div class="nwst-nb-section-hdr nwst-nb-toggle" data-section="core">
                 <span class="nwst-nb-section-title">Core</span>
                 <span style="font-size:11px;color:#999">▾</span>
@@ -68,7 +68,7 @@ export function buildNotebookTab() {
         </div>
 
         <!-- Mystery & Continuity section -->
-        <div class="nwst-nb-section nwst-open" id="nwst-nb-mystery">
+        <div class="nwst-nb-section" id="nwst-nb-mystery">
             <div class="nwst-nb-section-hdr nwst-nb-toggle" data-section="mystery">
                 <span class="nwst-nb-section-title">Mystery & Continuity</span>
                 <span style="font-size:11px;color:#999">▾</span>
@@ -77,7 +77,7 @@ export function buildNotebookTab() {
         </div>
 
         <!-- Secrets & Hidden Knowledge section -->
-        <div class="nwst-nb-section nwst-open" id="nwst-nb-secrets">
+        <div class="nwst-nb-section" id="nwst-nb-secrets">
             <div class="nwst-nb-section-hdr nwst-nb-toggle" data-section="secrets">
                 <span class="nwst-nb-section-title">Secrets & Hidden Knowledge</span>
                 <span style="font-size:11px;color:#999">▾</span>
@@ -89,8 +89,7 @@ export function buildNotebookTab() {
                     <strong style="color:#333">Who knows / who does not know</strong> is the most critical field.
                 </div>
                 <div id="nwst-nb-secrets-container"></div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-                    <button class="menu_button nwst-btn" id="nwst-nb-scan-secrets">🔍 Scan for secrets</button>
+                <div class="nwst-btn-row" style="margin-top:4px">
                     <button class="menu_button nwst-btn nwst-nb-add-secret">+ Add secret</button>
                 </div>
             </div>
@@ -394,7 +393,7 @@ function refreshSecretsSection() {
                     <select class="nwst-secret-type-select" style="width:auto;font-size:11px;padding:3px 6px">
                         ${SECRET_TYPES.map(t => `<option value="${t.value}"${secret.type === t.value ? ' selected' : ''}>${t.label}</option>`).join('')}
                     </select>
-                    <select class="nwst-secret-priority-select" title="Injection priority — controls when this secret is injected into the main prompt" style="width:auto;font-size:11px;padding:3px 6px;border-color:${secret.injectionPriority === 'high' ? '#1D9E75' : secret.injectionPriority === 'low' ? '#999' : '#AFA9EC'};color:${secret.injectionPriority === 'high' ? '#0F6E56' : secret.injectionPriority === 'low' ? '#999' : '#3C3489'}">
+                    <select class="nwst-secret-priority-select" title="Injection priority — controls when this secret is injected into the main prompt" style="width:auto;font-size:11px;padding:3px 6px">
                         <option value="high"${(secret.injectionPriority || 'normal') === 'high' ? ' selected' : ''}>⬆ High — always inject</option>
                         <option value="normal"${(secret.injectionPriority || 'normal') === 'normal' ? ' selected' : ''}>◈ Normal — inject when at risk</option>
                         <option value="low"${(secret.injectionPriority || 'normal') === 'low' ? ' selected' : ''}>⬇ Low — monitor only, never inject</option>
@@ -443,7 +442,8 @@ function wireNotebookEvents() {
                 type: 'character',
                 secret: '',
                 whoKnows: [],
-                whoDoesNotKnow: []
+                whoDoesNotKnow: [],
+                injectionPriority: 'normal'
             });
             refreshSecretsSection();
             nwstToast('Secret added.', 'info');

@@ -130,6 +130,12 @@ export function getInjectionDepthRole() { return getSetting('injection').depthRo
 /** Get maximum active events pool size. @returns {number} */
 export function getMaxActiveEvents() { return getSetting('injection').maxActiveEvents ?? 12; }
 
+/** Get the secret injection token budget cap. @returns {number} */
+export function getSecretBudgetTokens() { return getSetting('injection').secretBudgetTokens ?? 600; }
+
+/** Set the secret injection token budget cap. @param {number} value */
+export function setSecretBudgetTokens(value) { setInjectionSetting('secretBudgetTokens', Math.max(100, parseInt(value) || 600)); }
+
 /**
  * Set a single injection setting.
  * @param {string} key - The injection sub-key

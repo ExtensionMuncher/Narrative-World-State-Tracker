@@ -55,6 +55,112 @@ function generateCommunityId() {
     return `com_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
+// ── Duplicate detection helpers ──────────────────────────────────────────
+
+/**
+ * Normalize a string for fuzzy comparison — lowercase, trim, collapse whitespace.
+ * @param {string} str
+ * @returns {string}
+ */
+function normalize(str) {
+    return String(str).toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * Parse a comma-separated members string into a normalized set.
+ * @param {string} membersStr
+ * @returns {Set<string>}
+ */
+function parseMembers(membersStr) {
+    if (!membersStr || typeof membersStr !== 'string') return new Set();
+    return new Set(
+        membersStr.split(',')
+            .map(m => normalize(m))
+            .filter(m => m.length > 0)
+    );
+}
+
+/**
+ * Compute Jaccard similarity between two sets.
+ * @param {Set} a
+ * @param {Set} b
+ * @returns {number} 0-1
+ */
+function jaccardSimilarity(a, b) {
+    if (a.size === 0 && b.size === 0) return 0;
+    const intersection = new Set([...a].filter(x => b.has(x)));
+    const union = new Set([...a, ...b]);
+    return intersection.size / union.size;
+}
+
+/**
+ * Find existing communities that are similar to a proposed new community,
+ * to prevent duplicate/similar entries. Checks multiple signals:
+ *
+ * 1. Exact/case-insensitive name match → instant match (return immediately)
+ * 2. Substring name containment → score 0.75
+ * 3. Significant word overlap in name (Jaccard >0.3) → score 0.6-0.8
+ * 4. Significant member overlap (Jaccard >=0.4) → score 0.5-0.8
+ *
+ * Returns the best match if total similarity score >= 0.5, otherwise null.
+ *
+ * @param {object[]} existingCommunities - Array of community objects from getAllCommunities()
+ * @param {string} name - Proposed community name
+ * @param {string} [members] - Proposed comma-separated member list
+ * @returns {object|null} The most similar existing community, or null
+ */
+export function findSimilarCommunity(existingCommunities, name, members) {
+    if (!Array.isArray(existingCommunities) || existingCommunities.length === 0) return null;
+    if (!name && !members) return null;
+
+    const proposedName = normalize(name || '');
+    const proposedMembers = parseMembers(members);
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const com of existingCommunities) {
+        let score = 0;
+        const existingName = normalize(com.name);
+
+        // 1. Exact case-insensitive name match → instant return
+        if (proposedName && existingName === proposedName) {
+            return com;
+        }
+
+        // 2. Substring containment — one name is contained within the other
+        if (proposedName && existingName) {
+            if (existingName.includes(proposedName) || proposedName.includes(existingName)) {
+                score = Math.max(score, 0.75);
+            }
+
+            // 3. Significant word overlap (e.g., "Kurosaki Family" ↔ "Kurosaki Household")
+            const proposedWords = new Set(proposedName.split(/\s+/));
+            const existingWords = new Set(existingName.split(/\s+/));
+            const wordOverlap = jaccardSimilarity(proposedWords, existingWords);
+            if (wordOverlap > 0.3) {
+                score = Math.max(score, 0.6 + wordOverlap * 0.2);
+            }
+        }
+
+        // 4. Member overlap check
+        const existingMembers = parseMembers(com.members);
+        if (proposedMembers.size > 0 && existingMembers.size > 0) {
+            const overlap = jaccardSimilarity(proposedMembers, existingMembers);
+            if (overlap >= 0.4) {
+                score = Math.max(score, 0.5 + overlap * 0.3);
+            }
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestMatch = com;
+        }
+    }
+
+    return bestScore >= 0.5 ? bestMatch : null;
+}
+
 // ── CRUD ──────────────────────────────────────────────────────────────────
 
 /**
@@ -87,7 +193,10 @@ export function getCommunityById(chatId, communityId) {
 }
 
 /**
- * Add a new community.
+ * Add a new community. Guards against duplicates by checking findSimilarCommunity().
+ * If a similar community already exists, the new data is MERGED into the existing
+ * community (updating summary, members, etc.) instead of creating a duplicate entry.
+ *
  * Auto-generates avatar initials from the name and assigns a color from the palette.
  *
  * @param {string} chatId
@@ -97,12 +206,37 @@ export function getCommunityById(chatId, communityId) {
  * @param {string} [communityData.summary] - Community summary text
  * @param {string} [communityData.avatarInitials] - Override auto-generated initials
  * @param {object} [communityData.avatarColors] - Override auto-assigned colors
- * @returns {object} The newly created community
+ * @returns {object} The newly created (or merged) community
  */
 export async function addCommunity(chatId, communityData) {
     const communities = getAllCommunities(chatId);
 
-    // Auto-generate avatar initials from the community name (first letter of first two words)
+    // ── Duplicate guard ───────────────────────────────────────────────────
+    const similar = findSimilarCommunity(communities, communityData.name, communityData.members);
+    if (similar) {
+        // Merge new data into the existing community instead of creating a duplicate
+        const updates = {};
+        if (communityData.summary && communityData.summary.trim()) {
+            updates.summary = communityData.summary.trim();
+        }
+        if (communityData.members && communityData.members.trim()) {
+            // Merge member lists — combine existing + new, deduplicate
+            const existingMembers = new Set(
+                (similar.members || '').split(',').map(m => normalize(m)).filter(m => m)
+            );
+            const newMembers = communityData.members.split(',').map(m => normalize(m)).filter(m => m);
+            for (const m of newMembers) {
+                existingMembers.add(m);
+            }
+            updates.members = [...existingMembers].join(', ');
+        }
+        if (Object.keys(updates).length > 0) {
+            await updateCommunity(chatId, similar.id, updates);
+        }
+        return getCommunityById(chatId, similar.id);
+    }
+
+    // ── Normal creation path ──────────────────────────────────────────────
     let autoInitials = '??';
     if (communityData.name) {
         const words = communityData.name.trim().split(/\s+/);

@@ -18,8 +18,8 @@
 // world conditions, and active events before being proposed.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../index.js';
-import { getCurrentDay, getEnabledConditions, getSettingContext, getMoonPhases, getForecast } from '../data/worldState.js';
+import { getChatId, nwstToast } from '../utils.js';;
+import { getCurrentDay, getEnabledConditions, getSettingContext, getMoonPhases, getForecast, getCalendarConfig } from '../data/worldState.js';
 import { getAllEvents, addEvent, getActiveEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { getAllCommunities } from '../data/communities.js';
@@ -102,7 +102,8 @@ Respond with a JSON array:
     "description": "Atmospheric, forward-facing description of what is coming",
     "tier": "immediate" | "week" | "month",
     "isNPC": true | false,
-    "npcOrigin": "generated"
+    "npcOrigin": "generated",
+    "scheduledDate": "REQUIRED when timing is clear — reference the story day above. Format: \"Day #\" (relative story days, e.g. \"Day 4\") or \"Month/Date\" (absolute calendar, e.g. \"3/15\"). OMIT for vague/uncertain timing — not all events need a pinned date."
   }
 ]
 
@@ -128,7 +129,8 @@ Respond with a JSON array:
     "tier": "immediate" | "week" | "month" | "undetermined",
     "isNPC": true,
     "npcOrigin": "detected",
-    "detectedFrom": "brief quote or reference from the chat that confirms this"
+    "detectedFrom": "brief quote or reference from the chat that confirms this",
+    "scheduledDate": "OPTIONAL — only when a SPECIFIC date was mentioned. Format as stated by the character (e.g. 'Day 3', 'the 15th'). Omit if no date was given — uncertainty is fine."
   }
 ]
 
@@ -228,7 +230,8 @@ export async function regenerateTierEvents(tier) {
                 status: 'pending',
                 isNPC: event.isNPC || false,
                 npcOrigin: event.isNPC ? (event.npcOrigin || 'generated') : null,
-                origin: event.npcOrigin === 'detected' ? 'detected' : 'generated'
+                origin: event.npcOrigin === 'detected' ? 'detected' : 'generated',
+                scheduledDate: event.scheduledDate || null
             });
             added++;
         }
@@ -358,6 +361,7 @@ function buildEventGenPrompt(context, tier) {
     prompt += `=== CURRENT DATE & CONDITIONS ===\n`;
     prompt += `Date: ${context.currentDay.dateDisplay || '(not set)'}\n`;
     if (context.currentDay.dateSub) prompt += `Sub-date: ${context.currentDay.dateSub}\n`;
+    prompt += `Story day: ${typeof context.currentDay.dayCount === 'number' ? `Day ${context.currentDay.dayCount}` : '(not set)'}\n`;
     prompt += `Season: ${context.currentDay.season || '(not set)'}\n`;
     prompt += `Weather: ${context.currentDay.weatherToday || '(not set)'}\n`;
     if (context.currentDay.flora) prompt += `Flora: ${context.currentDay.flora}\n`;
@@ -386,6 +390,20 @@ function buildEventGenPrompt(context, tier) {
             prompt += `  ${fc.label}: ${fc.weather || '(not set)'}\n`;
         }
         prompt += '\n';
+    }
+
+    // ── CALENDAR SYSTEM (date format reference) ─────────────────
+    const chatIdForCal = getChatId();
+    const calConfig = getCalendarConfig(chatIdForCal);
+    if (calConfig.enabled) {
+        const monthList = calConfig.monthNames.map((name, i) =>
+            `${name} (${calConfig.monthDays[i]} days)`
+        ).join(', ');
+        const dayList = calConfig.weekDays.join(', ');
+        prompt += `=== CALENDAR SYSTEM ===\n`;
+        prompt += `  Months (${calConfig.months} total): ${monthList}\n`;
+        prompt += `  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n`;
+        prompt += `  Use these month and day names when generating scheduledDate values.\n\n`;
     }
 
     // ── WORLD CONDITIONS ─────────────────────────────────────────
@@ -427,11 +445,12 @@ function buildEventGenPrompt(context, tier) {
         prompt += '\n';
     }
 
-    // ── ACTIVE EVENTS (anti-duplication) ───────────────────────
+    // ── ACTIVE EVENTS (anti-duplication + temporal reference) ──
     if (context.activeEvents.length > 0) {
         prompt += `=== EXISTING ACTIVE EVENTS (DO NOT DUPLICATE) ===\n`;
         for (const event of context.activeEvents) {
-            prompt += `  - [${event.tier}] ${event.title}\n`;
+            const dateStr = event.scheduledDate ? ` [${event.scheduledDate}]` : '';
+            prompt += `  - [${event.tier}]${dateStr} ${event.title}\n`;
         }
         prompt += '\n';
     }
@@ -453,8 +472,9 @@ function buildEventGenPrompt(context, tier) {
     prompt += `  2. At minimum 1 WORLD EVENT and 1 NPC EVENT (where plausible)\n`;
     prompt += `  3. World events should feel like organic world rhythms, not extractions from chat text\n`;
     prompt += `  4. Consider: seasonal festivals, cultural practices, environmental shifts, political rhythms\n`;
-    prompt += `  5. Forward-facing only. Respond with valid JSON array only.\n`;
-    prompt += `  5. CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the USER CHARACTER's personal or mundane actions (getting coffee, leaving their desk, daily routines, etc.) unless the story narrative explicitly establishes them as plot-relevant. Events must describe what the WORLD and NPCs are doing, what natural/societal forces are unfolding, and what plot hooks exist — NOT what the user character will do.\n`;
+    prompt += `  5. scheduledDate — Use the story day shown above as reference. Events with clear timing MUST include it (e.g. "Day 4" for tomorrow, "Day 7" for next week). Omit for vague/uncertain timing.\n`;
+    prompt += `  6. Forward-facing only. Respond with valid JSON array only.\n`;
+    prompt += `  7. CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the USER CHARACTER's personal or mundane actions (getting coffee, leaving their desk, daily routines, etc.) unless the story narrative explicitly establishes them as plot-relevant. Events must describe what the WORLD and NPCs are doing, what natural/societal forces are unfolding, and what plot hooks exist — NOT what the user character will do.\n`;
 
     return prompt;
 }

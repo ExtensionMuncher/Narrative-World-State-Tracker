@@ -14,10 +14,10 @@
 // =============================================================================
 
 import { generateWithProfile } from './connections.js';
-import { getChatId, nwstToast } from '../index.js';
+import { getChatId, nwstToast } from '../utils.js';;
 import { getScanFrequency, getScanMinimumMessages, isPaused, isEnabled } from '../settings.js';
 import { chatHasData } from '../data/storage.js';
-import { getWorldState, getEnabledConditions, getSettingContext, updateConditionContent } from '../data/worldState.js';
+import { getWorldState, getEnabledConditions, getSettingContext, updateConditionContent, getCalendarConfig } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
 import { getNotebook, addCoreBullet, addMysteryBullet, addSecret, getAllSecrets } from '../data/notebook.js';
 import { getAllCommunities, updateCommunitySummary, addCommunity } from '../data/communities.js';
@@ -77,7 +77,7 @@ WHAT YOU DO:
    - Read the space between what is stated and what is left unsaid
    - Convey tension, movement, or stasis with specificity and texture
    - Sound like a thoughtful narrator interpreting the world, not a journalist listing events
-   - NEVER mention specific named characters. World conditions describe the macro state of the world, not what individuals are doing. Character actions belong in the notebook, not world conditions.
+   - Characters and factions MAY be named when their presence shapes the world condition — use names when it adds clarity and grounding. What must NOT appear is: specific character actions that belong in the chat log, personal emotional states, or story events framed as current facts. Describe what the world looks like as a result of forces at work, not what a specific character did or feels right now.
 
    Example of BAD world condition (factual summary):
    "Sukuna has left for a nearby village. The harem concubines are watching Sachiko."
@@ -94,6 +94,11 @@ WHAT YOU DO:
    - Note specific details that carry weight (a particular choice, a significant omission, a gesture)
    - Describe the internal tensions and pressures within the group, not just the surface events
    - Be dense with insight, not long with description
+   - Use bullet points (•) for observations, each a specific concrete observation. Do not pad — output only as many bullets as the community genuinely warrants. An optional 1-2 sentence overview paragraph may precede the bullets.
+
+   CRITICAL — AVOID DUPLICATE COMMUNITIES: Before suggesting a NEW community in communityUpdates, check every existing community name. If an existing community covers the same social group under a different name (e.g., "The Servants" vs "Household Staff"), UPDATE ITS SUMMARY instead of creating a duplicate. Pay attention to member overlap and thematic similarity. Duplicate communities fragment the analysis and must be prevented.
+
+   CRITICAL — AVOID DUPLICATE COMMUNITIES: Before suggesting a NEW community in communityUpdates, check every existing community name. If an existing community covers the same social group under a different name (e.g., "The Servants" vs "Household Staff"), UPDATE ITS SUMMARY instead of creating a duplicate. Pay attention to member overlap and thematic similarity. Duplicate communities fragment the analysis and must be prevented.
 
 4. NPC EVENT DETECTION — identify any EXPLICIT future plans made by characters:
    Only flag events where a character explicitly states or clearly implies something will happen.
@@ -109,7 +114,11 @@ WHAT YOU DO:
       - Identify when a character is actively concealing something, makes a hidden agreement, or when information is deliberately withheld
       - Detect secrets that form organically from the narrative (hidden past, concealed plan, forbidden relationship)
       - Check the existing secrets list to avoid duplicates — do NOT recreate secrets that already exist
-      - A new secret should include: title, type, core content, who knows it, and who does NOT know it
+      - A new secret should include: title, type, core content, who knows it, who does NOT know it
+      - Set injectionPriority based on narrative urgency:
+        "high" — secrets whose revelation would cause immediate, major consequences (active ticking bomb, imminent betrayal)
+        "normal" — standard secrets with clear dramatic potential (default)
+        "low" — minor secrets, background details, or secrets with low immediate impact
 
       TYPE GUIDE:
       "npc": A secret kept by an NPC (default)
@@ -145,7 +154,7 @@ RESPONSE FORMAT — respond with a JSON object:
     {
       "name": "Community name (must match existing name exactly, or new name if new community)",
       "members": "member list if changed",
-      "summary": "Updated analytical summary"
+      "summary": "Updated analytical summary using bullet points (•) for observations. Do not pad — only as many bullets as the community warrants. An optional 1-2 sentence overview paragraph may precede the bullets."
     }
   ],
   "detectedNPCEvents": [
@@ -165,7 +174,8 @@ RESPONSE FORMAT — respond with a JSON object:
       "whoDoesNotKnow": ["Character B"],
       "evidenceShown": "optional evidence visible in chat",
       "pressureRisk": "optional risk level",
-      "revealConditions": "optional conditions for reveal"
+      "revealConditions": "optional conditions for reveal",
+      "injectionPriority": "high" | "normal" | "low"
     }
   ],
   "noChanges": false
@@ -178,38 +188,49 @@ For newSecrets: only include secrets that are genuinely new. Do not recreate sec
 
 // ── Community synthesis prompt (dedicated, richer pass) ───────────────────
 
-const COMMUNITY_SYNTHESIS_PROMPT = `You are a community analyst for a narrative roleplay. You read character interactions and write rich, insightful summaries of social groups — their internal dynamics, power structures, unspoken tensions, and the forces shaping them.
+const COMMUNITY_SYNTHESIS_PROMPT = `You are a community analyst for an ongoing narrative roleplay. Your job is to write community summaries that combine atmospheric narrative voice with sharp, specific analytical observations — the way a perceptive human observer would describe a social dynamic they have been watching closely.
 
-Your summaries are not plot recaps. They are analytical portraits of a group — what the characters are maneuvering around, what they want and can't say, how they relate to each other beneath the surface.
+CRITICAL — AVOID DUPLICATE COMMUNITIES: You will receive a list of EXISTING COMMUNITIES above. Before creating a NEW community in your output, carefully check every existing community name. If an existing community covers the same social group under a different name (e.g., "The Servants" vs "Household Staff"), UPDATE ITS SUMMARY instead of creating a duplicate. Pay attention to member overlap and thematic similarity. Duplicate communities fragment the analysis and must be prevented. When in doubt, merge into the existing entry rather than creating a new one.
 
-Guidelines:
-- Surface the SUBTEXT, not just the events. What is really happening beneath the stated interactions?
-- Identify POWER DYNAMICS — who holds leverage, who is vulnerable, who is performing, who is genuine
-- Note SPECIFIC DETAILS that carry symbolic or narrative weight — a particular choice, an omission, a gesture that reveals something
-- Describe INTERNAL TENSIONS within the group — competing interests, unstated conflicts, fragile alliances
-- Keep summaries DENSE WITH INSIGHT rather than long with description. Quality over quantity.
-- Use precise, evocative language. Write like a perceptive human observer, not a summarizing AI.
+Your summaries have two parts. Both must always be present.
 
-DO NOT write:
-- Generic plot summaries ("Character A did X, then Character B said Y")
-- Factual inventories of events
-- Vague observations ("The group is tense")
+PART 1 — OVERVIEW PARAGRAPH (2-4 sentences):
+Write with narrative voice and atmosphere. Capture the emotional texture, underlying pressure, and defining dynamic of this group. Name the key players and their roles. Be specific about what makes this group distinctive — not just that tension exists, but what KIND of tension, what SHAPE the dynamic takes, what is at stake. This should read like a perceptive narrator sizing up a room, not a journalist listing facts.
 
-DO write:
-- Interpretive analysis of what the interactions reveal
-- Specific observations tied to specific moments ("Uraume's offer of unspecified future assistance is carefully phrased — vague enough to avoid obligation, but recorded as a promise that could bear weight in Sukuna's absence")
-- The emotional and political subtext beneath the surface
+GOOD overview: "A family where the cracks are widening. Yuzu is too observant for her age and suspects Ichigo is hiding serious injuries. Isshin, the boisterous father, has become eerily quiet — he knows more than he lets on. The household is a pressure cooker of unspoken worry, and the lies Ichigo tells will soon break against the walls of a family that loves him."
 
-Respond with a JSON array of community summaries:
+BAD overview: "The Kurosaki family consists of Ichigo, his sisters, and their father. There is tension because Ichigo is keeping secrets." (roster and vague summary — not analysis)
+
+PART 2 — ANALYTICAL OBSERVATIONS (variable count — determined by the community):
+Each bullet must be a specific, concrete observation tied to an actual moment, detail, pattern, or choice from the chat. These are interpretations — what does a specific thing REVEAL about the dynamic? What is being avoided, performed, or withheld? What does a small choice signal about a larger truth?
+
+BULLET COUNT IS A TEST OF ANALYTICAL RIGOR. Do not aim for any specific number. Let the community dictate the count. A simple, peripheral community might warrant only 1-2 bullets. A deeply entangled community might warrant more. Padding by aiming for a specific number is a failure — each bullet must earn its place.
+
+Self-critique (perform silently before finalizing): read each bullet — is it revealing something non-obvious? Is it tied to a specific detail rather than generic? If any bullet fails, delete it. If pruning leaves 1-2 bullets, that is correct. Do not add filler to reach a count.
+
+GOOD bullet (2 sentences max): "Rukia's shift from cold tactical assessment to visible concern — bringing food, giving space instead of orders — marks a structural change in how she processes Sachiko's role in the network. The operational detachment she uses as a shield is failing against something she cannot categorize as a variable."
+BAD bullet (too long): same content sprawling across 4 sentences with explanation appended
+BAD bullet (summary): "Rukia brought food to Sachiko" — states what happened, not what it reveals
+BAD bullet (generic): "There is tension between characters" — reveals nothing
+
+BULLET LENGTH LIMIT — STRICTLY ENFORCED:
+Each bullet must be a MAXIMUM of 2 sentences. First sentence: the observation. Second sentence (optional): what it reveals. Cut everything else. If you cannot fit the insight in 2 sentences, you have not distilled it yet.
+
+CRITICAL RULES:
+- Characters CAN and SHOULD be named in both the paragraph and bullets — specificity is what separates analysis from vague writing
+- No plot recaps — interpret what happened, do not summarize it
+- No generic observations — every bullet must surface something not obvious from the surface
+- MAXIMUM 2 sentences per bullet — hard limit, no exceptions
+- Quality over quantity — fewer tight bullets beat padded ones. Cut anything that does not earn its length.
+
+OUTPUT FORMAT — respond with a JSON array only, no markdown fences, no explanation:
 [
   {
     "name": "Community name",
-    "members": "character list",
-    "summary": "Rich analytical summary following the guidelines above"
+    "members": "comma-separated character names",
+    "summary": "Overview paragraph here\n\n• Observation tied to a specific moment or pattern\n• Observation tied to a specific moment or pattern\n• Observation tied to a specific moment or pattern"
   }
 ]`;
-
-// ── Start / Stop Scanner ──────────────────────────────────────────────────
 
 export function startScanner() {
     if (scanTimer) return;
@@ -317,7 +338,7 @@ async function checkAndScan() {
     }
 }
 
-async function runScan() {
+export async function runScan() {
     isScanning = true;
     console.log('[NWST Scanner] Running scan...');
 
@@ -397,6 +418,7 @@ function getRecentMessages(count) {
     } catch (e) { return []; }
 }
 
+
 function buildScannerPrompt(recentMessages, worldState, notebook, communities, activeEvents, settingContext) {
     let prompt = '';
 
@@ -412,7 +434,21 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
     prompt += `=== CURRENT WORLD STATE ===\n`;
     prompt += `Date: ${worldState.currentDay?.dateDisplay || '(not set)'}\n`;
     prompt += `Season: ${worldState.currentDay?.season || '(not set)'}\n`;
-    prompt += `Weather: ${worldState.currentDay?.weatherToday || '(not set)'}\n\n`;
+    prompt += `Weather: ${worldState.currentDay?.weatherToday || '(not set)'}\n`;
+    prompt += `Story day: ${typeof worldState.currentDay?.dayCount === 'number' ? `Day ${worldState.currentDay.dayCount}` : '(not set)'}\n\n`;
+
+    // ── CALENDAR SYSTEM (date format reference) ─────────────────
+    const calConfig = getCalendarConfig(getChatId());
+    if (calConfig.enabled) {
+        const monthList = calConfig.monthNames.map((name, i) =>
+            `${name} (${calConfig.monthDays[i]} days)`
+        ).join(', ');
+        const dayList = calConfig.weekDays.join(', ');
+        prompt += `=== CALENDAR SYSTEM ===\n`;
+        prompt += `  Months (${calConfig.months} total): ${monthList}\n`;
+        prompt += `  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n`;
+        prompt += `  Use these month and day names when generating scheduledDate values.\n\n`;
+    }
 
     // Existing world conditions (so the LLM knows what's already there)
     const conditions = worldState.conditions || {};
@@ -459,7 +495,8 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
     if (activeEvents.length > 0) {
         prompt += `=== ACTIVE EVENTS ===\n`;
         for (const ev of activeEvents) {
-            prompt += `- [${ev.tier}] ${ev.title}\n`;
+            const dateStr = ev.scheduledDate ? ` [${ev.scheduledDate}]` : '';
+            prompt += `- [${ev.tier}]${dateStr} ${ev.title}\n`;
         }
         prompt += '\n';
     }
@@ -472,7 +509,6 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
 
     return prompt;
 }
-
 function formatNotebookForPrompt(notebook) {
     let text = '';
     const core = notebook?.core || {};
@@ -653,7 +689,8 @@ async function applyScanResults(chatId, response, recentMessages) {
                 pressureRisk: secretData.pressureRisk || '',
                 revealConditions: secretData.revealConditions || '',
                 whoKnows: Array.isArray(secretData.whoKnows) ? secretData.whoKnows : [],
-                whoDoesNotKnow: Array.isArray(secretData.whoDoesNotKnow) ? secretData.whoDoesNotKnow : []
+                whoDoesNotKnow: Array.isArray(secretData.whoDoesNotKnow) ? secretData.whoDoesNotKnow : [],
+                injectionPriority: secretData.injectionPriority || 'normal'
             });
 
             existingTitles.add(titleLower);
@@ -713,7 +750,7 @@ export async function synthesizeCommunities(chatId, messages) {
             userPrompt += `=== ESTABLISHED FACTS ===\n${facts.map(f => `  - ${f}`).join('\n')}\n\n`;
         }
 
-        userPrompt += `Analyze the character interactions and produce rich, analytical community summaries. Identify social groupings, power dynamics, unspoken tensions, and what is really happening beneath the surface.`;
+        userPrompt += `Analyze the character interactions and produce rich, analytical community summaries. Identify social groupings, power dynamics, unspoken tensions, and what is really happening beneath the surface. Use bullet points (•) for observations, with each bullet being a specific, concrete observation. Do not pad — output only as many bullets as each community genuinely warrants. An optional 1-2 sentence overview paragraph may precede the bullets.`;
 
         const llmMessages = [
             { role: 'system', content: COMMUNITY_SYNTHESIS_PROMPT },

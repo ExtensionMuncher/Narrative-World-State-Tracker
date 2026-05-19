@@ -15,12 +15,13 @@
 // The user should be able to retry the skip cleanly from a known good state.
 // =============================================================================
 
-import { getChatId, nwstToast, getSetting } from '../index.js';
+import { getChatId, nwstToast } from '../utils.js';
+import { getSetting } from '../index.js';;
 import {
     getWorldState, saveWorldState, getCurrentDay, replaceCurrentDay,
     getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
     getConditions, updateConditionContent, getSettingContext,
-    saveSnapshot, getSeasonConfig
+    saveSnapshot, getSeasonConfig, getCalendarConfig
 } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, addEvent } from '../data/events.js';
 import { getNotebook, saveNotebook } from '../data/notebook.js';
@@ -76,7 +77,8 @@ Respond with a JSON object:
         "description": "...",
         "tier": "immediate"|"week"|"month"|"undetermined",
         "isNPC": true|false,
-        "origin": "generated"
+        "origin": "generated",
+        "scheduledDate": "REQUIRED when timing is clear — after a timeskip, events happening on the new date or near future MUST include a scheduledDate. Format: \"Day #\" or \"Month/Date\". OMIT for vague/uncertain timing."
       }
     ]
   },
@@ -374,6 +376,19 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     }
     prompt += `Moon Phase: ${moonPhaseName} (${moonPhaseAngle.toFixed(1)}°, approximately Day ${moonDay} of the lunar cycle)\n\n`;
 
+    // ── CALENDAR SYSTEM (date format reference) ─────────────────
+    const calConfig = getCalendarConfig(chatId);
+    if (calConfig.enabled) {
+        const monthList = calConfig.monthNames.map((name, i) =>
+            `${name} (${calConfig.monthDays[i]} days)`
+        ).join(', ');
+        const dayList = calConfig.weekDays.join(', ');
+        prompt += `=== CALENDAR SYSTEM ===\n`;
+        prompt += `  Months (${calConfig.months} total): ${monthList}\n`;
+        prompt += `  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n`;
+        prompt += `  Use these month and day names when generating scheduledDate values.\n\n`;
+    }
+
     // Conditions
     prompt += `=== WORLD CONDITIONS ===\n`;
     for (const [key, cond] of Object.entries(conditions)) {
@@ -384,7 +399,8 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     // Events
     prompt += `=== ALL EVENTS (${events.length}) ===\n`;
     for (const event of events) {
-        prompt += `[${event.id}] [${event.tier}] [${event.status}] ${event.title}: ${event.description}\n`;
+        const dateStr = event.scheduledDate ? ` [scheduled: ${event.scheduledDate}]` : '';
+        prompt += `[${event.id}] [${event.tier}] [${event.status}]${dateStr} ${event.title}: ${event.description}\n`;
     }
     prompt += '\n';
 
