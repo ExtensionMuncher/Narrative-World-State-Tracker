@@ -312,16 +312,31 @@
 }
 
 .nwst-date-main {
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 16px;
+    font-weight: 600;
     color: var(--SmartThemeBodyColor, #111);
 }
 
 .nwst-date-sub {
-    font-size: 11px;
+    font-size: 13px;
     color: var(--SmartThemeBodyColor, #111);
-    margin-top: 1px;
-    opacity: 0.65;
+    margin-top: 2px;
+    opacity: 0.7;
+}
+
+/* Inline input shown when clicking the date to edit it — inherits parent
+   font styling so it blends in seamlessly. */
+.nwst-date-inline-input {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #ccc);
+    outline: none;
+    font: inherit;
+    color: inherit;
+    text-align: center;
+    padding: 0;
+    margin: 0;
+    min-width: 50px;
 }
 
 /* ── Time Skip / Jump ────────────────────────────────────────────────────── */

@@ -70,10 +70,10 @@ export function buildHomeTab() {
         <div class="nwst-day-nav">
             <button class="nwst-day-nav-btn" id="nwst-prev-day-btn" title="Previous day">‹</button>
             <div class="nwst-day-label">
-                <div class="nwst-date-main" id="nwst-date-display" contenteditable="true" title="Click to edit"
-                    style="cursor:text;border-radius:4px;padding:1px 4px;outline:none;">—</div>
-                <div class="nwst-date-sub" id="nwst-date-sub" contenteditable="true" title="Click to edit"
-                    style="cursor:text;border-radius:4px;padding:1px 4px;outline:none;">—</div>
+                <div class="nwst-date-main" id="nwst-date-display" title="Click to edit"
+                    style="cursor:pointer;border-radius:4px;padding:1px 4px;">—</div>
+                <div class="nwst-date-sub" id="nwst-date-sub" title="Click to edit"
+                    style="cursor:pointer;border-radius:4px;padding:1px 4px;">—</div>
             </div>
             <button class="nwst-day-nav-btn" id="nwst-next-day-btn" title="Next day">›</button>
         </div>
@@ -270,22 +270,44 @@ function wireHomeEvents() {
         });
     }
 
-    // ── Date display edits (inline contenteditable) ────────────
-    // Manual edits to date fields do NOT trigger any API call — they just update the stored data
-    const dateDisplay = document.getElementById('nwst-date-display');
-    if (dateDisplay) {
-        dateDisplay.addEventListener('blur', async () => {
-            const chatId = getChatId();
-            await updateCurrentDay(chatId, { dateDisplay: dateDisplay.textContent.trim() });
+    // ── Date display edits (click-to-edit with inline input) ──
+    // Date fields show as plain text. Clicking them reveals an inline
+    // input; blurring saves and reverts to text display.
+    function wireClickToEdit(fieldId, updateFn) {
+        const el = document.getElementById(fieldId);
+        if (!el) return;
+        el.addEventListener('click', function onClick() {
+            const currentText = el.textContent.trim();
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = currentText === '—' ? '' : currentText;
+            input.className = 'nwst-date-inline-input';
+            input.style.width = Math.max(currentText.length * 8, 60) + 'px';
+            el.textContent = '';
+            el.appendChild(input);
+            input.focus();
+            input.select();
+            input.addEventListener('blur', async function onBlur() {
+                const newText = input.value.trim();
+                await updateFn(newText || '—');
+                el.textContent = newText || '—';
+            });
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    input.blur();
+                }
+            });
         });
     }
-    const dateSub = document.getElementById('nwst-date-sub');
-    if (dateSub) {
-        dateSub.addEventListener('blur', async () => {
-            const chatId = getChatId();
-            await updateCurrentDay(chatId, { dateSub: dateSub.textContent.trim() });
-        });
-    }
+    wireClickToEdit('nwst-date-display', async (text) => {
+        const chatId = getChatId();
+        await updateCurrentDay(chatId, { dateDisplay: text });
+    });
+    wireClickToEdit('nwst-date-sub', async (text) => {
+        const chatId = getChatId();
+        await updateCurrentDay(chatId, { dateSub: text });
+    });
 
     // ── Time skip Jump button ──────────────────────────────────
     const jumpBtn = document.getElementById('nwst-timeskip-jump');
@@ -302,7 +324,7 @@ function wireHomeEvents() {
         });
     }
 
-    // ── Current Day edit toggle ────────────────────────────────
+    // ── Current Day edit: click view to reveal textarea ────────
     const editBtn = document.getElementById('nwst-currentday-edit-btn');
     if (editBtn) {
         editBtn.addEventListener('click', async () => {
@@ -489,7 +511,16 @@ function formatCurrentDayForEdit(day) {
     const lines = [];
     if (day.dateDisplay) lines.push(`Date: ${day.dateDisplay}`);
     if (day.dateSub) lines.push(`Sub: ${day.dateSub}`);
-    if (day.season) lines.push(`Season: ${day.season}`);
+    // Use the computed season from the seasonal config (if available)
+    // instead of the stored day.season, so custom season names
+    // (e.g. "夏 Natsu") appear in the edit form.
+    const chatId = getChatId();
+    const seasonConfig = getSeasonConfig(chatId);
+    const computedSeason = computeSeason(day.dayCount || 0, seasonConfig);
+    const displaySeason = computedSeason !== null && computedSeason !== undefined
+        ? computedSeason
+        : day.season;
+    if (displaySeason) lines.push(`Season: ${displaySeason}`);
     if (day.weatherToday) lines.push(`Weather today: ${day.weatherToday}`);
     if (day.flora) lines.push(`Flora: ${day.flora}`);
     if (day.fauna) lines.push(`Fauna: ${day.fauna}`);
