@@ -30,7 +30,8 @@ import {
     getForecast,
     getMoonPhases,
     replaceCurrentDay,
-    replaceMoonPhases
+    replaceMoonPhases,
+    getDayBoundarySnapshots
 } from '../data/worldState.js';
 import { getEventsGroupedByTier } from '../data/events.js';
 import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getMoonPhenomena, getMoonPhaseNames, getMoonPhaseForAngle } from '../llm/dayAdvancement.js';
@@ -173,22 +174,98 @@ export function buildHomeTab() {
 
 // ── Wire all Home tab UI events ───────────────────────────────────────────
 
+// Track which snapshot the user is on when cycling back through days.
+// Initialized lazily so it resets when the home tab re-mounts.
+let _snapshotCycleIndex = 0;
+let _snapshotCycleList = [];
+/** Prevents re-entry while a day advance/rewind operation is in progress. */
+let _dayNavInProgress = false;
+
 function wireHomeEvents() {
-    // ── Previous Day ───────────────────────────────────────────
     const prevDayBtn = document.getElementById('nwst-prev-day-btn');
+    const nextDayBtn = document.getElementById('nwst-next-day-btn');
+
+    /** Disable both arrow nav buttons and block re-entry. */
+    function lockDayNav() {
+        _dayNavInProgress = true;
+        if (prevDayBtn) prevDayBtn.disabled = true;
+        if (nextDayBtn) nextDayBtn.disabled = true;
+    }
+
+    /** Re-enable both arrow nav buttons and allow re-entry. */
+    function unlockDayNav() {
+        _dayNavInProgress = false;
+        if (prevDayBtn) prevDayBtn.disabled = false;
+        if (nextDayBtn) nextDayBtn.disabled = false;
+    }
+
+    // ── Previous Day ───────────────────────────────────────────
     if (prevDayBtn) {
         prevDayBtn.addEventListener('click', async () => {
-            await restorePreviousDay();
-            refreshHomeUI();
+            if (_dayNavInProgress) return;
+            const chatId = getChatId();
+            if (!chatId) return;
+
+            lockDayNav();
+            try {
+                // Refresh the snapshot list on every click (new snapshots may have
+                // been created since the last click).
+                const daySnapshots = getDayBoundarySnapshots(chatId);
+
+                if (daySnapshots.length === 0) {
+                    nwstToast('No previous day snapshot found. Nothing to restore.', 'warning');
+                    return;
+                }
+
+                // Reset cycle when the snapshot list changes (e.g., a new day was advanced)
+                if (_snapshotCycleList.length !== daySnapshots.length ||
+                    _snapshotCycleList[0]?.key !== daySnapshots[0]?.key) {
+                    _snapshotCycleIndex = 0;
+                    _snapshotCycleList = daySnapshots;
+                }
+
+                if (_snapshotCycleIndex >= daySnapshots.length) {
+                    nwstToast('No older snapshots. You\'ve reached the beginning of your snapshot history.', 'warning');
+                    _snapshotCycleIndex = 0; // Reset so next click goes to most recent again
+                    return;
+                }
+
+                const targetSnapshot = daySnapshots[_snapshotCycleIndex];
+                if (!targetSnapshot) {
+                    nwstToast('Snapshot not found.', 'error');
+                    return;
+                }
+
+                await restorePreviousDay(targetSnapshot.key);
+                refreshHomeUI();
+
+                const restoredLabel = `Day ${targetSnapshot.dayCount} — ${targetSnapshot.dateDisplay}`;
+                _snapshotCycleIndex++;
+
+                if (_snapshotCycleIndex < daySnapshots.length) {
+                    const nextLabel = `Day ${daySnapshots[_snapshotCycleIndex].dayCount} — ${daySnapshots[_snapshotCycleIndex].dateDisplay}`;
+                    nwstToast(`Restored ${restoredLabel}. Click ‹ again to go further back to ${nextLabel}.`, 'info');
+                } else {
+                    nwstToast(`Restored ${restoredLabel} (oldest snapshot).`, 'info');
+                }
+            } finally {
+                unlockDayNav();
+            }
         });
     }
 
     // ── Next Day ───────────────────────────────────────────────
-    const nextDayBtn = document.getElementById('nwst-next-day-btn');
     if (nextDayBtn) {
         nextDayBtn.addEventListener('click', async () => {
-            await advanceToNextDay();
-            refreshHomeUI();
+            if (_dayNavInProgress) return;
+
+            lockDayNav();
+            try {
+                await advanceToNextDay();
+                refreshHomeUI();
+            } finally {
+                unlockDayNav();
+            }
         });
     }
 

@@ -147,8 +147,10 @@ Events describe what is COMING, not what has already happened. Past events belon
 Use the dayCount you compute below as a temporal reference. An event happening "tomorrow" would be scheduledDate "Day N+1" (relative to dayCount), "next week" = "Day N+7", etc. Calendar dates like "3/15" also accepted.
 
 CRITICAL RULES:
-- Events where timing IS clear (festival in 3 days, delivery due tomorrow, named date from chat) MUST include scheduledDate.
-- Events with vague/uncertain timing MUST omit scheduledDate — not every event needs a pinned date.
+- Seasonal events (spring festival, harvest festival, migration, seasonal ritual) ALWAYS get a scheduledDate — approximate relative to the current dayCount (e.g. "Day 14" for something happening in ~2 weeks).
+- Relative timing events ("in the coming weeks", "next month", "a few days from now") — ESTIMATE a dayCount-based date. Rough is fine. "Day N+7" for next week, "Day N+14" for two weeks.
+- Named/explicit dates from chat — use as-given.
+- Genuinely vague events (background rumors, distant threats, ongoing pressures): set scheduledDate to null (field only — keep the event). Not every event needs a pinned date.
 - scheduledDate appears in the event header in the UI for immediate temporal context.`;
 
 // ── Execute Batch Scan ────────────────────────────────────────────────────
@@ -407,7 +409,7 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example (environmental): "The river's rise threatens low-lying farmlands as spring melt accelerates"\n`;
     prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
     prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 2 WORLD events per tier, max 3 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
-    prompt += `  scheduledDate — Use the dayCount above as reference. Events with clear timing (festival in 3 days, delivery tomorrow, named date) MUST include scheduledDate. Events with vague timing OMIT it.\n\n`;
+    prompt += `  scheduledDate — REQUIRED for seasonal/relative-timing events (spring festival → current season date, "coming weeks" → Day N+14). Omit only for genuinely vague events. Use dayCount above as reference.\n\n`;
     prompt += `  CRITICAL — PROPORTION: Quality over quantity. 1 strong world event beats 3 thin ones.\n\n`;
     prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
     prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;

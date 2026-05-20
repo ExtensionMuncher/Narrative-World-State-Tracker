@@ -17,7 +17,7 @@ import { getChatId, nwstToast } from '../utils.js';
 import { getSetting } from '../index.js';;
 import { getSettingContext, getCurrentDay, replaceCurrentDay, updateCurrentDay,
          getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
-         saveSnapshot, getLatestSnapshot, getWorldState,
+         saveSnapshot, getLatestSnapshot, getSnapshots, getWorldState,
          getSeasonConfig, getCalendarConfig } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
@@ -955,17 +955,33 @@ export async function advanceToNextDay() {
  *
  * @returns {Promise<boolean>} True on success
  */
-export async function restorePreviousDay() {
+/**
+ * Restore state from a day-boundary snapshot.
+ * If no snapshotKey is provided, restores the most recent snapshot.
+ * @param {string} [snapshotKey] - Optional specific snapshot key to restore from
+ * @returns {Promise<boolean>}
+ */
+export async function restorePreviousDay(snapshotKey) {
     const chatId = getChatId();
     if (!chatId) {
         nwstToast('No active chat detected.', 'error');
         return false;
     }
 
-    const snapshot = getLatestSnapshot(chatId);
-    if (!snapshot) {
-        nwstToast('No previous day snapshot found. Nothing to restore.', 'warning');
-        return false;
+    let snapshot;
+    if (snapshotKey) {
+        const snapshots = getSnapshots(chatId);
+        snapshot = snapshots[snapshotKey];
+        if (!snapshot) {
+            nwstToast(`Snapshot "${snapshotKey}" not found.`, 'error');
+            return false;
+        }
+    } else {
+        snapshot = getLatestSnapshot(chatId);
+        if (!snapshot) {
+            nwstToast('No previous day snapshot found. Nothing to restore.', 'warning');
+            return false;
+        }
     }
 
     try {
@@ -1190,34 +1206,36 @@ async function topUpWorldEvents(chatId) {
         const { getActiveEvents } = await import('../data/events.js');
         const activeEvents = getActiveEvents(chatId);
 
-        // Count active world events (non-NPC, non-missed, non-resolved)
+        // Count active world events (non-NPC)
         const activeWorldEvents = activeEvents.filter(e =>
             !e.isNPC &&
             e.status !== 'missed' &&
             e.status !== 'resolved'
         );
 
-        // Only top up if pool is thin
-        const WORLD_EVENT_THRESHOLD = 2;
-        if (activeWorldEvents.length >= WORLD_EVENT_THRESHOLD) {
-            console.log(`[NWST DayAdvancement] World event pool healthy (${activeWorldEvents.length} active) — no top-up needed.`);
-            return;
-        }
+        // Check per-tier: immediate events were just rolled (marked missed),
+        // so the immediate tier is almost certainly empty. Generate fresh
+        // immediate events if that tier is empty, regardless of total pool size.
+        const immediateWorldEvents = activeWorldEvents.filter(e => e.tier === 'immediate');
+        const weekWorldEvents = activeWorldEvents.filter(e => e.tier === 'week');
 
-        console.log(`[NWST DayAdvancement] World event pool thin (${activeWorldEvents.length} active) — running top-up...`);
+        console.log(`[NWST DayAdvancement] World event pool: ${activeWorldEvents.length} active (immediate: ${immediateWorldEvents.length}, week: ${weekWorldEvents.length})`);
 
         // Import and call event gen for world events only
         const { regenerateTierEvents } = await import('./eventGen.js');
 
-        // Generate for immediate and week tiers — month events are less time-sensitive
-        // Run sequentially to avoid hammering the LLM
-        const tiersToTopUp = ['immediate', 'week'];
-        for (const tier of tiersToTopUp) {
-            const tierWorldEvents = activeWorldEvents.filter(e => e.tier === tier);
-            if (tierWorldEvents.length < 1) {
-                // This tier has no world events — generate a top-up pass
-                await regenerateTierEvents(tier);
-            }
+        // ★ Always top up the immediate tier if it's empty — day advancement
+        //    rolls immediate events as missed, so a fresh batch is expected.
+        if (immediateWorldEvents.length < 1) {
+            console.log('[NWST DayAdvancement] Immediate tier empty — generating fresh batch...');
+            await regenerateTierEvents('immediate');
+        }
+
+        // ★ Top up the week tier if it's empty (less aggressive — week events
+        //    survive day advancement, so they only need filling when genuinely thin).
+        if (weekWorldEvents.length < 1) {
+            console.log('[NWST DayAdvancement] Week tier empty — generating fresh batch...');
+            await regenerateTierEvents('week');
         }
 
         if (typeof window?.nwstRefreshTabs === 'function') {
@@ -1234,10 +1252,16 @@ async function rollEventHorizonForward(chatId) {
     // Mark immediate past-due events as missed, shift other tiers as needed
     // This is a structural roll — the Planning LLM may override during next scan
     const events = getAllEvents(chatId);
+    const currentDay = getCurrentDay(chatId);
+    const dayCount = currentDay.dayCount || 0;
     const changes = {};
 
     for (const event of events) {
         if (event.tier === 'immediate' && event.status === 'pending') {
+            // ★ Check if this event has a future scheduledDate — protect it from rolling
+            if (event.scheduledDate && isFutureDated(event.scheduledDate, dayCount)) {
+                continue; // Event is scheduled for a future day — don't mark as missed
+            }
             // Move pending immediate events to missed (they didn't happen today)
             changes[event.id] = 'missed';
         }
@@ -1247,6 +1271,34 @@ async function rollEventHorizonForward(chatId) {
     if (Object.keys(changes).length > 0) {
         rollEventHorizon(chatId, changes);
     }
+}
+
+/**
+ * Check if a scheduledDate string refers to a day in the future, relative to
+ * the current dayCount.
+ *
+ * Parses the primary "Day #" format (e.g. "Day 105", "Day 14").
+ * For other formats (e.g. "Month 3/15"), returns false — the event will
+ * be subject to normal rolling since we can't reliably compare without
+ * full calendar config context.
+ *
+ * @param {string} scheduledDate - Free-form date string from the event
+ * @param {number} currentDayCount - The current story day number
+ * @returns {boolean} true if the event is scheduled for a future day
+ */
+function isFutureDated(scheduledDate, currentDayCount) {
+    // Parse "Day #" or "Day#" format — the primary format used by the LLM
+    const dayMatch = scheduledDate.match(/Day\s*(\d+)/i);
+    if (dayMatch) {
+        const eventDay = parseInt(dayMatch[1], 10);
+        // Use >= so the event survives ON its scheduled day (e.g., Day 105
+        // survives when advancing TO Day 105). It only gets rolled when
+        // advancing PAST Day 105 (to Day 106).
+        return eventDay >= currentDayCount;
+    }
+    // For other formats (e.g., "Month #/Day #"), we can't reliably compare
+    // without calendar config — fall through to normal rolling
+    return false;
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────

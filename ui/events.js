@@ -129,6 +129,15 @@ function buildEventItemHTML(event) {
                     <input type="text" class="nwst-events-scheduled" value="${event.scheduledDate ? escapeHTML(event.scheduledDate) : ''}" style="flex:1;font-size:13px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;" placeholder="e.g. Day 3, March 15...">
                 </div>
             </div>
+            <div style="margin-bottom:8px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <label style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.04em;cursor:pointer;display:flex;align-items:center;gap:4px;user-select:none">
+                        <input type="checkbox" class="nwst-events-isnpc" ${event.isNPC ? 'checked' : ''} style="margin:0;width:13px;height:13px;cursor:pointer;vertical-align:middle">
+                        NPC event
+                    </label>
+                    <span style="font-size:10px;color:#bbb">NPC events bypass the pool cap</span>
+                </div>
+            </div>
             <textarea class="nwst-events-desc" rows="2" style="margin-bottom:8px" id="nwst-event-desc-${event.id}">${escapeHTML(event.description)}</textarea>
             <div style="font-size:11px;color:#999;margin-bottom:6px">Status</div>
             <div class="nwst-btn-row nwst-events-status-btns" style="margin-bottom:10px">
@@ -321,12 +330,18 @@ function wireEventItemEvents() {
             const chatId = getChatId();
 
             const scheduledInput = item.querySelector('.nwst-events-scheduled');
+            const npcCheckbox = item.querySelector('.nwst-events-isnpc');
 
             const updates = {};
             if (descTextarea) updates.description = descTextarea.value;
             if (titleInput)   updates.title = titleInput.value.trim() || 'Untitled event';
             if (tierSelect)   updates.tier  = tierSelect.value;
             if (scheduledInput) updates.scheduledDate = scheduledInput.value.trim() || null;
+            if (npcCheckbox) {
+                const isNPC = npcCheckbox.checked;
+                updates.isNPC = isNPC;
+                updates.npcOrigin = isNPC ? 'generated' : null;
+            }
 
             if (Object.keys(updates).length > 0) {
                 await updateEvent(chatId, eventId, updates);

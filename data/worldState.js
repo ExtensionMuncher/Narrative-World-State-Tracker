@@ -407,3 +407,38 @@ export function getLatestSnapshot(chatId) {
     return snapshots[keys[0]];
 }
 
+/**
+ * Get all day-boundary snapshots (excluding batch_scan and pre_skip landmarks),
+ * sorted newest-first, with extracted metadata for display.
+ *
+ * Each returned entry includes:
+ *   { key, savedAt, dayCount (extracted from worldState), dateDisplay }
+ *
+ * Used by the Previous Day UI to let users browse and pick which day to restore.
+ * @param {string} chatId
+ * @returns {object[]} Sorted array of day-boundary snapshot metadata entries
+ */
+export function getDayBoundarySnapshots(chatId) {
+    const snapshots = getSnapshots(chatId);
+    const keys = Object.keys(snapshots);
+
+    return keys
+        .filter(k => k.startsWith('day_'))
+        .map(k => {
+            const s = snapshots[k];
+            const ws = s?.worldStateSnapshot;
+            const currentDay = ws?.currentDay || {};
+            return {
+                key: k,
+                savedAt: s?.savedAt || 0,
+                dayCount: currentDay.dayCount || '?',
+                dateDisplay: currentDay.dateDisplay || '(unknown)',
+                dateSub: currentDay.dateSub || '',
+                season: currentDay.season || '',
+                worldStateSnapshot: s?.worldStateSnapshot,
+                eventsSnapshot: s?.eventsSnapshot,
+                notebookSnapshot: s?.notebookSnapshot
+            };
+        })
+        .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+}

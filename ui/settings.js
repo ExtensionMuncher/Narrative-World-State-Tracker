@@ -31,7 +31,7 @@ import {
 import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCalendarConfig, saveCalendarConfig, getCurrentDay, updateCurrentDay } from '../data/worldState.js';
 import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
-import { deleteAllChatData } from '../data/storage.js';
+import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG } from '../data/storage.js';
 import { runBatchScan } from '../llm/batchScan.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
@@ -174,6 +174,7 @@ export function buildSettingsTab() {
                     <div id="nwst-moons-list" style="margin-bottom:8px"></div>
                     <div class="nwst-btn-row">
                         <button class="menu_button nwst-btn" id="nwst-setting-addMoon" style="font-size:11px;padding:3px 9px">+ Add Moon</button>
+                        <button class="menu_button nwst-btn" id="nwst-setting-restoreDefaultMoons" style="font-size:11px;padding:3px 9px;margin-left:auto">Restore to Default</button>
                     </div>
 
                     <!-- Hidden template for moon entry -->
@@ -244,6 +245,7 @@ export function buildSettingsTab() {
                     <!-- Save button -->
                     <div class="nwst-btn-row">
                         <button class="menu_button nwst-btn" id="nwst-setting-saveCalendarConfig" style="font-size:11px;padding:3px 9px">Save Calendar Config</button>
+                        <button class="menu_button nwst-btn" id="nwst-setting-restoreDefaultCalendar" style="font-size:11px;padding:3px 9px;margin-left:auto">Restore to Default</button>
                     </div>
 
                     <!-- Hidden template for month entry -->
@@ -322,6 +324,7 @@ export function buildSettingsTab() {
                     <!-- Save button -->
                     <div class="nwst-btn-row" style="margin-top:4px">
                         <button class="menu_button nwst-btn" id="nwst-setting-saveSeasonConfig">Save Season Config</button>
+                        <button class="menu_button nwst-btn" id="nwst-setting-restoreDefaultSeasons" style="font-size:11px;padding:3px 9px;margin-left:auto">Restore to Default</button>
                     </div>
 
                     <!-- Hidden template for season band entry -->
@@ -387,6 +390,16 @@ export function buildSettingsTab() {
                         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
                             <input type="number" id="nwst-setting-maxActiveEvents" value="12" min="4" max="50" style="width:52px;text-align:center">
                             <span style="font-size:12px;color:#666">events</span>
+                        </div>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Max snapshot count</div>
+                            <div class="nwst-setting-sub">Maximum number of day-boundary snapshots stored per chat. Oldest are pruned first when exceeded. Day advancement, batch scan, and time skip snapshots are counted separately.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-maxSnapshotCount" value="30" min="1" max="200" style="width:52px;text-align:center">
+                            <span style="font-size:12px;color:#666">snapshots</span>
                         </div>
                     </div>
                     <div class="nwst-setting-row">
@@ -984,6 +997,30 @@ function wireSettingsEvents() {
         });
     }
 
+    // ── Restore moons to default ──────────────────────────────────
+    const restoreMoonsBtn = document.getElementById('nwst-setting-restoreDefaultMoons');
+    if (restoreMoonsBtn) {
+        restoreMoonsBtn.addEventListener('click', async () => {
+            const confirmed = await SillyTavern.getContext().callGenericPopup(
+                'This will reset all moon cycle settings to their defaults (enable moons, cycle length, phenomena, and configured moons). Continue?',
+                SillyTavern.getContext().POPUP_TYPE.CONFIRM,
+                '',
+            );
+            if (!confirmed) return;
+            setSetting('enableMoons', true);
+            setSetting('moonCycleDays', 29.53);
+            setSetting('enableMoonPhenomena', true);
+            setSetting('moons', [{ id: 'primary', name: 'The Moon', cycleDays: 29.53, enabled: true }]);
+            // Refresh UI
+            const moonCycleInput = document.getElementById('nwst-setting-moonCycleDays');
+            if (moonCycleInput) moonCycleInput.value = 29.53;
+            setCheckbox('nwst-setting-enableMoons', true);
+            setCheckbox('nwst-setting-enableMoonPhenomena', true);
+            renderMoonsList();
+            nwstToast('Moon cycle settings restored to defaults.', 'success');
+        });
+    }
+
     // ── Setting context (per-chat) ───────────────────────────────
     const saveContextBtn = document.getElementById('nwst-setting-saveContext');
     if (saveContextBtn) {
@@ -1098,6 +1135,29 @@ function wireSettingsEvents() {
         });
     }
 
+    // ── Restore season config to default ───────────────────────────
+    const restoreSeasonsBtn = document.getElementById('nwst-setting-restoreDefaultSeasons');
+    if (restoreSeasonsBtn) {
+        restoreSeasonsBtn.addEventListener('click', async () => {
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const confirmed = await SillyTavern.getContext().callGenericPopup(
+                'This will reset season configuration (mode, year length, and season bands) to their defaults. Continue?',
+                SillyTavern.getContext().POPUP_TYPE.CONFIRM,
+                '',
+            );
+            if (!confirmed) return;
+            const defaults = DEFAULT_SEASON_CONFIG;
+            await saveSeasonConfig(chatId, {
+                mode: defaults.mode,
+                yearLength: defaults.yearLength,
+                seasons: defaults.seasons.map(s => ({ ...s }))
+            });
+            populateSeasonConfigUI();
+            nwstToast('Season configuration restored to defaults.', 'success');
+        });
+    }
+
     // ── Calendar Configuration ──────────────────────────────────────
     const enableCalToggle = document.getElementById('nwst-setting-enableCalendarConfig');
     if (enableCalToggle) {
@@ -1170,6 +1230,31 @@ function wireSettingsEvents() {
             renderCalendarDaysList();
             validateCalendarTotal();
             nwstToast('Calendar configuration saved.', 'success');
+        });
+    }
+
+    // ── Restore calendar config to default ────────────────────────
+    const restoreCalBtn = document.getElementById('nwst-setting-restoreDefaultCalendar');
+    if (restoreCalBtn) {
+        restoreCalBtn.addEventListener('click', async () => {
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const confirmed = await SillyTavern.getContext().callGenericPopup(
+                'This will reset calendar configuration (month names, month day counts, week day names) to their defaults. Continue?',
+                SillyTavern.getContext().POPUP_TYPE.CONFIRM,
+                '',
+            );
+            if (!confirmed) return;
+            const defaults = DEFAULT_CALENDAR_CONFIG;
+            await saveCalendarConfig(chatId, {
+                enabled: false,
+                months: defaults.months,
+                monthNames: [...defaults.monthNames],
+                monthDays: [...defaults.monthDays],
+                weekDays: [...defaults.weekDays]
+            });
+            populateCalendarConfigUI();
+            nwstToast('Calendar configuration restored to defaults.', 'success');
         });
     }
 
@@ -1282,18 +1367,22 @@ function wireSettingsEvents() {
             );
             if (!confirmed) return;
 
-            // Preserve the Setting Context — it describes the world and is
-            // manually authored by the user, not auto-generated by the LLM.
+            // Preserve user-authored data — these are manually configured,
+            // not auto-generated by the LLM, so they should survive a clear.
             const preservedContext = getSettingContext(chatId);
+            const preservedSeasonConfig = getSeasonConfig(chatId);
+            const preservedCalendarConfig = getCalendarConfig(chatId);
 
             deleteAllChatData(chatId);
 
-            // Restore the Setting Context
+            // Restore user-authored data
             if (preservedContext) {
                 await saveSettingContext(chatId, preservedContext);
             }
+            await saveSeasonConfig(chatId, preservedSeasonConfig);
+            await saveCalendarConfig(chatId, preservedCalendarConfig);
 
-            nwstToast('All NWST data cleared for this chat (Setting Context preserved).', 'success');
+            nwstToast('All NWST data cleared for this chat (Setting Context, Season Config, and Calendar Config preserved).', 'success');
             // Refresh the UI to reflect the cleared state
             populateSettingsUI();
         });
