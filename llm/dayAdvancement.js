@@ -1287,7 +1287,17 @@ async function rollEventHorizonForward(chatId) {
  * @returns {boolean} true if the event is scheduled for a future day
  */
 function isFutureDated(scheduledDate, currentDayCount) {
-    // Parse "Day #" or "Day#" format — the primary format used by the LLM
+    // Parse range format first: "Day 104-110" — extract both start and end
+    const rangeMatch = scheduledDate.match(/Day\s*(\d+)\s*–?\s*(\d+)/i);
+    if (rangeMatch) {
+        const rangeStart = parseInt(rangeMatch[1], 10);
+        const rangeEnd = parseInt(rangeMatch[2], 10);
+        // Protect the event as long as the current day is within the range
+        // or hasn't reached it yet. Only mark missed when past the range end.
+        return currentDayCount <= rangeEnd;
+    }
+
+    // Parse single "Day #" or "Day#" format
     const dayMatch = scheduledDate.match(/Day\s*(\d+)/i);
     if (dayMatch) {
         const eventDay = parseInt(dayMatch[1], 10);

@@ -140,8 +140,19 @@ World conditions describe macro-level states — the political atmosphere, socia
 === COMMUNITY SUMMARIES — ANALYTICAL DEPTH ===
 Community summaries are not plot recaps. They are analytical portraits of social groupings — the power dynamics, unspoken tensions, what characters are maneuvering around, what is really happening beneath the surface. Write them with insight and specificity. Reference specific moments that reveal something meaningful. Avoid generic observations.
 
-=== EVENTS — FORWARD FACING ONLY ===
-Events describe what is COMING, not what has already happened. Past events belong in the notebook (established facts, planted details). If something already occurred, do not put it in the events array.
+=== EVENTS — FORWARD FACING PROJECTIONS ONLY ===
+Events describe what is COMING NEXT in the story, NOT what has already happened.
+
+CRITICAL RULE — DO NOT put past-tense summaries of chat content into events:
+WRONG (past — what already happened): "Satoru presented cinnamon toothpicks to trigger memory"
+RIGHT (future — what happens next): "Satoru may escalate his memory-triggering attempts with more direct methods"
+
+WRONG (past — what already happened): "The cursed energy in the room became disturbed"
+RIGHT (future — what happens next): "The disturbed cursed energy may attract attention or escalate further"
+
+Past events belong in the notebook (established facts, planted details). If something already occurred in the chat, do NOT put it in the events array.
+
+Every event MUST answer the question: "What is coming next because of this?" If the answer is "it already happened," delete that event.
 
 === EVENT SCHEDULED DATES ===
 Use the dayCount you compute below as a temporal reference. An event happening "tomorrow" would be scheduledDate "Day N+1" (relative to dayCount), "next week" = "Day N+7", etc. Calendar dates like "3/15" also accepted.
@@ -397,10 +408,18 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `  - Generate ALL events here. This is the ONLY event generation call.\n`;
     prompt += `  - You MUST produce TWO DISTINCT KINDS of events:\n\n`;
     prompt += `  KIND A — Chat-Detected Events (from conversation/context analysis):\n`;
-    prompt += `    * Events directly mentioned, implied, or foreshadowed in the chat\n`;
+    prompt += `    * Events that the CHAT CONTEXT suggests will happen NEXT\n`;
     prompt += `    * Character plans, rumors, threats discussed by characters\n`;
     prompt += `    * Example: "The merchant caravan is expected to arrive next week"\n`;
     prompt += `    * Example: "Bandit raids have been increasing along the eastern road"\n\n`;
+    prompt += `  WRONG — DO NOT summarize past chat as events. These are WRONG:\n`;
+    prompt += `    ✗ "Satoru presented cinnamon toothpicks to trigger Sachiko's memory" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "The cursed energy in the room became disturbed" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "Memory trigger attempt by Satoru" — this ALREADY HAPPENED in chat\n\n`;
+    prompt += `  RIGHT — Turn past events into future projections. Convert the above to:\n`;
+    prompt += `    ✓ "Satoru may escalate memory-triggering tactics as the memory block resists" — what COMES NEXT\n`;
+    prompt += `    ✓ "The cursed energy disturbance could attract unwanted attention" — what COMES NEXT\n`;
+    prompt += `    ✓ "Sachiko's buried memories may surface under continued pressure" — what COMES NEXT\n\n`;
     prompt += `  KIND B — World-Level Events (from setting, conditions, season, context):\n`;
     prompt += `    * Events that the WORLD itself is generating — natural, political, societal, seasonal\n`;
     prompt += `    * NOT mentioned in chat, but driven by the setting context and world conditions\n`;
@@ -408,9 +427,9 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example (seasonal): "The autumn harvest festival preparations are underway across the region"\n`;
     prompt += `    * Example (environmental): "The river's rise threatens low-lying farmlands as spring melt accelerates"\n`;
     prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
-    prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 2 WORLD events per tier, max 3 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
+    prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 5 WORLD events per tier, max 5 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
     prompt += `  scheduledDate — REQUIRED for seasonal/relative-timing events (spring festival → current season date, "coming weeks" → Day N+14). Omit only for genuinely vague events. Use dayCount above as reference.\n\n`;
-    prompt += `  CRITICAL — PROPORTION: Quality over quantity. 1 strong world event beats 3 thin ones.\n\n`;
+    prompt += `  CRITICAL — SEED GENEROUSLY: This is the INITIAL batch scan. The tracker should start with a robust set of events so the world feels alive. Aim for roughly 12-20 events total across all tiers and categories. Distribute world events across multiple tiers — immediate (happening now/soon), week (this week), month (this month/season), undetermined (someday).\n\n`;
     prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
     prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;
 
@@ -439,8 +458,8 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
   },
   "events": [
     {
-      "title": "Forward-facing event title — what is COMING, not what happened",
-      "description": "What is expected or planned. Future-facing only.",
+      "title": "FORWARD-FACING only. Ask: did this already happen in chat? If YES → DELETE it.",
+      "description": "What is PROJECTED to happen NEXT. Future tense. NEVER a past-tense recap of chat content.",
       "tier": "immediate|week|month|undetermined",
       "isNPC": false,
       "scheduledDate": "REQUIRED when timing is clear — reference the dayCount above. Format: relative 'Day N+1' (story days) or absolute 'Month/Date' (calendar). OMIT for vague/uncertain timing — not all events need a pinned date."
@@ -649,10 +668,10 @@ async function applyBatchResults(chatId, result) {
 
     if (result.events && Array.isArray(result.events)) {
         const { addEvent } = await import('../data/events.js');
-        // Category-aware caps per tier:
+        // Category-aware caps per tier (generous for initial seed):
         //   Detected NPC events  — no cap (facts from chat)
-        //   Generated NPC events — max 3 per tier
-        //   World events         — max 2 per tier
+        //   Generated NPC events — max 5 per tier
+        //   World events         — max 5 per tier
         const batchCounts = {};
         const cappedEvents = result.events.filter(ev => {
             const tier = ev.tier || 'undetermined';
@@ -663,11 +682,11 @@ async function applyBatchResults(chatId, result) {
                 // No cap on detected NPC events
                 return true;
             } else if (ev.isNPC) {
-                if (tc.generated_npc >= 3) return false;
+                if (tc.generated_npc >= 5) return false;
                 tc.generated_npc++;
                 return true;
             } else {
-                if (tc.world >= 2) return false;
+                if (tc.world >= 5) return false;
                 tc.world++;
                 return true;
             }
