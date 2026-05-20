@@ -1,7 +1,7 @@
 # Narrative World State Tracker
 ### A SillyTavern Extension
 
-> **Status: Alpha** — Core features are functional and have been tested in active roleplays. Expect rough edges, especially in fantasy calendar and multi-moon configurations. Report bugs via GitHub Issues.
+> **Status: Alpha** — Core features are functional and are being tested in active roleplays. Expect rough edges, especially in fantasy calendar and multi-moon configurations. Report bugs via GitHub Issues.
 
 ---
 
