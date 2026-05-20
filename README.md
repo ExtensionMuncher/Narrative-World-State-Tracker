@@ -174,7 +174,7 @@ Snapshots are saved at day advancement boundaries. Previous Day restores from sn
 - **Events** — full event horizon across all four tiers, add/edit/regen controls
 - **World State** — condition tracks with eye toggles, community summaries
 - **Notebook** — collapsible sections for core notes, mystery & continuity, secrets
-- **Settings** — connection profiles, scanner settings, injection settings, setting context, planner prompt, batch scan, import/export, debug tools
+- **Settings** — connection profiles, scanner settings, injection settings, setting context, batch scan, import/export, debug tools
 
 All editable text fields support a **⛶ popout editor** for comfortable editing in a larger modal.
 
@@ -184,9 +184,9 @@ The **Debug** section (bottom of Settings) provides manual trigger buttons for S
 
 ## Requirements
 
-- [SillyTavern](https://github.com/SillyTavern/SillyTavern) (1.12.0 or higher)
+- [SillyTavern](https://github.com/SillyTavern/SillyTavern) (1.18.0 or higher)
 - At least one configured API connection profile in SillyTavern
-- A second connection profile recommended for Day Advancement (lighter model)
+- A second connection profile recommended for Day Advancement (lighter/local model)
 - A third connection profile recommended for Narrative Consistency (mid-size or local model is fine)
 
 ---
@@ -208,7 +208,7 @@ The **Debug** section (bottom of Settings) provides manual trigger buttons for S
 ## First-Time Setup
 
 1. Go to **Settings → Connection Profiles** and assign at least a Planning LLM profile
-2. Fill in **Setting Context** — describe your world's geography, climate, era, and starting date. This is the single most important input for quality generation.
+2. Fill in **Setting Context** — describe your world's geography, climate, era, and starting date. This is the single most important input for a quality and grounded generation in your world.
 3. Run **Batch Scan** if you're starting mid-campaign, or start a new chat and let the warmup scanner do its first pass at message 10
 4. Configure **Injection Settings** to set placement and event pool cap
 
@@ -235,8 +235,6 @@ The **Debug** section (bottom of Settings) provides manual trigger buttons for S
 - [ ] Output density modes (Direct / Atmospheric / Token Budget)
 - [ ] UI polish pass
 - [ ] Mobile UI testing
-- [ ] Fantasy calendar stress testing
-- [ ] Optional Kaldigo integration hook
 
 ---
 
