@@ -21,40 +21,158 @@ import { generateWithProfile } from './connections.js';
 
 import { getChatId, nwstToast } from '../utils.js';;
 import { chatHasData } from '../data/storage.js';
-import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig } from '../data/worldState.js';
+import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig, getSeasonConfig } from '../data/worldState.js';
 import { getAllEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
-import { regenerateForecast } from './dayAdvancement.js';
+import { regenerateForecast, computeSeason } from './dayAdvancement.js';
 
 // ── Date computation helper ─────────────────────────────────────────────────
 
+/** Map of written number words → numeric values (for ordinals like "Eleventh") */
+const NUMBER_WORDS = {
+    'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5,
+    'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10,
+    'eleventh': 11, 'twelfth': 12, 'thirteenth': 13, 'fourteenth': 14, 'fifteenth': 15,
+    'sixteenth': 16, 'seventeenth': 17, 'eighteenth': 18, 'nineteenth': 19, 'twentieth': 20,
+    'twenty-first': 21, 'twenty-second': 22, 'twenty-third': 23, 'twenty-fourth': 24, 'twenty-fifth': 25,
+    'twenty-sixth': 26, 'twenty-seventh': 27, 'twenty-eighth': 28, 'twenty-ninth': 29, 'thirtieth': 30,
+    'thirty-first': 31,
+    // Also map the cardinal forms in case they appear without ordinal suffix
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+    'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
+    'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20,
+    'thirty': 30, 'thirtyone': 31,
+    // Ordinal month names (non-numeric)
+    'first month': 1, 'second month': 2, 'third month': 3, 'fourth month': 4,
+    'fifth month': 5, 'sixth month': 6, 'seventh month': 7, 'eighth month': 8,
+    'ninth month': 9, 'tenth month': 10, 'eleventh month': 11, 'twelfth month': 12,
+};
+
+/**
+ * Try to extract a numeric value from a written ordinal in text.
+ * Handles patterns like "the Eleventh Month" → 11, "Seventh Day" → 7.
+ * @param {string} text - The text to search within
+ * @param {string} keyword - The keyword after the number ("month" or "day")
+ * @returns {number|null} The numeric value, or null
+ */
+function extractOrdinalValue(text, keyword) {
+    if (!text) return null;
+    const lower = text.toLowerCase();
+
+    // Pattern 1: "the Nth Keyword" — "the Eleventh Month"
+    const regex1 = new RegExp(`the\\s+([a-z-]+(?:st|nd|rd|th)?)\\s+${keyword}`, 'i');
+    const m1 = lower.match(regex1);
+    if (m1) {
+        const word = m1[1].replace(/[^a-z-]/g, '');
+        if (NUMBER_WORDS[word] !== undefined) return NUMBER_WORDS[word];
+    }
+
+    // Pattern 2: "Nth Keyword" — "Seventh Day"
+    const regex2 = new RegExp(`([a-z-]+(?:st|nd|rd|th)?)\\s+${keyword}`, 'i');
+    const m2 = lower.match(regex2);
+    if (m2) {
+        const word = m2[1].replace(/[^a-z-]/g, '');
+        if (NUMBER_WORDS[word] !== undefined) return NUMBER_WORDS[word];
+    }
+
+    // Pattern 3: "Keyword N" — "Month 11" or "Day 7"
+    const regex3 = new RegExp(`${keyword}\\s+(\\d{1,2})`, 'i');
+    const m3 = lower.match(regex3);
+    if (m3) {
+        const val = parseInt(m3[1], 10);
+        if (val >= 1 && val <= 31) return val;
+    }
+
+    return null;
+}
+
+/**
+ * Build a month-name → index map from both English month names and an optional
+ * calendar config. Calendar config month names take priority so custom names
+ * (e.g. "Haru" for spring) can be matched.
+ * Also maps written ordinal month patterns like "eleventh month" → 11.
+ * @param {object|null} calendarConfig
+ * @returns {object} monthName → index (0=jan) mapping
+ */
+function buildMonthMap(calendarConfig) {
+    // English base names
+    const englishNames = ['january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december'];
+    const map = {};
+    englishNames.forEach((name, i) => { map[name] = i; });
+
+    // Add custom month names from calendar config
+    if (calendarConfig && Array.isArray(calendarConfig.monthNames)) {
+        calendarConfig.monthNames.forEach((customName, i) => {
+            if (customName && typeof customName === 'string') {
+                const raw = customName.toLowerCase().trim();
+                if (raw) {
+                    // Map the custom name to its index (0-based)
+                    map[raw] = Math.min(i, 11);
+                }
+            }
+        });
+    }
+
+    // Also add ordinal month pattern entries: "eleventh month" → 10 (0-based)
+    for (let i = 1; i <= 12; i++) {
+        // Find the ordinal word for this number
+        const entry = Object.entries(NUMBER_WORDS).find(([word, val]) => val === i && word.includes('month'));
+        if (entry) {
+            const monthWord = entry[0].replace(/\s+month$/, '');
+            map[monthWord] = i - 1; // 0-based
+        }
+    }
+
+    return map;
+}
+
 /**
  * Compute day-of-year from a date string like "Monday, April 15th, 2024".
+ * Also accepts an optional calendar config for custom month name support.
+ * Handles written ordinals: "the Eleventh Month · Seventh Day" → day-of-year.
  * Used as a client-side fallback when the LLM doesn't provide dayCount.
  * @param {string} dateStr
+ * @param {object} [calendarConfig] - Optional calendar config with custom monthNames
  * @returns {number|null} Day of year (1-366), or null if unparseable
  */
-function computeDayOfYearFromDate(dateStr) {
+export function computeDayOfYearFromDate(dateStr, calendarConfig) {
     if (!dateStr || typeof dateStr !== 'string') return null;
-    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
-        'july', 'august', 'september', 'october', 'november', 'december'];
-    const monthMap = {};
-    monthNames.forEach((name, i) => { monthMap[name] = i; });
 
-    // Strip ordinal suffixes (st, nd, rd, th) so "15th" becomes "15"
+    const monthMap = buildMonthMap(calendarConfig);
+
+    // Get monthDays from calendar config or use defaults
+    const monthDays = (calendarConfig && Array.isArray(calendarConfig.monthDays) && calendarConfig.monthDays.length >= 12)
+        ? calendarConfig.monthDays
+        : [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    // Strip numeric ordinal suffixes (st, nd, rd, th) so "15th" becomes "15"
     const cleaned = dateStr.replace(/(\d+)(st|nd|rd|th)/gi, '$1');
 
-    // Match "Month Day, Year" pattern — e.g. "April 15, 2024" or "April 15 2024"
-    const dateMatch = cleaned.match(/([A-Za-z]+)\s+(\d{1,2}),?\s*(\d{4})/);
-    if (dateMatch) {
-        const monthName = dateMatch[1].toLowerCase();
-        const day = parseInt(dateMatch[2], 10);
-        const year = parseInt(dateMatch[3], 10);
-        const month = monthMap[monthName];
-        if (month !== undefined && day >= 1 && day <= 31 && year >= 1) {
-            const date = new Date(year, month, day);
-            const startOfYear = new Date(year, 0, 0); // Dec 31 of previous year
+    // ── Helper: compute day-of-year from monthIndex (0-based) and day (1-based) ──
+    function computeFromMonthDay(monthIndex, day) {
+        if (monthIndex === undefined || monthIndex < 0 || monthIndex >= 12) return null;
+        if (day < 1 || day > monthDays[monthIndex]) return null;
+        let dayOfYear = day;
+        for (let i = 0; i < monthIndex; i++) {
+            dayOfYear += monthDays[i];
+        }
+        return dayOfYear;
+    }
+
+    // ── Method 1: "Month Day, Year" — e.g. "April 15, 2024" or "Haru 17, 2024"
+    const monthDayYearMatch = cleaned.match(/([A-Za-z]+)\s+(\d{1,2}),?\s*(\d{4})/);
+    if (monthDayYearMatch) {
+        const monthName = monthDayYearMatch[1].toLowerCase();
+        const day = parseInt(monthDayYearMatch[2], 10);
+        const year = parseInt(monthDayYearMatch[3], 10);
+        const monthIndex = monthMap[monthName];
+        if (monthIndex !== undefined && day >= 1 && year >= 1) {
+            // With a year, use Date object for accurate day-of-year (handles leap years)
+            const date = new Date(year, monthIndex, day);
+            const startOfYear = new Date(year, 0, 0);
             const diff = date - startOfYear;
             const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
             if (dayOfYear >= 1 && dayOfYear <= 366) {
@@ -64,11 +182,11 @@ function computeDayOfYearFromDate(dateStr) {
         }
     }
 
-    // Also try ISO format: "2024-04-15"
+    // ── Method 2: ISO format "2024-04-15"
     const isoMatch = cleaned.match(/(\d{4})-(\d{2})-(\d{2})/);
     if (isoMatch) {
         const year = parseInt(isoMatch[1], 10);
-        const month = parseInt(isoMatch[2], 10) - 1; // JS months are 0-indexed
+        const month = parseInt(isoMatch[2], 10) - 1;
         const day = parseInt(isoMatch[3], 10);
         if (year >= 1 && month >= 0 && month <= 11 && day >= 1 && day <= 31) {
             const date = new Date(year, month, day);
@@ -79,6 +197,89 @@ function computeDayOfYearFromDate(dateStr) {
                 console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from ISO date "${dateStr}"`);
                 return dayOfYear;
             }
+        }
+    }
+
+    // ── Method 3: "Month Day" without year — e.g. "April 15" or "Haru 17"
+    const monthDayMatch = cleaned.match(/([A-Za-z]+)\s+(\d{1,2})(?:,?\s*\d{4})?\s*$/);
+    if (monthDayMatch) {
+        const monthName = monthDayMatch[1].toLowerCase();
+        const day = parseInt(monthDayMatch[2], 10);
+        const monthIndex = monthMap[monthName];
+        const result = computeFromMonthDay(monthIndex, day);
+        if (result !== null) {
+            console.log(`[NWST BatchScan] Computed dayCount ${result} from month+day "${dateStr}"`);
+            return result;
+        }
+    }
+
+    // ── Method 4: Written ordinals — "the Eleventh Month · Seventh Day"
+    // Handles formats like "Kin'yōbi, Shimotsuki, the Eleventh Month · Seventh Day"
+    // where month and day are written as words rather than digits.
+    //
+    // Strategy: Find the month index by looking for:
+    //   a) A custom month name from calendar config (e.g. "Shimotsuki")
+    //   b) An ordinal month pattern (e.g. "the Eleventh Month" → 11)
+    // Then find the day from ordinal day pattern (e.g. "Seventh Day" → 7)
+
+    let monthIndex = undefined;
+    let monthSource = '';
+
+    // 4a. Try custom month name match first (most specific)
+    const allMonthNames = Object.keys(monthMap).sort((a, b) => b.length - a.length); // longest first
+    for (const name of allMonthNames) {
+        const regex = new RegExp(`\\b${name.replace(/[^a-z0-9']/g, '')}\\b`, 'i');
+        if (regex.test(dateStr)) {
+            monthIndex = monthMap[name];
+            monthSource = `custom month "${name}"`;
+            break;
+        }
+    }
+
+    // 4b. If no custom month name found, try ordinal pattern "the Nth Month"
+    if (monthIndex === undefined) {
+        const ordinalMonth = extractOrdinalValue(dateStr, 'month');
+        if (ordinalMonth !== null) {
+            monthIndex = ordinalMonth - 1; // 0-based
+            monthSource = `ordinal "Month ${ordinalMonth}"`;
+        }
+    }
+
+    // 4c. If still no month, try numeric "Month N" pattern
+    if (monthIndex === undefined) {
+        const numMonth = dateStr.match(/\bMonth\s*(\d{1,2})\b/i);
+        if (numMonth) {
+            const m = parseInt(numMonth[1], 10);
+            if (m >= 1 && m <= 12) {
+                monthIndex = m - 1;
+                monthSource = `numeric "Month ${m}"`;
+            }
+        }
+    }
+
+    // Extract day from ordinal pattern "Nth Day"
+    let day = undefined;
+    const ordinalDay = extractOrdinalValue(dateStr, 'day');
+    if (ordinalDay !== null) {
+        day = ordinalDay;
+    }
+
+    // Also try numeric "Day N" pattern
+    if (day === undefined) {
+        const numDay = dateStr.match(/\bDay\s*(\d{1,2})\b/i);
+        if (numDay) {
+            const d = parseInt(numDay[1], 10);
+            if (d >= 1 && d <= 31) {
+                day = d;
+            }
+        }
+    }
+
+    if (monthIndex !== undefined && day !== undefined) {
+        const result = computeFromMonthDay(monthIndex, day);
+        if (result !== null) {
+            console.log(`[NWST BatchScan] Computed dayCount ${result} from ordinals "${dateStr}" (${monthSource}, day=${day})`);
+            return result;
         }
     }
 
@@ -461,7 +662,7 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
       "title": "FORWARD-FACING only. Ask: did this already happen in chat? If YES → DELETE it.",
       "description": "What is PROJECTED to happen NEXT. Future tense. NEVER a past-tense recap of chat content.",
       "tier": "immediate|week|month|undetermined",
-      "isNPC": false,
+      "isNPC": "true if NPC-driven (character struggles, relationships, backstory, decisions — NPC name appears in title/description), false if world/player-facing (factions, festivals, environment, rumors)",
       "scheduledDate": "REQUIRED when timing is clear — reference the dayCount above. Format: relative 'Day N+1' (story days) or absolute 'Month/Date' (calendar). OMIT for vague/uncertain timing — not all events need a pinned date."
     }
   ],
@@ -662,6 +863,23 @@ async function applyBatchResults(chatId, result) {
                 }
             }
         }
+
+        // ── Override season with configured value ────────────────────
+        // When the seasonal engine is active (mode 'auto' or 'static'), the
+        // computed season OVERRIDES whatever the LLM wrote for the season field
+        // (after basic normalization). The LLM writes evocative prose *about*
+        // that season — the engine is the authority. This ensures custom season
+        // names (e.g. "Haru 春") appear in the Current Day display instead of
+        // the LLM's default English name (e.g. "Spring").
+        if (result.currentDay.dayCount > 0) {
+            const seasonConfig = getSeasonConfig(chatId);
+            const computedSeason = computeSeason(result.currentDay.dayCount, seasonConfig);
+            if (computedSeason !== null && computedSeason !== undefined) {
+                result.currentDay.season = computedSeason;
+                console.log(`[NWST BatchScan] Overrode season with configured value: "${computedSeason}"`);
+            }
+        }
+
         await replaceCurrentDay(chatId, result.currentDay);
         nwstToast('Current Day block generated.', 'info');
     }

@@ -31,10 +31,11 @@ import {
     getMoonPhases,
     replaceCurrentDay,
     replaceMoonPhases,
-    getDayBoundarySnapshots
+    getDayBoundarySnapshots,
+    getSeasonConfig
 } from '../data/worldState.js';
 import { getEventsGroupedByTier } from '../data/events.js';
-import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getMoonPhenomena, getMoonPhaseNames, getMoonPhaseForAngle } from '../llm/dayAdvancement.js';
+import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getMoonPhenomena, getMoonPhaseNames, getMoonPhaseForAngle, computeSeason } from '../llm/dayAdvancement.js';
 import { executeTimeSkip } from '../llm/timeskip.js';
 import { synthesizeCurrentDay } from '../llm/currentDaySynth.js';
 
@@ -597,6 +598,18 @@ function refreshCurrentDayDisplay() {
     const chatId = getChatId();
     const day = getCurrentDay(chatId);
 
+    // ── Season display override ───────────────────────────────────
+    // When the seasonal engine is active (mode 'auto' or 'static'), the
+    // computed season from the configured seasonal calendar OVERRIDES
+    // whatever is stored in day.season. This ensures custom season names
+    // (e.g. "Haru 春") appear in the UI even if the stored data was
+    // written by the LLM before seasonal config was set up.
+    const seasonConfig = getSeasonConfig(chatId);
+    const computedSeason = computeSeason(day.dayCount || 0, seasonConfig);
+    const displaySeason = computedSeason !== null && computedSeason !== undefined
+        ? computedSeason
+        : day.season;
+
     // Update date fields in nav bar
     if (dateDisplay) dateDisplay.textContent = day.dateDisplay || '—';
     if (dateSub) dateSub.textContent = day.dateSub || '—';
@@ -613,8 +626,8 @@ function refreshCurrentDayDisplay() {
 
     // Build the rendered Current Day view (matching mockup's .md format)
     let html = '<ul>';
-    if (day.season) {
-        html += `<li><strong>Season</strong> ${escapeHTML(day.season)}</li>`;
+    if (displaySeason) {
+        html += `<li><strong>Season</strong> ${escapeHTML(displaySeason)}</li>`;
     }
     if (day.weatherToday) {
         html += `<li><strong>Weather today</strong> ${escapeHTML(day.weatherToday)}</li>`;

@@ -45,6 +45,8 @@ You must update ALL of the following:
 
 1. CURRENT DAY BLOCK: New date, new season, new weather, new moon phase appropriate to the new time period
 2. ALL EVENTS: Mark past-due events as resolved or missed. Update surviving events to correct tiers. Generate new events where the skip context warrants them. Adjust NPC events based on what would plausibly have occurred.
+
+CRITICAL — NPC vs User Events: Events driven by NPC characters (events about a character's internal struggle, personal relationships, backstory, or decisions) MUST have "isNPC": true. Events that are world-facing or player-facing (faction movements, festivals, environmental changes, rumors the player can investigate) should have "isNPC": false. When in doubt, if a specific NPC name appears in the title or description, set isNPC: true.
 3. WORLD CONDITIONS: Update political, social, spiritual, and environmental conditions to reflect what the skip duration and reason imply.
 4. NOTEBOOK: Update planted details, character whereabouts, offscreen pressures as appropriate for elapsed time. Remove items that would have resolved.
 
@@ -459,17 +461,37 @@ function parseTimeskipResponse(response) {
 async function applyEventUpdates(chatId, updates) {
     const events = getAllEvents(chatId);
 
+    // Track which event IDs the LLM explicitly addressed
+    const mentionedIds = new Set();
+
     // Mark resolved
     for (const id of (updates.resolved || [])) {
+        mentionedIds.add(id);
         const event = events.find(e => e.id === id);
         if (event) event.status = 'resolved';
     }
 
     // Mark missed
     for (const id of (updates.missed || [])) {
+        mentionedIds.add(id);
         const event = events.find(e => e.id === id);
         if (event) event.status = 'missed';
     }
+
+    // Auto-resolve any events the LLM did NOT explicitly mention.
+    // After a timeskip, time has passed — if the LLM didn't specifically
+    // address an event, it should be considered resolved rather than lingering.
+    for (const event of events) {
+        if (!mentionedIds.has(event.id) &&
+            event.status !== 'resolved' &&
+            event.status !== 'missed') {
+            event.status = 'resolved';
+        }
+    }
+
+    // Persist the modified events array (getAllEvents returns a deep clone,
+    // so modifications must be saved back explicitly)
+    await saveAllEvents(chatId, events);
 
     // Add new events
     for (const newEvent of (updates.newEvents || [])) {

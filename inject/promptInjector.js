@@ -19,7 +19,7 @@
 // =============================================================================
 
 import { getSettingContext, getCurrentDay, getForecast, getMoonPhases,
-         getEnabledConditions } from '../data/worldState.js';
+         getEnabledConditions, getSeasonConfig } from '../data/worldState.js';
 import { getActiveEvents, getEventsGroupedByTier } from '../data/events.js';
 import {
     isInjectCurrentDay, isInjectEvents, isInjectWorldConditions,
@@ -31,7 +31,7 @@ import { getChatId, getSetting } from '../index.js';
 // It checks which characters are in the current scene and injects only
 // the secrets whose whoKnows characters are scene-present.
 import { getSelectiveSecretInjection } from '../llm/narrativeConsistency.js';
-import { getLunarAngle, getDegreesPerDay, getMoonPhenomena } from '../llm/dayAdvancement.js';
+import { getLunarAngle, getDegreesPerDay, getMoonPhenomena, computeSeason } from '../llm/dayAdvancement.js';
 
 // ── Build the injection block ─────────────────────────────────────────────
 
@@ -97,10 +97,22 @@ export function buildInjectionBlock(chatId) {
 function buildCurrentDayBlock(day, chatId) {
     if (!day || (!day.dateDisplay && !day.season && !day.weatherToday)) return '';
 
+    // ── Season display override ───────────────────────────────────
+    // When the seasonal engine is active (mode 'auto' or 'static'), the
+    // computed season from the configured seasonal calendar OVERRIDES
+    // whatever is stored in day.season. This ensures custom season names
+    // (e.g. "Haru 春") appear in the prompt injection even if stored data
+    // was written by the LLM before seasonal config was set up.
+    const seasonConfig = getSeasonConfig(chatId);
+    const computedSeason = computeSeason(day.dayCount || 0, seasonConfig);
+    const displaySeason = computedSeason !== null && computedSeason !== undefined
+        ? computedSeason
+        : day.season;
+
     let block = '';
     if (day.dateDisplay) block += `Date: ${day.dateDisplay}\n`;
     if (day.dateSub) block += `Era: ${day.dateSub}\n`;
-    if (day.season) block += `Season: ${day.season}\n`;
+    if (displaySeason) block += `Season: ${displaySeason}\n`;
     if (day.weatherToday) block += `Weather: ${day.weatherToday}\n`;
     if (day.flora) block += `Flora: ${day.flora}\n`;
     if (day.fauna) block += `Fauna: ${day.fauna}\n`;

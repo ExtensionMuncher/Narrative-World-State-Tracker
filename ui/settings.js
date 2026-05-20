@@ -16,13 +16,13 @@
 import {
     isEnabled, setEnabled,
     isPaused, setPaused,
+    isDebugMode, setDebugMode,
     getConnectionProfiles, setConnectionProfile,
     getScanFrequency, setScanFrequency,
     getScanMinimumMessages, setScanMinimumMessages,
     getMaxSnapshotCount, setMaxSnapshotCount,
     getInjectionSettings, setInjectionSetting, getMaxActiveEvents,
     getSecretBudgetTokens, setSecretBudgetTokens,
-    getPlannerPrompt, setPlannerPrompt, resetPlannerPrompt, getDefaultPlannerPrompt,
     exportGlobalSettings, importGlobalSettings,
     exportChatData, importChatData,
     exportAll, importAll
@@ -441,29 +441,6 @@ export function buildSettingsTab() {
             </div>
         </div>
 
-        <!-- ── Planner Prompt ──────────────────────────────────── -->
-        <div class="nwst-accordion-section">
-            <div class="nwst-accordion-header" data-accordion="nwst-accordion-planner">
-                <div class="nwst-accordion-header-left">
-                    <span class="nwst-accordion-title">Planner prompt</span>
-                </div>
-                <span class="nwst-accordion-arrow">▶</span>
-            </div>
-            <div class="nwst-accordion-body" id="nwst-accordion-planner">
-                <div class="nwst-card">
-                    <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
-                        Customize how the planner LLM updates world state and generates events. <strong>This is the only user-editable prompt</strong> — all other LLM prompts (scanner, day advancement, event generation, time skip, batch scan, narrative consistency) are internal and not exposed.
-                    </div>
-                    <textarea id="nwst-setting-plannerPrompt" rows="4" style="margin-bottom:8px"></textarea>
-                    <div class="nwst-btn-row">
-                        <button class="menu_button nwst-btn" id="nwst-setting-importPrompt">Import</button>
-                        <button class="menu_button nwst-btn" id="nwst-setting-exportPrompt">Export</button>
-                        <button class="menu_button nwst-btn" id="nwst-setting-resetPrompt">Reset to default</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <!-- ── Batch Scan ──────────────────────────────────────── -->
         <div class="nwst-accordion-section">
             <div class="nwst-accordion-header" data-accordion="nwst-accordion-batchscan">
@@ -509,6 +486,14 @@ export function buildSettingsTab() {
                 <span class="nwst-accordion-arrow">▶</span>
             </div>
             <div class="nwst-accordion-body" id="nwst-accordion-debug">
+                <div class="nwst-setting-label" style="margin-bottom:4px">F12 Console Logging</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                    <label class="nwst-toggle" title="Enable verbose debug logging to the browser console (F12)">
+                        <input type="checkbox" id="nwst-debug-logging-toggle" ${isDebugMode() ? 'checked' : ''}>
+                        <span class="nwst-toggle-slider"></span>
+                    </label>
+                    <span style="font-size:11px;color:var(--SmartThemeBodyColor,#ddd)">Log detailed debug info to the F12 console</span>
+                </div>
                 <div class="nwst-setting-sub" style="margin-bottom:8px">Manual trigger buttons for testing LLM functions. These run immediately and may use API credits.</div>
                 <div class="nwst-btn-row" style="margin-top:4px">
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-secrets">🔍 Scan for secrets</button>
@@ -529,6 +514,14 @@ export function buildSettingsTab() {
                     <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
                         <span style="font-size:11px;color:var(--SmartThemeBodyColor,#ddd);flex:1">Or let the AI evaluate narrative context and assign priorities automatically:</span>
                         <button class="menu_button nwst-btn" id="nwst-debug-auto-priority" style="flex-shrink:0">🤖 AI Auto-Adjust</button>
+                    </div>
+                </div>
+                <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
+                    <div class="nwst-setting-label" style="margin-bottom:4px">Fix Day Count</div>
+                    <div class="nwst-setting-sub" style="margin-bottom:8px">Type the current date in <b>M/D</b> format (e.g. <b>1/12</b> or <b>5/31</b>) and click Set. The day count is computed from your Calendar Configuration's month lengths. No LLM call needed.</div>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="text" id="nwst-debug-daycount-input" placeholder="M/D (e.g. 1/12 or 5/31)" style="width:140px;font-size:11px;padding:3px 6px">
+                        <button class="menu_button nwst-btn" id="nwst-debug-detect-daycount">📅 Set Day</button>
                     </div>
                 </div>
             </div>
@@ -839,10 +832,6 @@ function populateSettingsUI() {
     if (depthInput) depthInput.value = inj.depth;
     const depthRole = document.getElementById('nwst-setting-depthRole');
     if (depthRole) depthRole.value = inj.depthRole;
-
-    // Planner prompt
-    const promptTextarea = document.getElementById('nwst-setting-plannerPrompt');
-    if (promptTextarea) promptTextarea.value = getPlannerPrompt();
 
     // Season configuration (per-chat)
     populateSeasonConfigUI();
@@ -1276,45 +1265,6 @@ function wireSettingsEvents() {
         });
     }
 
-    // ── Planner prompt ───────────────────────────────────────────
-    wireTextarea('nwst-setting-plannerPrompt', (val) => setPlannerPrompt(val));
-
-    // Import planner prompt from file
-    const importPromptBtn = document.getElementById('nwst-setting-importPrompt');
-    if (importPromptBtn) {
-        importPromptBtn.addEventListener('click', async () => {
-            triggerFileImport((text) => {
-                const textarea = document.getElementById('nwst-setting-plannerPrompt');
-                if (textarea) {
-                    textarea.value = text;
-                    setPlannerPrompt(text);
-                    nwstToast('Planner prompt imported.', 'success');
-                }
-            });
-        });
-    }
-
-    // Export planner prompt to file
-    const exportPromptBtn = document.getElementById('nwst-setting-exportPrompt');
-    if (exportPromptBtn) {
-        exportPromptBtn.addEventListener('click', async () => {
-            const prompt = getPlannerPrompt();
-            download(prompt, 'nwst-planner-prompt.txt', 'text/plain');
-            nwstToast('Planner prompt exported.', 'info');
-        });
-    }
-
-    // Reset planner prompt to default
-    const resetPromptBtn = document.getElementById('nwst-setting-resetPrompt');
-    if (resetPromptBtn) {
-        resetPromptBtn.addEventListener('click', async () => {
-            resetPlannerPrompt();
-            const textarea = document.getElementById('nwst-setting-plannerPrompt');
-            if (textarea) textarea.value = getPlannerPrompt();
-            nwstToast('Planner prompt reset to default.', 'info');
-        });
-    }
-
     // ── Batch scan ───────────────────────────────────────────────
     const batchScanBtn = document.getElementById('nwst-setting-batchScan');
     if (batchScanBtn) {
@@ -1385,6 +1335,17 @@ function wireSettingsEvents() {
             nwstToast('All NWST data cleared for this chat (Setting Context, Season Config, and Calendar Config preserved).', 'success');
             // Refresh the UI to reflect the cleared state
             populateSettingsUI();
+        });
+    }
+
+    // ── Debug: F12 Console Logging toggle ────────────────────────────────
+    const debugLoggingToggle = document.getElementById('nwst-debug-logging-toggle');
+    if (debugLoggingToggle) {
+        debugLoggingToggle.addEventListener('change', () => {
+            setDebugMode(debugLoggingToggle.checked);
+            nwstToast(debugLoggingToggle.checked
+                ? 'F12 console logging enabled. Check the browser console for debug output.'
+                : 'F12 console logging disabled.', 'info');
         });
     }
 
@@ -1656,6 +1617,84 @@ Analyze each secret carefully. Consider:
                 console.error('[NWST AutoPriority] Error during auto-adjust:', err);
                 nwstToast('AI Auto-Adjust failed with an unexpected error. Check console.', 'error');
             }
+        });
+    }
+
+    // ── Debug: Set Day Count from M/D input ─────────────────────────
+    // User types "1/12" or "5/31" → computes day-of-year from calendar config's monthDays → saves immediately
+    const debugDetectDayCount = document.getElementById('nwst-debug-detect-daycount');
+    const debugInput = document.getElementById('nwst-debug-daycount-input');
+    if (debugDetectDayCount && debugInput) {
+        // Also trigger on Enter key in the input field
+        debugInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') debugDetectDayCount.click();
+        });
+
+        debugDetectDayCount.addEventListener('click', async () => {
+            const chatId = getChatId();
+            if (!chatId) {
+                nwstToast('No active chat.', 'warning');
+                return;
+            }
+
+            const raw = debugInput.value.trim();
+            if (!raw) {
+                nwstToast('Please type a date in M/D format (e.g. 1/12 or 5/31).', 'warning');
+                return;
+            }
+
+            // Parse "M/D" → [month, day]
+            const parts = raw.split('/');
+            if (parts.length !== 2) {
+                nwstToast('Invalid format. Use M/D (e.g. 1/12 or 5/31).', 'warning');
+                return;
+            }
+
+            const month = parseInt(parts[0], 10);
+            const day = parseInt(parts[1], 10);
+
+            if (isNaN(month) || isNaN(day) || month < 1 || month > 12 || day < 1) {
+                nwstToast('Invalid date. Month must be 1–12 and day must be a positive number.', 'warning');
+                return;
+            }
+
+            // Get calendar config's monthDays (use standard as fallback)
+            const calendarConfig = getCalendarConfig(chatId);
+            const monthDays = calendarConfig?.monthDays || [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+            // Validate day against the selected month's max days
+            const maxDay = monthDays[month - 1];
+            if (!maxDay || day > maxDay) {
+                nwstToast(`Month ${month} has only ${maxDay || '?'} days. Day ${day} is out of range.`, 'warning');
+                return;
+            }
+
+            // Compute day-of-year: sum of preceding months' days + current day
+            let dayOfYear = 0;
+            for (let i = 0; i < month - 1; i++) {
+                dayOfYear += monthDays[i];
+            }
+            dayOfYear += day;
+
+            const currentDay = getCurrentDay(chatId);
+
+            // Save immediately
+            await updateCurrentDay(chatId, { ...currentDay, dayCount: dayOfYear, dayCountAutoSet: true });
+
+            // Clear input for next use
+            debugInput.value = '';
+
+            // Provide season feedback
+            const { computeSeason } = await import('../llm/dayAdvancement.js');
+            const seasonConfig = getSeasonConfig(chatId);
+            const computedSeason = computeSeason(dayOfYear, seasonConfig);
+            if (computedSeason) {
+                nwstToast(`Day count set to ${dayOfYear} (Month ${month}, Day ${day}). Season: ${computedSeason}.`, 'success');
+            } else {
+                nwstToast(`Day count set to ${dayOfYear} (Month ${month}, Day ${day}).`, 'success');
+            }
+
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
         });
     }
 

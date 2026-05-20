@@ -23,6 +23,7 @@ import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon } from '
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getPlannerPrompt, getScanFrequency } from '../settings.js';
+import { computeDayOfYearFromDate } from './batchScan.js';
 
 
 // ── Moon phase calculation (programmatic — no LLM involvement) ────────────
@@ -1254,12 +1255,13 @@ async function rollEventHorizonForward(chatId) {
     const events = getAllEvents(chatId);
     const currentDay = getCurrentDay(chatId);
     const dayCount = currentDay.dayCount || 0;
+    const calendarConfig = getCalendarConfig(chatId); // Needed for literal date parsing
     const changes = {};
 
     for (const event of events) {
         if (event.tier === 'immediate' && event.status === 'pending') {
             // ★ Check if this event has a future scheduledDate — protect it from rolling
-            if (event.scheduledDate && isFutureDated(event.scheduledDate, dayCount)) {
+            if (event.scheduledDate && isFutureDated(event.scheduledDate, dayCount, calendarConfig)) {
                 continue; // Event is scheduled for a future day — don't mark as missed
             }
             // Move pending immediate events to missed (they didn't happen today)
@@ -1286,18 +1288,17 @@ async function rollEventHorizonForward(chatId) {
  * @param {number} currentDayCount - The current story day number
  * @returns {boolean} true if the event is scheduled for a future day
  */
-function isFutureDated(scheduledDate, currentDayCount) {
-    // Parse range format first: "Day 104-110" — extract both start and end
+function isFutureDated(scheduledDate, currentDayCount, calendarConfig) {
+    // ── Strategy 1: Range format "Day 104-110" ─────────────────────────
     const rangeMatch = scheduledDate.match(/Day\s*(\d+)\s*–?\s*(\d+)/i);
     if (rangeMatch) {
-        const rangeStart = parseInt(rangeMatch[1], 10);
         const rangeEnd = parseInt(rangeMatch[2], 10);
         // Protect the event as long as the current day is within the range
         // or hasn't reached it yet. Only mark missed when past the range end.
         return currentDayCount <= rangeEnd;
     }
 
-    // Parse single "Day #" or "Day#" format
+    // ── Strategy 2: Single "Day #" format ──────────────────────────────
     const dayMatch = scheduledDate.match(/Day\s*(\d+)/i);
     if (dayMatch) {
         const eventDay = parseInt(dayMatch[1], 10);
@@ -1306,8 +1307,18 @@ function isFutureDated(scheduledDate, currentDayCount) {
         // advancing PAST Day 105 (to Day 106).
         return eventDay >= currentDayCount;
     }
-    // For other formats (e.g., "Month #/Day #"), we can't reliably compare
-    // without calendar config — fall through to normal rolling
+
+    // ── Strategy 3: Literal date format (e.g. "Shigatsu 15th", "April 15") ──
+    // Uses computeDayOfYearFromDate() which handles custom month names,
+    // ordinal suffixes (15th → 15), and calendar config's monthDays array.
+    if (calendarConfig) {
+        const eventDayOfYear = computeDayOfYearFromDate(scheduledDate, calendarConfig);
+        if (eventDayOfYear !== null && eventDayOfYear > 0) {
+            return eventDayOfYear >= currentDayCount;
+        }
+    }
+
+    // For unrecognised formats, fall through to normal rolling
     return false;
 }
 
