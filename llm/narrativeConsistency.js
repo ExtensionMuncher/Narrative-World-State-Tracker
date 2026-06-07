@@ -25,7 +25,7 @@
 //    - Does NOT intervene in the story — only flags
 // =============================================================================
 
-import { getChatId, nwstToast } from '../utils.js';;
+import { getChatId, nwstToast } from '../utils.js';
 import { getNotebook, getAllSecrets, addMysteryBullet, getMysteryField } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { isEnabled, isPaused, getSecretBudgetTokens } from '../settings.js';
@@ -248,7 +248,7 @@ export function getSelectiveSecretInjection(chatId) {
     if (injectedSecrets.length === 0) return '';
 
     // ── Build formatted block ─────────────────────────────────────────
-    let block = '\n[ACTIVE SECRETS — FOR INTERNAL USE ONLY]\n';
+    let block = '\n# ACTIVE SECRETS (FOR INTERNAL USE ONLY)\n';
     block += 'The following secrets are known by characters present in the current scene. ';
     block += 'Characters who do NOT know these secrets must not act on this information:\n';
 
@@ -264,7 +264,6 @@ export function getSelectiveSecretInjection(chatId) {
         }
     }
 
-    block += '\n[/ACTIVE SECRETS]\n';
 
     // ── Update lastInjectionMsgIndex (fire-and-forget) ────────────────
     // Save the message index so next invocation can apply cooldown/stale bonuses.
@@ -323,14 +322,31 @@ function detectSceneCharacters() {
     try {
         const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
-        // Look at the last 8 messages as "scene context"
         const recentCount = Math.min(15, chat.length);
         const recentMessages = chat.slice(-recentCount);
 
+        // Build a lookup of known character names from ST's character registry
+        const knownNames = buildKnownNameSet();
+
         const characters = new Set();
         for (const msg of recentMessages) {
+            // Direct speaker detection (unchanged)
             if (msg.name && !msg.is_user) {
                 characters.add(msg.name);
+            }
+
+            // ── Narrator-name parsing ────────────────────────────────
+            // For narration/system messages, scan the prose text for
+            // mentions of known character names.  This catches
+            // characters who are described acting but haven't spoken
+            // (e.g. "Lysander watches from the shadows" in a GM message).
+            if (msg.mes && knownNames.size > 0) {
+                const msgText = msg.mes.toLowerCase();
+                for (const knownName of knownNames) {
+                    if (msgText.includes(knownName.toLowerCase())) {
+                        characters.add(knownName);
+                    }
+                }
             }
         }
         return Array.from(characters);
@@ -338,6 +354,35 @@ function detectSceneCharacters() {
         console.warn('[NWST NarrativeConsistency] Error detecting scene characters:', e);
         return [];
     }
+}
+
+/**
+ * Build a set of known character names from ST's character registry.
+ * Combines character card names with any names seen in chat messages.
+ * @returns {Set<string>} Lowercase character names
+ */
+function buildKnownNameSet() {
+    const names = new Set();
+    try {
+        const ctx = SillyTavern.getContext();
+        // From ST's character array (character cards)
+        if (Array.isArray(ctx.characters)) {
+            for (const char of ctx.characters) {
+                if (char?.name) names.add(char.name);
+            }
+        }
+        // From chat messages (catches group members, NPC aliases, etc.)
+        const chat = ctx.chat || [];
+        for (const msg of chat) {
+            if (msg.name && !msg.is_user) {
+                names.add(msg.name);
+            }
+        }
+    } catch (e) {
+        // Fallback: empty set — narrator parsing won't run but direct
+        // speaker detection still works
+    }
+    return names;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -352,6 +397,7 @@ function detectSceneCharacters() {
  * @returns {Promise<boolean>} True if violations were found and flagged
  */
 export async function runConsistencyCheck() {
+    if (!isEnabled() || isPaused()) return false;
     const chatId = getChatId();
     if (!chatId) return false;
 

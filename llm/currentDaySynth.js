@@ -9,7 +9,7 @@
 // This transforms raw date/weather data into an atmospheric, narrative block.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../utils.js';;
+import { getChatId, nwstToast } from '../utils.js';
 import {
     getCurrentDay, updateCurrentDay, getForecast, getMoonPhases,
     getEnabledConditions, getSettingContext, getCalendarConfig

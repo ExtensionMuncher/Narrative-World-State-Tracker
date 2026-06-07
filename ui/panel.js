@@ -107,14 +107,25 @@ function refreshTab(tabName) {
 /**
  * Refresh all currently-built tabs with the new chat's data.
  * Called by index.js when the chat changes.
+ *
+ * Refreshes are debounced: if refreshAllUI() is called multiple times
+ * within 50ms, only the last call triggers actual tab refreshes.
+ * This prevents redundant full-tree re-renders when multiple async
+ * operations (scan, timeskip, day advance) complete simultaneously.
  */
+let _refreshAllTimer = null;
+
 function refreshAllUI() {
-    console.log('[NWST Panel] Refreshing all built tabs for new chat...');
-    for (const [tabName, isBuilt] of Object.entries(builtTabs)) {
-        if (isBuilt) {
-            refreshTab(tabName);
+    if (_refreshAllTimer) clearTimeout(_refreshAllTimer);
+    _refreshAllTimer = setTimeout(() => {
+        _refreshAllTimer = null;
+        console.log('[NWST Panel] Refreshing all built tabs for new chat...');
+        for (const [tabName, isBuilt] of Object.entries(builtTabs)) {
+            if (isBuilt) {
+                refreshTab(tabName);
+            }
         }
-    }
+    }, 50);
 }
 
 // Attach to window so index.js and LLM modules can call UI refreshes

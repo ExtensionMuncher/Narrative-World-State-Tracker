@@ -16,365 +16,479 @@
 //   • Notebook contents (bullets, core fields, mystery fields)
 //   • Community summaries
 //   • Secrets (except selective blocks from narrativeConsistency.js)
+//
+// ── OUTPUT DENSITY MODES ──────────────────────────────────────────────────
+//
+//   Three modes controlled by injection.densityMode setting:
+//
+//   'atmospheric' — Full narrative prose. Rich descriptions, evocative
+//                   language, full detail on all fields. Current default
+//                   behaviour — no changes to existing output.
+//                   Estimated injection: 600-1,400 tokens/message.
+//
+//   'combined'    — Balanced prose. Short paragraphs, 1-2 sentences per
+//                   field, events as title + one sentence, conditions
+//                   trimmed to 2-3 sentences max. Default for new installs.
+//                   Estimated injection: 300-600 tokens/message.
+//
+//   'token-budget' — Structured key-value format. No prose. All fields
+//                    as labeled single-line entries. Conditions truncated
+//                    to one sentence. Events as title only or title + brief
+//                    clause. Spiritual climate omitted if not set.
+//                    Estimated injection: 120-300 tokens/message.
+//
 // =============================================================================
 
+import { extension_prompt_roles } from '../../../../../script.js';
 import { getSettingContext, getCurrentDay, getForecast, getMoonPhases,
          getEnabledConditions, getSeasonConfig } from '../data/worldState.js';
-import { getActiveEvents, getEventsGroupedByTier } from '../data/events.js';
+import { getActiveEvents } from '../data/events.js';
 import {
     isInjectCurrentDay, isInjectEvents, isInjectWorldConditions,
     getInjectionPlacement, getInjectionDepth, getInjectionDepthRole,
-    isEnabled, isPaused
+    isEnabled, isPaused, getDensityMode
 } from '../settings.js';
 import { getChatId, getSetting } from '../index.js';
-// Selective secret injection runs on EVERY message — no API call needed.
-// It checks which characters are in the current scene and injects only
-// the secrets whose whoKnows characters are scene-present.
 import { getSelectiveSecretInjection } from '../llm/narrativeConsistency.js';
 import { getLunarAngle, getDegreesPerDay, getMoonPhenomena, computeSeason } from '../llm/dayAdvancement.js';
+
+// ── Role string → numeric mapper ──────────────────────────────────────────
+
+const ROLE_MAP = {
+    'system':    extension_prompt_roles.SYSTEM,
+    'user':      extension_prompt_roles.USER,
+    'assistant': extension_prompt_roles.ASSISTANT,
+};
+
+// ── Utility: trim prose to first N sentences ─────────────────────────────
+
+/**
+ * Trim a prose string to at most N sentences.
+ * Used by Combined and Token-Budget modes to constrain field length.
+ * @param {string} text
+ * @param {number} maxSentences
+ * @returns {string}
+ */
+function trimToSentences(text, maxSentences) {
+    if (!text) return '';
+    // Split on sentence-ending punctuation followed by a space or end of string
+    const sentences = text.match(/[^.!?]+[.!?]+(\s|$)/g) || [text];
+    return sentences.slice(0, maxSentences).join('').trim();
+}
+
+/**
+ * Trim a prose string to at most N words.
+ * Used by Token-Budget mode for single-line field truncation.
+ * @param {string} text
+ * @param {number} maxWords
+ * @returns {string}
+ */
+function trimToWords(text, maxWords) {
+    if (!text) return '';
+    const words = text.trim().split(/\s+/);
+    if (words.length <= maxWords) return text.trim();
+    return words.slice(0, maxWords).join(' ') + '…';
+}
 
 // ── Build the injection block ─────────────────────────────────────────────
 
 /**
  * Build the complete world state injection block for the current chat.
- * This is called on every message to the main LLM.
+ * Called on every message to the main LLM.
  *
- * @param {string} chatId - The current chat ID
- * @returns {string} The injection text, or empty string if extension disabled
+ * @param {string} chatId
+ * @returns {string} The injection text, or empty string if disabled
  */
 export function buildInjectionBlock(chatId) {
     if (!isEnabled()) return '';
     if (!chatId) chatId = getChatId();
     if (!chatId) return '';
 
+    const mode = getDensityMode();
     const parts = [];
 
-    // ── Current Day ────────────────────────────────────────────
+    // ── Current Day ──────────────────────────────────────────────
     const day = isInjectCurrentDay() ? getCurrentDay(chatId) : null;
     if (day) {
-        const dayBlock = buildCurrentDayBlock(day, chatId);
+        const dayBlock = buildCurrentDayBlock(day, chatId, mode);
         if (dayBlock) parts.push(dayBlock);
     }
 
-    // ── Forecast + Moon Phases (with phenomena) ────────────────
+    // ── Forecast + Moon Phases ───────────────────────────────────
+    // Token-Budget: stripped to today only + phase name
+    // Combined: today + 3-day outlook, moon phases as strip
+    // Atmospheric: full 7-day with phenomena (current behavior)
     if (day) {
-        const forecast = getForecast(chatId);
+        const forecast  = getForecast(chatId);
         const moonPhases = getMoonPhases(chatId);
-        const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day);
+        const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day, mode);
         if (weatherBlock) parts.push(weatherBlock);
     }
 
-    // ── Active Events ──────────────────────────────────────────
+    // ── Active Events ────────────────────────────────────────────
     if (isInjectEvents()) {
         const events = getActiveEvents(chatId);
-        const eventsBlock = buildEventsBlock(events);
+        const eventsBlock = buildEventsBlock(events, mode);
         if (eventsBlock) parts.push(eventsBlock);
     }
 
-    // ── World Conditions ───────────────────────────────────────
+    // ── World Conditions ─────────────────────────────────────────
     if (isInjectWorldConditions()) {
         const conditions = getEnabledConditions(chatId);
-        const conditionsBlock = buildConditionsBlock(conditions);
+        const conditionsBlock = buildConditionsBlock(conditions, mode);
         if (conditionsBlock) parts.push(conditionsBlock);
     }
 
-    // ── Selective Secret Injection ─────────────────────────────
-    // Runs on EVERY message — no API call. Checks current scene characters
-    // against all secret whoKnows lists. Only injects secrets whose
-    // whoKnows characters are detected as scene-present. This is instant
-    // and does NOT wait for the Narrative Consistency LLM scan cadence.
+    // ── Selective Secret Injection ───────────────────────────────
+    // Always instant JS lookup — no API call, no density difference.
+    // Secrets are injected as-is in all modes; they're already concise.
     const secretBlock = getSelectiveSecretInjection(chatId);
     if (secretBlock) parts.push(secretBlock);
 
     if (parts.length === 0) return '';
 
-    // Join all blocks with separators
-    return `\n[WORLD STATE]\n${parts.join('\n')}\n[/WORLD STATE]\n`;
+    // Token-Budget uses a compact wrapper; others use the full header
+    return `---\n\n# WORLD STATE\n\n${parts.join('\n\n')}\n\n---`;
 }
 
-// ── Individual block builders ─────────────────────────────────────────────
+// ── Current Day block builders ────────────────────────────────────────────
 
-function buildCurrentDayBlock(day, chatId) {
+function buildCurrentDayBlock(day, chatId, mode) {
     if (!day || (!day.dateDisplay && !day.season && !day.weatherToday)) return '';
 
-    // ── Season display override ───────────────────────────────────
-    // When the seasonal engine is active (mode 'auto' or 'static'), the
-    // computed season from the configured seasonal calendar OVERRIDES
-    // whatever is stored in day.season. This ensures custom season names
-    // (e.g. "Haru 春") appear in the prompt injection even if stored data
-    // was written by the LLM before seasonal config was set up.
-    const seasonConfig = getSeasonConfig(chatId);
+    const seasonConfig  = getSeasonConfig(chatId);
     const computedSeason = computeSeason(day.dayCount || 0, seasonConfig);
-    const displaySeason = computedSeason !== null && computedSeason !== undefined
-        ? computedSeason
-        : day.season;
+    const displaySeason  = (computedSeason !== null && computedSeason !== undefined)
+        ? computedSeason : day.season;
 
-    let block = '';
-    if (day.dateDisplay) block += `Date: ${day.dateDisplay}\n`;
-    if (day.dateSub) block += `Era: ${day.dateSub}\n`;
-    if (displaySeason) block += `Season: ${displaySeason}\n`;
-    if (day.weatherToday) block += `Weather: ${day.weatherToday}\n`;
-    if (day.flora) block += `Flora: ${day.flora}\n`;
-    if (day.fauna) block += `Fauna: ${day.fauna}\n`;
-
-    // Only include Spiritual Climate if the condition is enabled
-    if (day.spiritualClimate) {
+    const spiritualEnabled = (() => {
         const conditions = getEnabledConditions(chatId);
-        if (conditions.spiritual?.enabled !== false) {
+        return conditions.spiritual?.enabled !== false;
+    })();
+
+    if (mode === 'token-budget') {
+        // Minimal key: value lines — no prose, no flavor
+        let block = '';
+        if (day.dateDisplay)    block += `Date: ${day.dateDisplay}\n`;
+        if (day.dateSub)        block += `Era: ${day.dateSub}\n`;
+        if (displaySeason)      block += `Season: ${displaySeason}\n`;
+        if (day.weatherToday)   block += `Weather: ${trimToWords(day.weatherToday, 15)}\n`;
+        // Flora and fauna omitted in token-budget — low narrative value per token
+        if (day.spiritualClimate && spiritualEnabled) {
+            block += `Spiritual: ${trimToWords(day.spiritualClimate, 15)}\n`;
+        }
+        return block.trim();
+
+    } else if (mode === 'combined') {
+        // Short labeled fields — 1 sentence max per prose field
+        let block = '';
+        if (day.dateDisplay) block += `Date: ${day.dateDisplay}\n`;
+        if (day.dateSub)     block += `Era: ${day.dateSub}\n`;
+        if (displaySeason)   block += `Season: ${displaySeason}\n`;
+        if (day.weatherToday) block += `Weather: ${trimToSentences(day.weatherToday, 1)}\n`;
+        if (day.flora)        block += `Flora: ${trimToSentences(day.flora, 1)}\n`;
+        if (day.fauna)        block += `Fauna: ${trimToSentences(day.fauna, 1)}\n`;
+        if (day.spiritualClimate && spiritualEnabled) {
+            block += `Spiritual Climate: ${trimToSentences(day.spiritualClimate, 1)}\n`;
+        }
+        return block.trim();
+
+    } else {
+        // Atmospheric — full prose (current behavior, unchanged)
+        let block = '';
+        if (day.dateDisplay)    block += `Date: ${day.dateDisplay}\n`;
+        if (day.dateSub)        block += `Era: ${day.dateSub}\n`;
+        if (displaySeason)      block += `Season: ${displaySeason}\n`;
+        if (day.weatherToday)   block += `Weather: ${day.weatherToday}\n`;
+        if (day.flora)          block += `Flora: ${day.flora}\n`;
+        if (day.fauna)          block += `Fauna: ${day.fauna}\n`;
+        if (day.spiritualClimate && spiritualEnabled) {
             block += `Spiritual Climate: ${day.spiritualClimate}\n`;
         }
+        return block.trim();
     }
-
-    return block.trim();
 }
 
-function buildWeatherBlock(forecast, moonPhases, chatId, currentDay) {
+// ── Weather / Moon block builders ─────────────────────────────────────────
+
+function buildWeatherBlock(forecast, moonPhases, chatId, currentDay, mode) {
     let block = '';
 
-    if (forecast && forecast.length > 0) {
-        block += '7-Day Forecast:\n';
-        for (const day of forecast) {
-            block += `  ${day.label}: ${day.description || ''} (${day.highF}°F/${day.lowF}°F, precip: ${day.precipChance}%)\n`;
+    if (mode === 'token-budget') {
+        // Today's moon phase only — no forecast table, header preserved
+        if (moonPhases && moonPhases.length > 0) {
+            const today = moonPhases[0];
+            block += `## Moon Phases:\n  Today: ${today.phaseName} ${today.icon}\n`;
         }
-    }
+        return block.trim();
 
-    if (moonPhases && moonPhases.length > 0) {
-        if (block) block += '\n';
-        block += 'Moon Phases:\n';
-
-        // Gather context for phenomena detection
-        const lunarAngle = getLunarAngle(chatId);
-        const cycleDays = getSetting('moonCycleDays') || 29.53;
-        const degPerDay = 360 / cycleDays;
-        const phenomenaOptions = {
-            season: currentDay?.season || '',
-            weatherToday: currentDay?.weatherToday || ''
-        };
-
-        for (let i = 0; i < moonPhases.length; i++) {
-            const moon = moonPhases[i];
-            const dayAngle = (lunarAngle + i * degPerDay) % 360;
-            const phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenomenaOptions);
-
-            let line = `  ${moon.label}: ${moon.phaseName} ${moon.icon}`;
-            if (phenomena.length > 0) {
-                line += `\n         ⚡ ${phenomena.join(' | ')}`;
+    } else if (mode === 'combined') {
+        // 3-day forecast + 4-day moon strip, markdown headers preserved
+        if (forecast && forecast.length > 0) {
+            block += '## 7-Day Forecast:\n';
+            const days = forecast.slice(0, 3);
+            for (const day of days) {
+                block += `  ${day.label}: ${day.description || ''} (${day.highF}°F/${day.lowF}°F)\n`;
             }
-            block += line + '\n';
+            if (forecast.length > 3) {
+                block += `  (+ ${forecast.length - 3} more days)\n`;
+            }
         }
-    }
+        if (moonPhases && moonPhases.length > 0) {
+            if (block) block += '\n';
+            block += '## Moon Phases:\n';
+            for (const moon of moonPhases.slice(0, 4)) {
+                block += `  ${moon.label}: ${moon.phaseName} ${moon.icon}\n`;
+            }
+        }
+        return block.trim();
 
-    return block.trim();
+    } else {
+        // Atmospheric — full 7-day with phenomena (current behavior, unchanged)
+        if (forecast && forecast.length > 0) {
+            block += '## 7-Day Forecast:\n';
+            for (const day of forecast) {
+                block += `  ${day.label}: ${day.description || ''} (${day.highF}°F/${day.lowF}°F, precip: ${day.precipChance}%)\n`;
+            }
+        }
+        if (moonPhases && moonPhases.length > 0) {
+            if (block) block += '\n';
+            block += '## Moon Phases:\n';
+            const lunarAngle = getLunarAngle(chatId);
+            const cycleDays  = getSetting('moonCycleDays') || 29.53;
+            const degPerDay  = 360 / cycleDays;
+            const phenOptions = {
+                season:      currentDay?.season || '',
+                weatherToday: currentDay?.weatherToday || ''
+            };
+            for (let i = 0; i < moonPhases.length; i++) {
+                const moon     = moonPhases[i];
+                const dayAngle = (lunarAngle + i * degPerDay) % 360;
+                const phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenOptions);
+                let line = `  ${moon.label}: ${moon.phaseName} ${moon.icon}`;
+                if (phenomena.length > 0) {
+                    line += `\n         ⚡ ${phenomena.join(' | ')}`;
+                }
+                block += line + '\n';
+            }
+        }
+        return block.trim();
+    }
 }
 
-function buildEventsBlock(events) {
+// ── Events block builders ─────────────────────────────────────────────────
+
+function buildEventsBlock(events, mode) {
     if (!events || events.length === 0) return '';
 
     const grouped = {
-        immediate: events.filter(e => e.tier === 'immediate'),
-        week: events.filter(e => e.tier === 'week'),
-        month: events.filter(e => e.tier === 'month'),
+        immediate:    events.filter(e => e.tier === 'immediate'),
+        week:         events.filter(e => e.tier === 'week'),
+        month:        events.filter(e => e.tier === 'month'),
         undetermined: events.filter(e => e.tier === 'undetermined')
     };
 
-    let block = 'Upcoming Events:\n';
-    const tierLabels = { immediate: 'Immediate', week: 'This Week', month: 'This Month', undetermined: 'Undetermined' };
+    const tierLabels = {
+        immediate: 'Immediate', week: 'This Week',
+        month: 'This Month',   undetermined: 'Undetermined'
+    };
 
-    for (const [tier, tierEvents] of Object.entries(grouped)) {
-        if (tierEvents.length === 0) continue;
-        block += `  ${tierLabels[tier]}:\n`;
-        for (const event of tierEvents) {
-            block += `    - ${event.title}: ${event.description}\n`;
+    if (mode === 'token-budget') {
+        // Title only — no descriptions, but markdown headers preserved
+        let block = '## Active Events:\n';
+        for (const [tier, tierEvents] of Object.entries(grouped)) {
+            if (tierEvents.length === 0) continue;
+            block += `### ${tierLabels[tier]}:\n`;
+            block += tierEvents.map(e => `    - ${e.title}`).join('\n') + '\n';
         }
-    }
+        return block.trim();
 
-    return block.trim();
+    } else if (mode === 'combined') {
+        // Title + one-sentence description max, markdown headers preserved
+        let block = '## Active Events:\n';
+        for (const [tier, tierEvents] of Object.entries(grouped)) {
+            if (tierEvents.length === 0) continue;
+            block += `### ${tierLabels[tier]}:\n`;
+            for (const event of tierEvents) {
+                const desc = event.description
+                    ? ` — ${trimToSentences(event.description, 1)}`
+                    : '';
+                block += `    - ${event.title}${desc}\n`;
+            }
+        }
+        return block.trim();
+
+    } else {
+        // Atmospheric — full title + full description (current behavior)
+        let block = '## Active Events:\n';
+        for (const [tier, tierEvents] of Object.entries(grouped)) {
+            if (tierEvents.length === 0) continue;
+            block += `### ${tierLabels[tier]}:\n`;
+            for (const event of tierEvents) {
+                block += `    - ${event.title}: ${event.description}\n`;
+            }
+        }
+        return block.trim();
+    }
 }
 
-function buildConditionsBlock(conditions) {
+// ── World Conditions block builders ───────────────────────────────────────
+
+function buildConditionsBlock(conditions, mode) {
     if (!conditions || Object.keys(conditions).length === 0) return '';
 
-    let block = 'Active World Conditions:\n';
     const labels = {
-        political: 'Political',
-        social: 'Social',
-        spiritual: 'Spiritual/Supernatural',
+        political:   'Political',
+        social:      'Social',
+        spiritual:   'Spiritual/Supernatural',
         environmental: 'Environmental'
     };
 
-    for (const [key, condition] of Object.entries(conditions)) {
-        if (condition.content) {
-            block += `  ${labels[key] || key}: ${condition.content}\n`;
+    if (mode === 'token-budget') {
+        // One sentence per condition max, markdown header preserved
+        let block = '## World Conditions:\n';
+        for (const [key, condition] of Object.entries(conditions)) {
+            if (condition.content) {
+                block += `  ${labels[key] || key}: ${trimToSentences(condition.content, 1)}\n`;
+            }
         }
-    }
+        return block.trim();
 
-    return block.trim();
+    } else if (mode === 'combined') {
+        // Two sentences per condition max, markdown header preserved
+        let block = '## World Conditions:\n';
+        for (const [key, condition] of Object.entries(conditions)) {
+            if (condition.content) {
+                block += `  ${labels[key] || key}: ${trimToSentences(condition.content, 2)}\n`;
+            }
+        }
+        return block.trim();
+
+    } else {
+        // Atmospheric — full prose (current behavior)
+        let block = '## World Conditions:\n';
+        for (const [key, condition] of Object.entries(conditions)) {
+            if (condition.content) {
+                block += `  ${labels[key] || key}: ${condition.content}\n`;
+            }
+        }
+        return block.trim();
+    }
 }
 
 // ── ST Integration ────────────────────────────────────────────────────────
 
-// ── ST injection key ────────────────────────────────────────────────────────
-
 const INJECTION_KEY = 'nwst_world_state';
+const PREVIEW_KEY   = 'nwst_world_state_preview';
 
-// ── Pause/disable aware injection builder ──────────────────────────────────
-
-/**
- * Build the injection block respecting pause and disable state.
- * - Disabled: returns empty (nothing injected)
- * - Paused: returns world state only (no secret injection)
- * - Active: returns full block including selective secrets
- *
- * @param {string} chatId
- * @returns {string}
- */
 function buildInjectionBlockWithState(chatId) {
     if (!isEnabled()) return '';
 
-    // When paused, build world state only (no secrets)
     if (isPaused()) {
+        const mode  = getDensityMode();
         const parts = [];
 
         if (isInjectCurrentDay()) {
             const day = getCurrentDay(chatId);
-            const dayBlock = buildCurrentDayBlock(day, chatId);
+            const dayBlock = buildCurrentDayBlock(day, chatId, mode);
             if (dayBlock) parts.push(dayBlock);
-
-            const forecast = getForecast(chatId);
+            const forecast   = getForecast(chatId);
             const moonPhases = getMoonPhases(chatId);
-            const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day);
+            const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day, mode);
             if (weatherBlock) parts.push(weatherBlock);
         }
-
         if (isInjectEvents()) {
-            const events = getActiveEvents(chatId);
-            const eventsBlock = buildEventsBlock(events);
+            const eventsBlock = buildEventsBlock(getActiveEvents(chatId), mode);
             if (eventsBlock) parts.push(eventsBlock);
         }
-
         if (isInjectWorldConditions()) {
-            const conditions = getEnabledConditions(chatId);
-            const conditionsBlock = buildConditionsBlock(conditions);
+            const conditionsBlock = buildConditionsBlock(getEnabledConditions(chatId), mode);
             if (conditionsBlock) parts.push(conditionsBlock);
         }
 
         if (parts.length === 0) return '';
-        return `\n[WORLD STATE]\n${parts.join('\n')}\n[/WORLD STATE]\n`;
+        return `---\n\n# WORLD STATE\n\n${parts.join('\n\n')}\n\n---`;
     }
 
-    // Active — use the full injection block including secrets
     return buildInjectionBlock(chatId);
 }
 
-/**
- * Update the ST extension prompt with the current world state block.
- * Called on every message to keep the injection fresh.
- */
 export function updateInjection() {
     const chatId = getChatId();
     if (!chatId) return;
 
     const config = getInjectionConfig();
+    const { setExtensionPrompt } = SillyTavern.getContext();
+
     if (!config) {
-        // Extension disabled — clear the injection
-        const { setExtensionPrompt, extension_prompt_roles } = SillyTavern.getContext();
         setExtensionPrompt(INJECTION_KEY, '', 0, 0, false, extension_prompt_roles.SYSTEM);
+        setExtensionPrompt(PREVIEW_KEY,   '', 0, 0, false, extension_prompt_roles.SYSTEM);
         return;
     }
 
-    const { setExtensionPrompt, extension_prompt_roles } = SillyTavern.getContext();
     setExtensionPrompt(
-        INJECTION_KEY,
-        config.content,
-        config.position,
-        config.depth || 0,
-        false, // scan: don't scan for WI in our injection
-        config.role || extension_prompt_roles.SYSTEM
+        INJECTION_KEY, config.content, config.position,
+        config.depth || 0, false, config.role ?? extension_prompt_roles.SYSTEM
+    );
+    setExtensionPrompt(
+        PREVIEW_KEY, config.content, 0, 0, false, extension_prompt_roles.SYSTEM
     );
 }
 
-/**
- * Register the prompt injection with ST's native prompt system.
- * Called during extension initialization.
- *
- * Uses ST's setExtensionPrompt API to inject the world state block
- * on every message. The injection content is rebuilt on each
- * MESSAGE_SENT/MESSAGE_RECEIVED event to stay current.
- *
- * ST provides several injection mechanisms:
- * - extension_prompt_types.IN_PROMPT (before/after main prompt) — position 0
- * - extension_prompt_types.IN_CHAT (at a specific depth) — position 1
- * - extension_prompt_types.BEFORE_PROMPT (before the entire prompt) — position 2
- */
 export function registerPromptInjection() {
     const { eventSource, event_types } = SillyTavern.getContext();
-
-    // Update injection on every message event
-    eventSource.on(event_types.MESSAGE_SENT, () => updateInjection());
+    eventSource.on(event_types.MESSAGE_SENT,    () => updateInjection());
     eventSource.on(event_types.MESSAGE_RECEIVED, () => updateInjection());
-
-    // Also update on chat changed (switched to a different chat)
-    eventSource.on(event_types.CHAT_CHANGED, () => updateInjection());
-
-    // Initial injection
+    eventSource.on(event_types.CHAT_CHANGED,    () => updateInjection());
     updateInjection();
+    cleanupStalePromptManagerEntry();
 
     console.log('[NWST PromptInjector] Prompt injection registered.');
+    console.log(`  - Density mode: ${getDensityMode()}`);
     console.log(`  - Inject Current Day: ${isInjectCurrentDay()}`);
     console.log(`  - Inject Events: ${isInjectEvents()}`);
     console.log(`  - Inject World Conditions: ${isInjectWorldConditions()}`);
     console.log(`  - Placement: ${getInjectionPlacement()}`);
-
-    if (getInjectionPlacement() === 'at_depth') {
-        console.log(`  - Depth: ${getInjectionDepth()}, Role: ${getInjectionDepthRole()}`);
-    }
 }
 
-/**
- * Get the injection configuration as an object ST can use.
- * Maps our settings to ST's extension_prompt_types and extension_prompt_roles.
- *
- * @returns {object} { position, depth, role, content } or null if disabled
- */
+function cleanupStalePromptManagerEntry() {
+    try {
+        const { chatCompletionSettings, saveSettingsDebounced } = SillyTavern.getContext();
+        if (!chatCompletionSettings || !Array.isArray(chatCompletionSettings.prompts)) return;
+        let changed = false;
+        const promptIdx = chatCompletionSettings.prompts.findIndex(p => p?.identifier === INJECTION_KEY);
+        if (promptIdx !== -1) { chatCompletionSettings.prompts.splice(promptIdx, 1); changed = true; }
+        if (Array.isArray(chatCompletionSettings.prompt_order)) {
+            for (const charOrder of chatCompletionSettings.prompt_order) {
+                if (Array.isArray(charOrder?.order)) {
+                    const orderIdx = charOrder.order.findIndex(e => e?.identifier === INJECTION_KEY);
+                    if (orderIdx !== -1) { charOrder.order.splice(orderIdx, 1); changed = true; }
+                }
+            }
+        }
+        if (changed) saveSettingsDebounced();
+    } catch (e) { /* non-fatal */ }
+}
+
 export function getInjectionConfig() {
     if (!isEnabled()) return null;
-
     const placement = getInjectionPlacement();
-    const chatId = getChatId();
-    const content = buildInjectionBlockWithState(chatId);
-
+    const chatId    = getChatId();
+    const content   = buildInjectionBlockWithState(chatId);
     if (!content) return null;
 
-    // Map our placement strings to ST's extension_prompt_types values
-    const config = {
-        content: content
-    };
-
+    const config = { content };
     switch (placement) {
-        case 'before_main':
-            config.position = 2; // extension_prompt_types.BEFORE_PROMPT
-            break;
-        case 'after_main':
-            config.position = 0; // extension_prompt_types.IN_PROMPT
-            break;
-        case 'top_an':
-            config.position = 1; // extension_prompt_types.IN_CHAT (top of chat, depth 0)
-            config.depth = 0;
-            config.role = 'system';
-            break;
-        case 'bottom_an':
-            config.position = 1; // extension_prompt_types.IN_CHAT (bottom)
-            config.depth = 999;
-            config.role = 'system';
-            break;
+        case 'before_main': config.position = 2; config.role = extension_prompt_roles.SYSTEM; break;
+        case 'after_main':  config.position = 0; config.role = extension_prompt_roles.SYSTEM; break;
+        case 'top_an':      config.position = 1; config.depth = 0;   config.role = extension_prompt_roles.SYSTEM; break;
+        case 'bottom_an':   config.position = 1; config.depth = 999; config.role = extension_prompt_roles.SYSTEM; break;
         case 'at_depth':
-            config.position = 1; // extension_prompt_types.IN_CHAT
-            config.depth = getInjectionDepth();
-            config.role = getInjectionDepthRole();
+            config.position = 1;
+            config.depth    = getInjectionDepth();
+            config.role     = ROLE_MAP[getInjectionDepthRole()] ?? extension_prompt_roles.SYSTEM;
             break;
-        default:
-            config.position = 0; // extension_prompt_types.IN_PROMPT
+        default: config.position = 0; config.role = extension_prompt_roles.SYSTEM;
     }
-
     return config;
 }

@@ -16,8 +16,10 @@ import { getChatId, nwstToast } from '../index.js';
 import {
     getAllEvents,
     addEvent, updateEvent, deleteEvent, setEventStatus,
-    getEventsGroupedByTier
+    getEventsGroupedByTier,
+    promoteEventToSecret
 } from '../data/events.js';
+import { getAllSecrets } from '../data/notebook.js';
 import { regenerateAllEvents, regenerateTierEvents } from '../llm/eventGen.js';
 
 // ── Build the Events tab HTML ─────────────────────────────────────────────
@@ -102,6 +104,17 @@ function buildEventItemHTML(event) {
     const isOpen = false; // All events default to collapsed
     const openClass = isOpen ? ' nwst-open' : '';
 
+    // Show promoted badge in header if event was promoted to a secret
+    const promotedBadge = event.promotedSecretId
+        ? '<span class="nwst-badge nwst-badge-promoted" title="Promoted to secret">🔒 Secret</span>'
+        : '';
+
+    // Show promote button only for resolved/missed events that haven't been promoted yet
+    const canPromote = (event.status === 'resolved' || event.status === 'missed') && !event.promotedSecretId;
+    const promoteBtn = canPromote
+        ? `<button class="menu_button nwst-btn nwst-events-promote" style="font-size:11px;color:#6a9fb5" title="Promote this event to a Notebook secret with whoKnows/whoDoesNotKnow tracking">🔒 Promote to Secret</button>`
+        : '';
+
     return `
     <div class="nwst-event-item${openClass}" data-event-id="${event.id}">
         <div class="nwst-event-item-hdr nwst-events-toggle">
@@ -111,6 +124,7 @@ function buildEventItemHTML(event) {
             <span class="nwst-badge nwst-badge-${event.tier}">${capitalize(event.tier)}</span>
             ${event.isNPC ? '<span class="nwst-badge nwst-badge-npc">NPC</span>' : ''}
             <span class="nwst-badge nwst-badge-${event.status}">${statusLabel(event.status)}</span>
+            ${promotedBadge}
         </div>
         <div class="nwst-event-body">
             <div style="margin-bottom:6px">
@@ -138,6 +152,13 @@ function buildEventItemHTML(event) {
                     <span style="font-size:10px;color:#bbb">NPC events bypass the pool cap</span>
                 </div>
             </div>
+            <!-- Participants field — who is involved in or aware of this event -->
+            <div style="margin-bottom:8px">
+                <div style="font-size:11px;color:#999;margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">
+                    Participants <span style="color:#ccc;font-weight:normal;text-transform:none">(comma-separated character names)</span>
+                </div>
+                <input type="text" class="nwst-events-participants" value="${escapeHTML((event.participants || []).join(', '))}" style="width:100%;font-size:13px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;" placeholder="e.g. Seraphina, Kaelen, Lysander">
+            </div>
             <textarea class="nwst-events-desc" rows="2" style="margin-bottom:8px" id="nwst-event-desc-${event.id}">${escapeHTML(event.description)}</textarea>
             <div style="font-size:11px;color:#999;margin-bottom:6px">Status</div>
             <div class="nwst-btn-row nwst-events-status-btns" style="margin-bottom:10px">
@@ -146,6 +167,7 @@ function buildEventItemHTML(event) {
                 <button class="menu_button nwst-btn nwst-events-status${event.status === 'resolved' ? ' nwst-status-active' : ''}" data-status="resolved" style="font-size:11px">Resolved</button>
                 <button class="menu_button nwst-btn nwst-events-status${event.status === 'missed' ? ' nwst-status-active' : ''}" data-status="missed" style="font-size:11px">Missed</button>
             </div>
+            ${promoteBtn ? `<div class="nwst-btn-row" style="margin-bottom:8px">${promoteBtn}</div>` : ''}
             <div class="nwst-btn-row">
                 <button class="menu_button nwst-btn nwst-events-save">Save</button>
                 <button class="menu_button nwst-btn-danger nwst-events-delete">Delete</button>
@@ -331,6 +353,7 @@ function wireEventItemEvents() {
 
             const scheduledInput = item.querySelector('.nwst-events-scheduled');
             const npcCheckbox = item.querySelector('.nwst-events-isnpc');
+            const participantsInput = item.querySelector('.nwst-events-participants');
 
             const updates = {};
             if (descTextarea) updates.description = descTextarea.value;
@@ -342,6 +365,13 @@ function wireEventItemEvents() {
                 updates.isNPC = isNPC;
                 updates.npcOrigin = isNPC ? 'generated' : null;
             }
+            // Parse participants from comma-separated string
+            if (participantsInput) {
+                const raw = participantsInput.value.trim();
+                updates.participants = raw
+                    ? raw.split(',').map(s => s.trim()).filter(Boolean)
+                    : [];
+            }
 
             if (Object.keys(updates).length > 0) {
                 await updateEvent(chatId, eventId, updates);
@@ -350,6 +380,152 @@ function wireEventItemEvents() {
                     refreshEventsUI();
                 }
                 nwstToast('Event saved.', 'success');
+            }
+        };
+    });
+
+    // ── Promote to Secret button ──────────────────────────────
+    container.querySelectorAll('.nwst-events-promote').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const item = this.closest('.nwst-event-item');
+            const eventId = item.getAttribute('data-event-id');
+            const chatId = getChatId();
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+
+            // Read current event data to pre-fill the form
+            const events = getAllEvents(chatId);
+            const event = events.find(ev => ev.id === eventId);
+            if (!event) {
+                nwstToast('Event not found.', 'error');
+                return;
+            }
+
+            // Get existing secrets to check for duplicates
+            const existingSecrets = getAllSecrets(chatId);
+            const existingTitles = new Set(existingSecrets.map(s => s.title.toLowerCase()));
+
+            const currentParticipants = (event.participants || []).join(', ');
+
+            // ── Use globals to capture form values before popup closes ──
+            // ST's POPUP_TYPE.TEXT destroys DOM elements on close, so
+            // post-popup getElementById() returns null.  The same pattern
+            // is used by the "Add Event" popup above.
+            window._nwstPromoteSecretType = 'dramatic_irony';
+            window._nwstPromoteWhoKnows = currentParticipants;
+            window._nwstPromoteWhoNot = '';
+            window._nwstPromoteSecretText = event.description || '';
+            window._nwstPromoteReveal = '';
+
+            const formHtml = `
+                <div style="padding:10px;min-width:380px">
+                    <div style="font-size:14px;font-weight:600;margin-bottom:12px">Promote Event to Secret</div>
+                    <div style="font-size:12px;color:#999;margin-bottom:14px;line-height:1.5">
+                        This will create a structured secret in the Notebook tracking who knows
+                        about "${escapeHTML(event.title)}" and who doesn't. The secret will be
+                        used by the narrative consistency monitor to enforce knowledge boundaries.
+                    </div>
+                    <div style="margin-bottom:12px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Secret Type</label>
+                        <select class="text_pole" style="width:100%"
+                            onchange="window._nwstPromoteSecretType=this.value">
+                            <option value="character">Character Secret</option>
+                            <option value="dramatic_irony" selected>Dramatic Irony</option>
+                            <option value="world">World Secret</option>
+                            <option value="user_pc">User PC Secret</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom:12px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">
+                            Characters who KNOW <span style="color:#ccc;font-weight:normal">(comma-separated)</span>
+                        </label>
+                        <div style="display:flex;gap:6px;align-items:flex-start">
+                            <textarea class="text_pole" rows="2" style="flex:1" id="nwst-promote-who-knows" placeholder="e.g. Seraphina, Kaelen"
+                                oninput="window._nwstPromoteWhoKnows=this.value">${escapeHTML(currentParticipants)}</textarea>
+                            <button class="editor_maximize nwst-expand-btn" data-for="nwst-promote-who-knows" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                        </div>
+                    </div>
+                    <div style="margin-bottom:12px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">
+                            Characters who do NOT know <span style="color:#ccc;font-weight:normal">(comma-separated)</span>
+                        </label>
+                        <div style="display:flex;gap:6px;align-items:flex-start">
+                            <input type="text" class="text_pole" style="flex:1" id="nwst-promote-who-not" placeholder="e.g. Lysander"
+                                oninput="window._nwstPromoteWhoNot=this.value">
+                            <button class="editor_maximize nwst-expand-btn" data-for="nwst-promote-who-not" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                        </div>
+                    </div>
+                    <div style="margin-bottom:12px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">
+                            Secret description <span style="color:#ccc;font-weight:normal">(optional — overrides event description)</span>
+                        </label>
+                        <div style="display:flex;gap:6px;align-items:flex-start">
+                            <textarea class="text_pole" rows="3" style="flex:1" id="nwst-promote-secret-text" placeholder="${escapeHTML(event.description || 'No description')}"
+                                oninput="window._nwstPromoteSecretText=this.value">${escapeHTML(event.description || '')}</textarea>
+                            <button class="editor_maximize nwst-expand-btn" data-for="nwst-promote-secret-text" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                        </div>
+                    </div>
+                    <div style="margin-bottom:8px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">
+                            Reveal conditions <span style="color:#ccc;font-weight:normal">(optional)</span>
+                        </label>
+                        <div style="display:flex;gap:6px;align-items:flex-start">
+                            <textarea class="text_pole" rows="2" style="flex:1" id="nwst-promote-reveal" placeholder="e.g. May be revealed when the unaware character discovers evidence..."
+                                oninput="window._nwstPromoteReveal=this.value"></textarea>
+                            <button class="editor_maximize nwst-expand-btn" data-for="nwst-promote-reveal" style="margin-left:4px;font-size:14px;color:#aaa" title="Open in popout">⛶</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            const result = await callGenericPopup(formHtml, POPUP_TYPE.TEXT, '', {
+                okButton: 'Promote',
+                cancelButton: 'Cancel'
+            });
+
+            if (!result) return;
+
+            // Read form values from globals (captured via oninput before popup closed)
+            const whoKnows = (window._nwstPromoteWhoKnows || '')
+                .split(',').map(s => s.trim()).filter(Boolean);
+            const whoDoesNotKnow = (window._nwstPromoteWhoNot || '')
+                .split(',').map(s => s.trim()).filter(Boolean);
+
+            if (whoKnows.length === 0 && whoDoesNotKnow.length === 0) {
+                nwstToast('Please specify at least one character who knows or doesn\'t know.', 'error');
+                return;
+            }
+
+            // Auto-detect dramatic_irony type if there's asymmetry
+            let secretType = window._nwstPromoteSecretType || 'dramatic_irony';
+            if (whoKnows.length > 0 && whoDoesNotKnow.length > 0 && secretType === 'character') {
+                secretType = 'dramatic_irony';
+            }
+
+            // Check for duplicate secret title
+            const secretTitle = `✅ ${event.title}`;
+            if (existingTitles.has(secretTitle.toLowerCase())) {
+                nwstToast('A secret with this event title already exists.', 'warning');
+                return;
+            }
+
+            const secretData = await promoteEventToSecret(chatId, eventId, {
+                whoKnows: whoKnows,
+                whoDoesNotKnow: whoDoesNotKnow,
+                type: secretType,
+                customSecret: {
+                    secret: (window._nwstPromoteSecretText || '').trim() || event.description || '',
+                    revealConditions: (window._nwstPromoteReveal || '').trim()
+                }
+            });
+
+            if (secretData) {
+                nwstToast(`Event promoted to secret "${secretData.title}".`, 'success');
+                refreshEventsUI();
+                // Refresh the notebook tab too so the new secret appears
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
+            } else {
+                nwstToast('Failed to promote event to secret.', 'error');
             }
         };
     });
@@ -367,7 +543,6 @@ function wireEventItemEvents() {
     });
 
 }
-
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function escapeHTML(str) {

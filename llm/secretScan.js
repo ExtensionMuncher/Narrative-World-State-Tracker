@@ -17,7 +17,7 @@
 // does NOT require chatHasData() to be false — it can be run multiple times.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../utils.js';;
+import { getChatId, nwstToast } from '../utils.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getNotebook, addSecret } from '../data/notebook.js';
 

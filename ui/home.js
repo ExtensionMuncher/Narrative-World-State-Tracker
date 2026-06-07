@@ -125,8 +125,12 @@ export function buildHomeTab() {
                 </div>
             </div>
             <div class="nwst-journal-body">
-                <div class="nwst-weather-strip" id="nwst-forecast-strip">
-                    <div class="nwst-nb-empty">No forecast data yet.</div>
+                <div class="nwst-scroll-wrap">
+                    <button class="nwst-scroll-arrow nwst-scroll-left" id="nwst-scroll-left">◀</button>
+                    <div class="nwst-weather-strip" id="nwst-forecast-strip">
+                        <div class="nwst-nb-empty">No forecast data yet.</div>
+                    </div>
+                    <button class="nwst-scroll-arrow nwst-scroll-right" id="nwst-scroll-right">▶</button>
                 </div>
 
                 <!-- Moon phase strip -->
@@ -276,7 +280,26 @@ function wireHomeEvents() {
     function wireClickToEdit(fieldId, updateFn) {
         const el = document.getElementById(fieldId);
         if (!el) return;
+
+        // Require double-click to enter edit mode — single click is too sensitive
+        // and causes accidental erasure when users try to copy text or interact
+        // with the date field.
+        let clickTimer = null;
         el.addEventListener('click', function onClick() {
+            if (clickTimer) {
+                // Second click within the double-click threshold → activate edit
+                clearTimeout(clickTimer);
+                clickTimer = null;
+                activateEdit();
+            } else {
+                // First click — set a short timer; if no second click comes, do nothing
+                clickTimer = setTimeout(() => {
+                    clickTimer = null;
+                }, 300);
+            }
+        });
+
+        function activateEdit() {
             const currentText = el.textContent.trim();
             const input = document.createElement('input');
             input.type = 'text';
@@ -298,7 +321,7 @@ function wireHomeEvents() {
                     input.blur();
                 }
             });
-        });
+        }
     }
     wireClickToEdit('nwst-date-display', async (text) => {
         const chatId = getChatId();
@@ -478,6 +501,60 @@ function wireHomeEvents() {
             if (eventsTab) eventsTab.click();
         });
     }
+
+    // ── Forecast scroll arrow buttons ──────────────────────────
+    const scrollLeft = document.getElementById('nwst-scroll-left');
+    const scrollRight = document.getElementById('nwst-scroll-right');
+    const forecastStrip = document.getElementById('nwst-forecast-strip');
+    const scrollWrap = forecastStrip?.closest('.nwst-scroll-wrap');
+
+    if (scrollLeft && scrollRight && forecastStrip && scrollWrap) {
+        const SCROLL_STEP = 150; // pixels per click
+
+        scrollLeft.addEventListener('click', function() {
+            forecastStrip.scrollBy({ left: -SCROLL_STEP, behavior: 'smooth' });
+        });
+
+        scrollRight.addEventListener('click', function() {
+            forecastStrip.scrollBy({ left: SCROLL_STEP, behavior: 'smooth' });
+        });
+
+        // Update arrow states on scroll
+        forecastStrip.addEventListener('scroll', function() {
+            const sw = forecastStrip.scrollWidth;
+            const cw = forecastStrip.clientWidth;
+            const sl = forecastStrip.scrollLeft;
+            scrollWrap.classList.toggle('at-start', sl <= 1);
+            scrollWrap.classList.toggle('at-end', sl >= sw - cw - 1);
+        });
+
+        // Re-check overflow on resize
+        // Uses explicit child width calculation (not scrollWidth) since
+        // overflow-x:scroll keeps scrollbar always present, skewing scrollWidth
+        const checkOverflow = function() {
+            const $gap = 6;
+            let $totalChildren = 0;
+            for (let $c = 0; $c < forecastStrip.children.length; $c++) {
+                $totalChildren += forecastStrip.children[$c].offsetWidth;
+            }
+            if (forecastStrip.children.length > 1) {
+                $totalChildren += (forecastStrip.children.length - 1) * $gap;
+            }
+            const cw = forecastStrip.clientWidth;
+            const hasOverflow = $totalChildren > cw + 2;
+            scrollWrap.classList.toggle('has-overflow', hasOverflow);
+            if (hasOverflow) {
+                const sl = forecastStrip.scrollLeft;
+                scrollWrap.classList.toggle('at-start', sl <= 1);
+                scrollWrap.classList.toggle('at-end', sl >= $totalChildren - cw - 1);
+            }
+        };
+
+        window.addEventListener('resize', checkOverflow);
+        // Also check after a short delay to let layout settle
+        setTimeout(checkOverflow, 500);
+        setTimeout(checkOverflow, 1500);
+    }
 }
 
 // ── Current Day edit mode toggling ────────────────────────────────────────
@@ -601,19 +678,67 @@ async function saveCurrentDayEdit() {
     nwstToast('Current Day saved.', 'success');
 }
 
-// ── UI Refresh ────────────────────────────────────────────────────────────
+// ── HTML Content Cache ───────────────────────────────────────────────────
+// Prevents unnecessary innerHTML assignments when the rendered content
+// hasn't changed. Each refresh function stores its last HTML string here;
+// if the new HTML is identical, the DOM is left untouched, avoiding
+// wasted reflows/repaints.
+
+const _prevHtml = {};
 
 /**
- * Refresh the entire Home tab with current data from storage.
- * Called when the panel opens or when the chat changes.
+ * Set innerHTML on an element only if the content has actually changed.
+ * This avoids unnecessary DOM reflow/repaint when data hasn't been modified.
+ * @param {string} id - Element ID
+ * @param {string} html - New HTML content
+ * @returns {boolean} true if the DOM was updated, false if skipped
+ */
+function _setHtmlIfChanged(id, html) {
+    const el = document.getElementById(id);
+    if (!el) return false;
+    if (_prevHtml[id] === html) return false; // unchanged — skip
+    _prevHtml[id] = html;
+    el.innerHTML = html;
+    return true;
+}
+
+/**
+ * Invalidate the HTML cache for a specific container or all containers.
+ * Call this when you KNOW data has changed and want to force a re-render.
+ * @param {string} [id] - Optional container ID to invalidate; omit to clear all
+ */
+export function invalidateCache(id) {
+    if (id) {
+        delete _prevHtml[id];
+    } else {
+        Object.keys(_prevHtml).forEach(k => delete _prevHtml[k]);
+    }
+}
+
+// ── Debounce ──────────────────────────────────────────────────────────────
+// Coalesces rapid successive refresh calls into a single render at the end
+// of the burst. 50ms is short enough to feel instant, long enough to skip
+// intermediate renders when e.g. batch scan + day advancement fire together.
+
+let _refreshTimer = null;
+
+/**
+ * Debounced version of refreshHomeUI — coalesces rapid calls.
+ * Exported as the primary refresh entry point. Direct callers still invoke
+ * the undecorated function internally (within Home tab) for synchronous
+ * correctness, but external callers should use the debounced export.
  */
 export function refreshHomeUI() {
-    updateStatusLabel();
-    updatePauseButton();
-    refreshCurrentDayDisplay();
-    refreshForecastDisplay();
-    refreshMoonDisplay();
-    refreshEventsDigest();
+    if (_refreshTimer) clearTimeout(_refreshTimer);
+    _refreshTimer = setTimeout(() => {
+        _refreshTimer = null;
+        updateStatusLabel();
+        updatePauseButton();
+        refreshCurrentDayDisplay();
+        refreshForecastDisplay();
+        refreshMoonDisplay();
+        refreshEventsDigest();
+    }, 50);
 }
 
 // ── Current Day display ───────────────────────────────────────────────────
@@ -651,7 +776,7 @@ function refreshCurrentDayDisplay() {
     const hasContent = day.season || day.weatherToday || day.flora || day.fauna || day.spiritualClimate;
 
     if (!hasContent) {
-        container.innerHTML = '<div class="nwst-nb-empty">No Current Day data yet. Run a batch scan or advance the day to generate content.</div>';
+        _setHtmlIfChanged('nwst-currentday-content', '<div class="nwst-nb-empty">No Current Day data yet. Run a batch scan or advance the day to generate content.</div>');
         return;
     }
 
@@ -677,7 +802,7 @@ function refreshCurrentDayDisplay() {
         }
     }
     html += '</ul>';
-    container.innerHTML = html;
+    _setHtmlIfChanged('nwst-currentday-content', html);
 }
 
 /**
@@ -705,7 +830,7 @@ function refreshForecastDisplay() {
     const forecast = getForecast(chatId);
 
     if (!forecast || forecast.length === 0) {
-        strip.innerHTML = '<div class="nwst-nb-empty">No forecast data yet.</div>';
+        _setHtmlIfChanged('nwst-forecast-strip', '<div class="nwst-nb-empty">No forecast data yet.</div>');
         return;
     }
 
@@ -730,7 +855,31 @@ function refreshForecastDisplay() {
         </div>`;
     }
 
-    strip.innerHTML = html;
+    _setHtmlIfChanged('nwst-forecast-strip', html);
+
+    // Check forecast strip overflow for scroll arrow visibility
+    // Use explicit child width calculation (not scrollWidth) since overflow-x:scroll
+    // keeps scrollbar always present, which can skew scrollWidth readings
+    const _strip = document.getElementById('nwst-forecast-strip');
+    const _wrap = _strip?.closest('.nwst-scroll-wrap');
+    if (_strip && _wrap) {
+        const _$gap = 6; // matches CSS gap
+        let _$totalChildren = 0;
+        for (let _$c = 0; _$c < _strip.children.length; _$c++) {
+            _$totalChildren += _strip.children[_$c].offsetWidth;
+        }
+        if (_strip.children.length > 1) {
+            _$totalChildren += (_strip.children.length - 1) * _$gap;
+        }
+        const _$hasOverflow = _$totalChildren > _strip.clientWidth + 2;
+        _wrap.classList.toggle('has-overflow', _$hasOverflow);
+        if (_$hasOverflow) {
+            _wrap.classList.add('at-start');
+            _wrap.classList.remove('at-end');
+        } else {
+            _wrap.classList.remove('at-start', 'at-end');
+        }
+    }
 }
 
 // ── Moon phase display ────────────────────────────────────────────────────
@@ -744,12 +893,12 @@ function refreshMoonDisplay() {
     const enableMoons = getSetting('enableMoons');
 
     if (enableMoons === false) {
-        strip.innerHTML = '<div class="nwst-nb-empty" style="color:#999">🌙 Moons are disabled. Enable them in Settings.</div>';
+        _setHtmlIfChanged('nwst-moon-strip', '<div class="nwst-nb-empty" style="color:#999">🌙 Moons are disabled. Enable them in Settings.</div>');
         return;
     }
 
     if (!moonPhases || moonPhases.length === 0) {
-        strip.innerHTML = '<div class="nwst-nb-empty">No moon phase data yet.</div>';
+        _setHtmlIfChanged('nwst-moon-strip', '<div class="nwst-nb-empty">No moon phase data yet.</div>');
         return;
     }
 
@@ -795,7 +944,8 @@ function refreshMoonDisplay() {
         </div>`;
     }
 
-    strip.innerHTML = html;
+    // Only update DOM and re-wire events if the HTML actually changed
+    if (!_setHtmlIfChanged('nwst-moon-strip', html)) return;
 
     // Wire click handlers for moon phenomena tags — shows inline tooltip bubble
     strip.querySelectorAll('.nwst-phen-tag').forEach(tag => {
@@ -898,7 +1048,7 @@ function refreshEventsDigest() {
         html = '<div class="nwst-nb-empty">No upcoming events.</div>';
     }
 
-    container.innerHTML = html;
+    _setHtmlIfChanged('nwst-events-digest', html);
 }
 
 // ── Pending events review ─────────────────────────────────────────────────
@@ -916,13 +1066,22 @@ function refreshPendingEvents() {
         pending = meta?.['nwst:pendingEvents'] || [];
     } catch (e) { /* non-fatal */ }
 
-    if (pending.length === 0) {
-        section.style.display = 'none';
-        return;
+    // Determine section visibility and badge text
+    const isEmpty = pending.length === 0;
+    const sectionDisplay = isEmpty ? 'none' : 'block';
+    const badgeText = isEmpty ? '' : `${pending.length} detected`;
+
+    // Cache section visibility — only update if changed
+    const sectionKey = 'nwst-pending-events-section';
+    if (section.style.display !== sectionDisplay) {
+        section.style.display = sectionDisplay;
+        // Invalidate list cache when visibility changes so content re-renders
+        if (typeof _prevHtml !== 'undefined') delete _prevHtml['nwst-pending-events-list'];
     }
 
-    section.style.display = 'block';
-    if (countBadge) countBadge.textContent = `${pending.length} detected`;
+    if (isEmpty) return;
+
+    if (countBadge) countBadge.textContent = badgeText;
 
     let html = '';
     for (const ev of pending) {
@@ -942,7 +1101,7 @@ function refreshPendingEvents() {
             </div>
         </div>`;
     }
-    list.innerHTML = html;
+    _setHtmlIfChanged('nwst-pending-events-list', html);
 }
 
 async function approvePendingEvent(pendingId) {

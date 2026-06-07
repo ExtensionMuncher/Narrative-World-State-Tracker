@@ -16,7 +16,7 @@
 // =============================================================================
 
 import { getChatId, nwstToast } from '../utils.js';
-import { getSetting } from '../index.js';;
+import { getSetting } from '../index.js';
 import {
     getWorldState, saveWorldState, getCurrentDay, replaceCurrentDay,
     getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,

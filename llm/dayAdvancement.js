@@ -14,12 +14,12 @@
 // =============================================================================
 
 import { getChatId, nwstToast } from '../utils.js';
-import { getSetting } from '../index.js';;
+import { getSetting } from '../index.js';
 import { getSettingContext, getCurrentDay, replaceCurrentDay, updateCurrentDay,
          getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
          saveSnapshot, getLatestSnapshot, getSnapshots, getWorldState,
          getSeasonConfig, getCalendarConfig } from '../data/worldState.js';
-import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon } from '../data/events.js';
+import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon, compactEventHorizon } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getPlannerPrompt, getScanFrequency } from '../settings.js';
@@ -927,7 +927,18 @@ export async function advanceToNextDay() {
         //    This runs AFTER snapshot, so the saved snapshot still has 'pending' events.
         await rollEventHorizonForward(chatId);
 
-        // 10. World event top-up — if the active world event pool is thin after
+        // 10. Event Horizon Compaction — resolveDay-tracked events that were
+        //     resolved/missed more than `eventCompactionThreshold` story days
+        //     ago get compacted into the Notebook's `doNotForget` section as
+        //     concise summaries, then removed from the active events array.
+        //     This keeps the events list lean without losing narrative context.
+        const compactionThreshold = getSetting('eventCompactionThreshold') ?? 3;
+        const compactResult = await compactEventHorizon(chatId, compactionThreshold);
+        if (compactResult.compacted > 0) {
+            console.log(`[NWST DayAdvancement] Compacted ${compactResult.compacted} stale events.`);
+        }
+
+        // 11. World event top-up — if the active world event pool is thin after
         //     rolling forward, generate a small supplementary batch silently.
         //     This keeps world events populated without requiring manual regen.
         //     Fires asynchronously so it doesn't block the day advance completion.
@@ -1271,7 +1282,7 @@ async function rollEventHorizonForward(chatId) {
     }
 
     if (Object.keys(changes).length > 0) {
-        rollEventHorizon(chatId, changes);
+        await rollEventHorizon(chatId, changes);
     }
 }
 

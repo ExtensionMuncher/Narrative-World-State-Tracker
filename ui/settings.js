@@ -21,7 +21,7 @@ import {
     getScanFrequency, setScanFrequency,
     getScanMinimumMessages, setScanMinimumMessages,
     getMaxSnapshotCount, setMaxSnapshotCount,
-    getInjectionSettings, setInjectionSetting, getMaxActiveEvents,
+    getInjectionSettings, setInjectionSetting, getMaxActiveEvents, getDensityMode,
     getSecretBudgetTokens, setSecretBudgetTokens,
     exportGlobalSettings, importGlobalSettings,
     exportChatData, importChatData,
@@ -81,10 +81,24 @@ export function buildSettingsTab() {
 
                     <!-- Scan frequency -->
                     <div style="font-size:12px;color:#666;margin-bottom:4px">Scan frequency</div>
-                    <div style="display:flex;align-items:center;gap:8px">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
                         <input type="number" id="nwst-setting-scanFrequency" value="20" min="1" max="100" style="width:60px;text-align:center">
                         <span style="font-size:12px;color:#666">messages</span>
                     </div>
+
+                    <!-- Output Density Mode -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Output density</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        Controls how much text is injected into the main prompt on every message.
+                        <strong>Token-Budget</strong> is extremely lean — structured labels, no prose.
+                        <strong>Combined</strong> balances quality and token cost (recommended for most users).
+                        <strong>Atmospheric</strong> is full narrative prose — what you currently have.
+                    </div>
+                    <select id="nwst-setting-densityMode" style="width:100%">
+                        <option value="token-budget">Token-Budget — lean labels only (~120-300 tokens/msg)</option>
+                        <option value="combined" selected>Combined — balanced prose (~300-600 tokens/msg)</option>
+                        <option value="atmospheric">Atmospheric — full narrative (~600-1,400 tokens/msg)</option>
+                    </select>
                 </div>
                 <div class="nwst-setting-row">
                     <div>
@@ -403,6 +417,27 @@ export function buildSettingsTab() {
                         </div>
                     </div>
                     <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Event compaction threshold</div>
+                            <div class="nwst-setting-sub">Story days after which a resolved/missed event is compacted into the Notebook's "Past Events" section. 0 = compact immediately on day advancement. Set to a high value to disable.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-eventCompactionThreshold" value="3" min="0" max="999" style="width:52px;text-align:center">
+                            <span style="font-size:12px;color:#666">story days</span>
+                        </div>
+                    </div>
+                    <!-- Event→Secret Promotion toggle -->
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Auto-promote resolved events to secrets</div>
+                            <div class="nwst-setting-sub">When enabled, resolved/missed events with participants are automatically promoted to Notebook secrets with whoKnows/whoDoesNotKnow tracking for narrative consistency enforcement.</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-autoPromoteEvents" checked>
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
+                    <div class="nwst-setting-row">
                         <div><div class="nwst-setting-label">Injection placement</div></div>
                         <select id="nwst-setting-placement" style="width:180px;flex-shrink:0">
                             <option value="before_main">Before Main Prompt / Story String</option>
@@ -429,7 +464,7 @@ export function buildSettingsTab() {
                     <div class="nwst-setting-row">
                         <div>
                             <div class="nwst-setting-label">Secret budget tokens</div>
-                            <div class="nwst-setting-sub">Max tokens of secret text to inject per message. Higher = more secrets in context. Lower = tighter focus on the most relevant few.</div>
+                            <div class="nwst-setting-sub">Max tokens of secret text to inject per message. Also governs auto-promotion LLM calls for knowledge distribution analysis. Higher = more secrets & smarter promotion.</div>
                         </div>
                         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
                             <input type="range" id="nwst-setting-secretBudget" min="100" max="2000" step="100" value="600" style="width:100px">
@@ -499,6 +534,7 @@ export function buildSettingsTab() {
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-secrets">🔍 Scan for secrets</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-communities">👥 Scan for communities</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-worldstate">🌍 Scan world state</button>
+                    <button class="menu_button nwst-btn-debug" id="nwst-debug-review-participants" title="Use the Planning LLM to review all events and add participants where missing">🔎 Review event participants</button>
                 </div>
                 <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
                     <div class="nwst-setting-label" style="margin-bottom:4px">Adjust Secret Priority</div>
@@ -787,6 +823,13 @@ function populateSettingsUI() {
     const maxSnapInput = document.getElementById('nwst-setting-maxSnapshotCount');
     if (maxSnapInput) maxSnapInput.value = getMaxSnapshotCount() || 30;
 
+    // Event compaction threshold
+    const compactInput = document.getElementById('nwst-setting-eventCompactionThreshold');
+    if (compactInput) compactInput.value = getSetting('eventCompactionThreshold') ?? 3;
+
+    // Auto-promote events toggle
+    setCheckbox('nwst-setting-autoPromoteEvents', getSetting('autoPromoteEvents') !== false);
+
     const freqInput = document.getElementById('nwst-setting-scanFrequency');
     if (freqInput) freqInput.value = getScanFrequency();
 
@@ -806,6 +849,9 @@ function populateSettingsUI() {
     const inj = getInjectionSettings();
     const maxEvInput = document.getElementById('nwst-setting-maxActiveEvents');
     if (maxEvInput) maxEvInput.value = getMaxActiveEvents();
+
+    const densitySelect = document.getElementById('nwst-setting-densityMode');
+    if (densitySelect) densitySelect.value = getDensityMode() || 'combined';
     setCheckbox('nwst-setting-injectCurrentDay', inj.injectCurrentDay);
     setCheckbox('nwst-setting-injectEvents', inj.injectEvents);
     setCheckbox('nwst-setting-injectWorldConditions', inj.injectWorldConditions);
@@ -961,6 +1007,17 @@ function wireSettingsEvents() {
         setMaxSnapshotCount(val);
     });
 
+    // ── Event compaction threshold ─────────────────────────────
+    wireInput('nwst-setting-eventCompactionThreshold', (val) => {
+        const num = parseInt(val, 10);
+        if (num >= 0 && num <= 999) setSetting('eventCompactionThreshold', num);
+    });
+
+    // ── Event→Secret auto-promotion ──────────────────────────
+    wireCheckbox('nwst-setting-autoPromoteEvents', (checked) => {
+        setSetting('autoPromoteEvents', checked);
+    });
+
     wireInput('nwst-setting-scanFrequency', (val) => {
         const num = parseInt(val, 10);
         if (num >= 1 && num <= 100) setScanFrequency(num);
@@ -1026,6 +1083,13 @@ function wireSettingsEvents() {
     // ── Injection toggles ────────────────────────────────────────
     wireCheckbox('nwst-setting-injectCurrentDay', (checked) => setInjectionSetting('injectCurrentDay', checked));
     wireInput('nwst-setting-maxActiveEvents', (val) => setInjectionSetting('maxActiveEvents', Math.max(4, parseInt(val) || 12)));
+    wireSelect('nwst-setting-densityMode', (val) => {
+        setInjectionSetting('densityMode', val);
+        // Rebuild injection immediately so user sees the change take effect
+        try {
+            import('../inject/promptInjector.js').then(({ updateInjection }) => updateInjection());
+        } catch (e) { /* non-fatal */ }
+    });
     wireCheckbox('nwst-setting-injectEvents', (checked) => setInjectionSetting('injectEvents', checked));
     wireCheckbox('nwst-setting-injectWorldConditions', (checked) => setInjectionSetting('injectWorldConditions', checked));
 
@@ -1408,6 +1472,40 @@ function wireSettingsEvents() {
             } finally {
                 debugScanWorldState.textContent = '🌍 Scan world state';
                 debugScanWorldState.disabled = false;
+            }
+        });
+    }
+
+    // ── Debug: Review Event Participants ────────────────────────────
+    const debugReviewParticipants = document.getElementById('nwst-debug-review-participants');
+    if (debugReviewParticipants) {
+        debugReviewParticipants.addEventListener('click', async () => {
+            const chatId = getChatId();
+            if (!chatId) {
+                nwstToast('No active chat.', 'error');
+                return;
+            }
+
+            debugReviewParticipants.textContent = '⏳ Reviewing...';
+            debugReviewParticipants.disabled = true;
+
+            try {
+                const { reviewEventParticipants } = await import('../llm/batchScan.js');
+                const result = await reviewEventParticipants(chatId);
+
+                if (result.updated > 0) {
+                    nwstToast(`Added participants to ${result.updated} event(s).`, 'success');
+                } else if (result.reviewed > 0) {
+                    nwstToast('All events already have participants.', 'info');
+                } else {
+                    nwstToast('No events found to review.', 'info');
+                }
+            } catch (err) {
+                console.error('[NWST Settings] Participant review failed:', err);
+                nwstToast(`Participant review failed: ${err.message}`, 'error');
+            } finally {
+                debugReviewParticipants.textContent = '🔎 Review event participants';
+                debugReviewParticipants.disabled = false;
             }
         });
     }

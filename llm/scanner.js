@@ -14,7 +14,7 @@
 // =============================================================================
 
 import { generateWithProfile } from './connections.js';
-import { getChatId, nwstToast } from '../utils.js';;
+import { getChatId, nwstToast } from '../utils.js';
 import { getScanFrequency, getScanMinimumMessages, isPaused, isEnabled } from '../settings.js';
 import { chatHasData } from '../data/storage.js';
 import { getWorldState, getEnabledConditions, getSettingContext, updateConditionContent, getCalendarConfig } from '../data/worldState.js';
@@ -49,6 +49,33 @@ let warmupMessageCount = 0;      // Counts messages during Phase 1 warmup
 let scanPhase = 'warmup';        // 'warmup' | 'cadence'
 let scanTimer = null;
 let isScanning = false;
+
+// ── Scanner state persistence (survives page reload) ──────────────────────
+// Saves the scanner's cadence position to chatMetadata so reloading the page
+// doesn't reset the countdown. Without this, every reload restarts the
+// 20-message countdown from scratch even if the scanner was at message 18.
+
+const SCANNER_STATE_KEY = 'nwst:scannerState';
+
+function saveScannerState() {
+    try {
+        const { chatMetadata, saveMetadata } = SillyTavern.getContext();
+        if (!chatMetadata) return;
+        chatMetadata[SCANNER_STATE_KEY] = {
+            messageCountAtLastScan,
+            scanPhase
+        };
+        saveMetadata(); // fire-and-forget — non-critical
+    } catch (e) { /* non-fatal */ }
+}
+
+function loadScannerState() {
+    try {
+        const { chatMetadata } = SillyTavern.getContext();
+        if (!chatMetadata) return null;
+        return chatMetadata[SCANNER_STATE_KEY] || null;
+    } catch (e) { return null; }
+}
 
 // ── Internal system prompts ───────────────────────────────────────────────
 // These are not user-editable. The user-editable planner prompt is passed as
@@ -242,9 +269,25 @@ export function startScanner() {
     // skip warmup and go straight to normal cadence.
     // Otherwise start in warmup phase.
     if (chatHasData(chatId)) {
-        scanPhase = 'cadence';
-        messageCountAtLastScan = getCurrentMessageCount();
-        console.log('[NWST Scanner] Batch scan data detected — starting in cadence phase.');
+        // Try to restore persisted cadence position from before the reload
+        const savedState = loadScannerState();
+        if (savedState && savedState.scanPhase === 'cadence') {
+            scanPhase = 'cadence';
+            messageCountAtLastScan = savedState.messageCountAtLastScan;
+            console.log(`[NWST Scanner] Restored cadence position from before reload (last scan at msg ${messageCountAtLastScan}).`);
+        } else {
+            // No persisted state — first load after the patch was installed,
+            // or state was cleared. Position the cadence counter at the most
+            // recent scan boundary so the next scan fires at the correct interval
+            // rather than immediately. No catch-up scan — the next message after
+            // the next boundary will trigger naturally.
+            scanPhase = 'cadence';
+            const currentCount = getCurrentMessageCount();
+            const frequency = getScanFrequency();
+            const estimatedLastScan = currentCount - (currentCount % frequency);
+            messageCountAtLastScan = estimatedLastScan;
+            console.log(`[NWST Scanner] No persisted state — positioning cadence at msg ${estimatedLastScan}, next scan at msg ${estimatedLastScan + frequency}.`);
+        }
     } else {
         scanPhase = 'warmup';
         warmupMessageCount = getCurrentMessageCount();
@@ -325,6 +368,7 @@ async function checkAndScan() {
         // Transition to cadence phase — cadence counter starts fresh from here
         scanPhase = 'cadence';
         messageCountAtLastScan = getCurrentMessageCount();
+        saveScannerState(); // Persist immediately after initial scan
         console.log('[NWST Scanner] Initial scan complete. Entering cadence phase.');
         return;
     }
@@ -335,6 +379,7 @@ async function checkAndScan() {
     if (messagesSinceLastScan >= getScanFrequency()) {
         await runScan();
         messageCountAtLastScan = getCurrentMessageCount();
+        saveScannerState(); // Persist so reload doesn't reset the countdown
     }
 }
 

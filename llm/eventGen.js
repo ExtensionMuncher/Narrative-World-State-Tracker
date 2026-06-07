@@ -18,7 +18,7 @@
 // world conditions, and active events before being proposed.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../utils.js';;
+import { getChatId, nwstToast } from '../utils.js';
 import { getCurrentDay, getEnabledConditions, getSettingContext, getMoonPhases, getForecast, getCalendarConfig } from '../data/worldState.js';
 import { getAllEvents, addEvent, getActiveEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';

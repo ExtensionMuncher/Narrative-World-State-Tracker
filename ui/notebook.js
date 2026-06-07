@@ -310,7 +310,7 @@ function refreshSecretsSection() {
     let html = '';
     for (const secret of secrets) {
         const typeDef = SECRET_TYPES.find(t => t.value === secret.type) || SECRET_TYPES[0];
-        const isOpen = true; // All secrets open by default
+        const isOpen = false; // All secrets collapsed by default — reduces visual noise
 
         html += `
         <div class="nwst-secret-entry${isOpen ? ' nwst-open' : ''}" data-secret-id="${secret.id}">
@@ -327,7 +327,7 @@ function refreshSecretsSection() {
                         <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="secret">⛶</button>
                     </div>
                     <div class="nwst-secret-field-content" contenteditable="true"
-                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text"
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #777;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text"
                         data-field="secret">${escapeHTML(secret.secret)}</div>
                 </div>
 
@@ -335,7 +335,7 @@ function refreshSecretsSection() {
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
                     <div class="nwst-secret-field">
                         <div class="nwst-secret-field-label" style="color:#0F6E56">Who knows</div>
-                        <ul class="nwst-nb-bullets nwst-who-knows-list" style="border:0.5px solid #eee;border-radius:6px;overflow:hidden">
+                        <ul class="nwst-nb-bullets nwst-who-knows-list" style="border:0.5px solid #777;border-radius:6px;overflow:hidden">
                             ${(secret.whoKnows || []).map(name => `
                                 <li class="nwst-nb-bullet" style="padding:5px 8px">
                                     <span class="nwst-nb-bullet-text" contenteditable="true">${escapeHTML(name)}</span>
@@ -348,7 +348,7 @@ function refreshSecretsSection() {
                     </div>
                     <div class="nwst-secret-field">
                         <div class="nwst-secret-field-label" style="color:#993C1D">Who does NOT know</div>
-                        <ul class="nwst-nb-bullets nwst-who-not-know-list" style="border:0.5px solid #eee;border-radius:6px;overflow:hidden">
+                        <ul class="nwst-nb-bullets nwst-who-not-know-list" style="border:0.5px solid #777;border-radius:6px;overflow:hidden">
                             ${(secret.whoDoesNotKnow || []).map(name => `
                                 <li class="nwst-nb-bullet" style="padding:5px 8px">
                                     <span class="nwst-nb-bullet-text" contenteditable="true">${escapeHTML(name)}</span>
@@ -367,7 +367,7 @@ function refreshSecretsSection() {
                         <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="evidenceShown">⛶</button>
                     </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="evidenceShown"
-                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.evidenceShown)}</div>
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #777;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.evidenceShown)}</div>
                 </div>
 
                 <!-- Pressure / risk -->
@@ -376,7 +376,7 @@ function refreshSecretsSection() {
                         <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="pressureRisk">⛶</button>
                     </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="pressureRisk"
-                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.pressureRisk)}</div>
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #777;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.pressureRisk)}</div>
                 </div>
 
                 <!-- Reveal conditions -->
@@ -385,7 +385,7 @@ function refreshSecretsSection() {
                         <button class="nwst-expand-btn" style="font-size:12px;color:#bbb;background:none;border:none;cursor:pointer;margin-left:4px" title="Open in popout" data-popout-field="revealConditions">⛶</button>
                     </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="revealConditions"
-                        style="font-size:13px;line-height:1.5;border:0.5px solid #eee;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.revealConditions)}</div>
+                        style="font-size:13px;line-height:1.5;border:0.5px solid #777;border-radius:6px;padding:6px 8px;min-height:32px;cursor:text">${escapeHTML(secret.revealConditions)}</div>
                 </div>
 
                 <!-- Type selector + priority + delete -->

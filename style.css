@@ -10,7 +10,7 @@
 .nwst-shell {
     border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
     border-radius: 12px;
-    overflow: hidden;
+    overflow: visible;
     background: transparent;
     max-width: 700px;
     font-family: var(--SmartThemeBodyFont, system-ui, sans-serif);
@@ -106,6 +106,19 @@
 
 .nwst-btn-regen:hover {
     background: #EEEDFE;
+}
+
+.nwst-btn-debug {
+    font-size: 11px;
+    padding: 5px 10px;
+    color: #6a9fb5;
+    border-color: #6a9fb5;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.nwst-btn-debug:hover {
+    background: #e8f4f8;
 }
 
 .nwst-btn-danger {
@@ -362,7 +375,6 @@
 .nwst-journal-block {
     border: 0.5px solid var(--SmartThemeBorderColor, #ddd);
     border-radius: 8px;
-    overflow: hidden;
     margin-bottom: 10px;
 }
 
@@ -442,9 +454,96 @@
 .nwst-weather-strip {
     display: flex;
     gap: 6px;
-    overflow-x: auto;
-    padding: 2px 0 6px;
+    overflow-x: scroll;
+    overflow-y: hidden;
+    min-width: 0;
+    padding: 2px 0 12px;
     margin-bottom: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 30%, transparent) transparent;
+}
+
+/* Force scrollbar visibility on the forecast strip regardless of OS auto-hide setting */
+/* Using explicit color fallbacks to guarantee visibility regardless of theme */
+.nwst-weather-strip::-webkit-scrollbar {
+    height: 10px;
+}
+.nwst-weather-strip::-webkit-scrollbar-track {
+    background: rgba(128, 128, 128, 0.2);
+    border-radius: 5px;
+}
+.nwst-weather-strip::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.6);
+    border-radius: 5px;
+    min-height: 30px;
+}
+.nwst-weather-strip::-webkit-scrollbar-thumb:hover {
+    background: rgba(128, 128, 128, 0.8);
+}
+
+/* ── Forecast scroll button indicators ──────────────────────────────────── */
+/* Wrapper positions arrows at the edges of the forecast strip */
+.nwst-scroll-wrap {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+}
+
+/* Arrows: hidden by default, fade in on wrapper hover when overflow exists */
+.nwst-scroll-arrow {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 5;
+    width: 20px;
+    padding: 0;
+    border: none;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 70%, transparent);
+    color: var(--SmartThemeBodyColor, #fff);
+    font-size: 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+    border-radius: 0;
+}
+
+.nwst-scroll-left {
+    left: 0;
+    border-radius: 6px 0 0 6px;
+}
+
+.nwst-scroll-right {
+    right: 0;
+    border-radius: 0 6px 6px 0;
+}
+
+/* Only show on hover of the wrap, and only when overflow exists */
+.nwst-scroll-wrap.has-overflow:hover .nwst-scroll-arrow {
+    opacity: 0.45;
+    pointer-events: auto;
+}
+
+.nwst-scroll-wrap.has-overflow .nwst-scroll-arrow:hover {
+    opacity: 0.85;
+}
+
+/* When the strip is scrolled to start/end, fade the corresponding arrow */
+.nwst-scroll-wrap.at-start .nwst-scroll-left {
+    opacity: 0.08 !important;
+    pointer-events: none !important;
+}
+.nwst-scroll-wrap.at-end .nwst-scroll-right {
+    opacity: 0.08 !important;
+    pointer-events: none !important;
+}
+
+.nwst-scroll-wrap .nwst-weather-strip {
+    flex: 1;
+    min-width: 0;
 }
 
 .nwst-weather-day {
@@ -776,6 +875,16 @@
     color: #8a5a00;
 }
 
+/* Promoted-to-secret badge */
+.nwst-badge-promoted {
+    background: #E8F4FD;
+    color: #2C6B8C;
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
 /* Status badges */
 .nwst-badge-pending {
     background: #F1EFE8;
@@ -975,7 +1084,7 @@
     align-items: flex-start;
     gap: 8px;
     padding: 7px 10px;
-    border-bottom: 0.5px solid #f8f8f8;
+    border-bottom: 0.5px solid #777;
     font-size: 13px;
     color: #333;
     line-height: 1.5;
@@ -1135,6 +1244,7 @@
     justify-content: space-between;
     opacity: 0.85;
 }
+
 
 /* ── Popout Expand Button & Modal ────────────────────────────────────────── */
 .nwst-expand-btn {
@@ -1398,6 +1508,10 @@
 /* ── Floating popout for magic wand menu ────────────────────────────────── */
 /* Matches TypefaceR's popout pattern: fixed-position, left-aligned,         */
 /* draggable floating panel that appears when clicking the wand entry.       */
+/* NOTE: overflow auto on the popout itself handles vertical scrolling so    */
+/* that no intermediate container needs a scroll container (which would      */
+/* clip child horizontal scrollbars like the forecast strip). This also      */
+/* overrides ST's .draggable { overflow: hidden } via higher specificity.    */
 #nwst-popout {
     position: fixed;
     top: var(--topBarBlockSize, 45px);
@@ -1414,7 +1528,8 @@
     z-index: 10000;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: auto;
     backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
     -webkit-backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
 }
@@ -1471,18 +1586,20 @@
 
 #nwst-popout-content {
     flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: visible;
     padding: 0;
 }
 
 /* ── Override NWST shell styles when inside the popout ──────────────────── */
 /* The popout replaces the sidebar drawer context, so we remove constraints   */
 /* that were only meaningful inside the extensions sidebar.                   */
+/* Vertical scrolling should not be needed — the forecast strip scrolls      */
+/* horizontally, and the popout's own layout handles vertical overflow.       */
 #nwst-popout .nwst-shell {
     max-width: none;
     border: none;
     border-radius: 0;
+    overflow: visible;
 }
 
 /* Ensure the inline-drawer content is always visible in the popout */

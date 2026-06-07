@@ -114,6 +114,16 @@ const defaultSettings = {
     scanMinimumMessages: 10,  // Warmup floor — initial scan fires after this many messages
     maxSnapshotCount: 30,       // Maximum snapshots stored per chat — oldest are pruned when exceeded
 
+    // Event Horizon Compaction — stale resolved/missed events are compacted
+    // into the Notebook's doNotForget section and removed from active events
+    // after this many story days past their resolveDay.
+    eventCompactionThreshold: 3,
+
+    // Event→Secret Promotion — when a resolved/missed event has participants
+    // with information asymmetry, automatically promote it to a structured
+    // secret in the Notebook with whoKnows/whoDoesNotKnow tracking.
+    autoPromoteEvents: true,
+
     // Moon cycle configuration (fantasy worlds can override the 29.53-day cycle)
     moonCycleDays: 29.53,
 
@@ -134,6 +144,7 @@ const defaultSettings = {
         injectCurrentDay: true,
         injectEvents: true,
         injectWorldConditions: true,
+        densityMode: 'combined',   // 'token-budget' | 'combined' | 'atmospheric'
         maxActiveEvents: 12,       // Maximum total active events in the pool at any time
         placement: 'before_main',   // 'before_main' | 'after_main' | 'top_an' | 'bottom_an' | 'at_depth'
         depth: 2,
@@ -366,9 +377,7 @@ function registerMagicWandMenuEntry() {
         <span>Narrative World State</span>
     `;
 
-    entry.addEventListener('click', function (e) {
-        e.stopPropagation();
-
+    entry.addEventListener('click', function () {
         // Toggle the standalone floating popup — NOT the sidebar drawer
         if (nwstPopoutVisible) {
             closeNwstPopout();
@@ -535,14 +544,20 @@ async function onChatChanged() {
         resetProfileWarnings();
     } catch (e) { /* non-fatal */ }
 
-    // Run one-time migration for this chat if it has data in the old
-    // extensionSettings location (from builds prior to chatMetadata switch)
+    // Run one-time migrations for this chat
     if (chatId) {
         try {
             const { migrateLegacyData } = await import('./data/storage.js');
-            const migrated = await migrateLegacyData(chatId);
-            if (migrated) {
+            const legacyMigrated = await migrateLegacyData(chatId);
+            if (legacyMigrated) {
                 log(`Legacy data migrated for chat: ${chatId}`);
+            }
+
+            // Migrate event data to ensure all events have latest fields
+            const { migrateEventData } = await import('./data/events.js');
+            const eventsMigrated = await migrateEventData(chatId);
+            if (eventsMigrated > 0) {
+                log(`Event data migration: ${eventsMigrated} events updated for chat ${chatId}`);
             }
         } catch (e) {
             console.warn('[NWST] Migration check failed (non-fatal):', e);
@@ -585,14 +600,20 @@ async function init() {
     // 1. Initialize settings
     initSettings();
 
-    // 2. Run one-time migration for the currently open chat (if needed)
+    // 2. Run one-time migrations for the currently open chat (if needed)
     //    This handles the case where the user opens ST with a chat already active
     try {
         const { chatId } = SillyTavern.getContext();
         if (chatId) {
             const { migrateLegacyData } = await import('./data/storage.js');
-            const migrated = await migrateLegacyData(chatId);
-            if (migrated) log(`Legacy data migrated for current chat: ${chatId}`);
+            const legacyMigrated = await migrateLegacyData(chatId);
+            if (legacyMigrated) log(`Legacy data migrated for current chat: ${chatId}`);
+
+            // Migrate event data to ensure all events have the latest fields
+            // (participants, promotedSecretId, knowledgeSummary, resolveDay)
+            const { migrateEventData } = await import('./data/events.js');
+            const eventsMigrated = await migrateEventData(chatId);
+            if (eventsMigrated > 0) log(`Event data migration: ${eventsMigrated} events updated for chat ${chatId}`);
         }
     } catch (e) {
         console.warn('[NWST] Init migration check failed (non-fatal):', e);
@@ -642,8 +663,96 @@ async function init() {
         log('Scanner not started (disabled or paused).');
     }
 
+    // Register slash commands
+    await registerSlashCommands();
+    log('Slash commands registered (/dayadv, /dayrewind).');
+
     log('NWST initialization complete. ✅');
     log('───────────────────────────────────────────');
+}
+
+// ── Slash commands ───────────────────────────────────────────────────────────
+
+/**
+ * Register NWST slash commands with SillyTavern.
+ *
+ * /dayadv   — Advance to the next day (same as pressing the › button)
+ * /dayrewind — Restore the previous day from snapshot (same as pressing ‹)
+ */
+async function registerSlashCommands() {
+    try {
+        const { SlashCommandParser, SlashCommand, ARGUMENT_TYPE, SlashCommandArgument } =
+            SillyTavern.getContext();
+
+        if (!SlashCommandParser || !SlashCommand) {
+            console.warn('[NWST] SlashCommandParser not available — slash commands not registered.');
+            return;
+        }
+
+        // /dayadv — advance one day forward
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'dayadv',
+            helpString: 'Advance the NWST world state to the next in-game day.',
+            unnamedArgumentList: [],
+            callback: async () => {
+                try {
+                    const { advanceToNextDay } = await import('./llm/dayAdvancement.js');
+                    nwstToast('Advancing day...', 'info');
+                    const success = await advanceToNextDay();
+                    if (success) {
+                        if (typeof window?.nwstRefreshTabs === 'function') {
+                            window.nwstRefreshTabs('home', 'events');
+                        }
+                    }
+                } catch (err) {
+                    console.error('[NWST] /dayadv failed:', err);
+                    nwstToast('Day advancement failed. Check the console.', 'error');
+                }
+                return '';
+            }
+        }));
+
+        // /dayrewind — restore the most recent previous day snapshot
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'dayrewind',
+            helpString: 'Restore the NWST world state to the previous in-game day snapshot.',
+            unnamedArgumentList: [],
+            callback: async () => {
+                try {
+                    const { restorePreviousDay } = await import('./llm/dayAdvancement.js');
+                    const { getDayBoundarySnapshots } = await import('./data/worldState.js');
+
+                    const chatId = getChatId();
+                    if (!chatId) {
+                        nwstToast('No active chat.', 'warning');
+                        return '';
+                    }
+
+                    const snapshots = getDayBoundarySnapshots(chatId);
+                    if (!snapshots || snapshots.length === 0) {
+                        nwstToast('No previous day snapshot found.', 'warning');
+                        return '';
+                    }
+
+                    // Always restore the most recent snapshot (index 0)
+                    const target = snapshots[0];
+                    nwstToast('Rewinding to previous day...', 'info');
+                    await restorePreviousDay(target.key);
+
+                    if (typeof window?.nwstRefreshTabs === 'function') {
+                        window.nwstRefreshTabs('home', 'events');
+                    }
+                } catch (err) {
+                    console.error('[NWST] /dayrewind failed:', err);
+                    nwstToast('Day rewind failed. Check the console.', 'error');
+                }
+                return '';
+            }
+        }));
+
+    } catch (err) {
+        console.warn('[NWST] Slash command registration failed:', err);
+    }
 }
 
 // ── Start the extension ────────────────────────────────────────────────────

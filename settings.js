@@ -127,6 +127,9 @@ export function getInjectionDepth() { return getSetting('injection').depth; }
 /** Get injection depth role. @returns {string} 'system' | 'user' | 'assistant' */
 export function getInjectionDepthRole() { return getSetting('injection').depthRole; }
 
+/** Get the current output density mode. @returns {'token-budget'|'combined'|'atmospheric'} */
+export function getDensityMode() { return getSetting('injection').densityMode || 'combined'; }
+
 /** Get maximum active events pool size. @returns {number} */
 export function getMaxActiveEvents() { return getSetting('injection').maxActiveEvents ?? 12; }
 

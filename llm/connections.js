@@ -22,7 +22,7 @@
 // =============================================================================
 
 import { getConnectionProfile } from '../settings.js';
-import { nwstToast } from '../utils.js';;
+import { nwstToast } from '../utils.js';
 
 // ── Per-session warning tracker ───────────────────────────────────────────
 // Track which roles we've already warned about this session so we don't

@@ -19,7 +19,7 @@ import { generateWithProfile } from './connections.js';
 //   7. Runs once — non-compounding
 // =============================================================================
 
-import { getChatId, nwstToast } from '../utils.js';;
+import { getChatId, nwstToast } from '../utils.js';
 import { chatHasData } from '../data/storage.js';
 import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig, getSeasonConfig } from '../data/worldState.js';
 import { getAllEvents } from '../data/events.js';
@@ -162,8 +162,20 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         return dayOfYear;
     }
 
-    // ── Method 1: "Month Day, Year" — e.g. "April 15, 2024" or "Haru 17, 2024"
-    const monthDayYearMatch = cleaned.match(/([A-Za-z]+)\s+(\d{1,2}),?\s*(\d{4})/);
+    // ── Helper: extract year (4-digit number) from anywhere in the string ──
+    function extractYear(str) {
+        const m = str.match(/\b(\d{4})\b/);
+        return m ? parseInt(m[1], 10) : null;
+    }
+
+    // ── Helper: Unicode-aware word pattern ──
+    // Matches any contiguous non-whitespace, non-digit, non-punctuation token.
+    // This handles Unicode month names like Jūgatsu, Shimotsuki, Märzen, etc.
+    const WORD = '[^\\s\\d,;:|•·\\-–—=\\/\\\\(){}\\[\\]<>]+';
+
+    // ── Method 1: "Month Day, Year" — e.g. "April 15, 2024" or "Jūgatsu 17, 2024"
+    const m1Regex = new RegExp('(' + WORD + ')\\s+(\\d{1,2}),?\\s*(\\d{4})');
+    const monthDayYearMatch = cleaned.match(m1Regex);
     if (monthDayYearMatch) {
         const monthName = monthDayYearMatch[1].toLowerCase();
         const day = parseInt(monthDayYearMatch[2], 10);
@@ -200,8 +212,9 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         }
     }
 
-    // ── Method 3: "Month Day" without year — e.g. "April 15" or "Haru 17"
-    const monthDayMatch = cleaned.match(/([A-Za-z]+)\s+(\d{1,2})(?:,?\s*\d{4})?\s*$/);
+    // ── Method 3: "Month Day" without year — e.g. "April 15" or "Jūgatsu 17"
+    const m3Regex = new RegExp('(' + WORD + ')\\s+(\\d{1,2})(?:,?\\s*\\d{4})?\\s*$');
+    const monthDayMatch = cleaned.match(m3Regex);
     if (monthDayMatch) {
         const monthName = monthDayMatch[1].toLowerCase();
         const day = parseInt(monthDayMatch[2], 10);
@@ -226,9 +239,15 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
     let monthSource = '';
 
     // 4a. Try custom month name match first (most specific)
+    //     Uses a Unicode-safe regex that does NOT strip non-ASCII characters
+    //     from the name, unlike the previous implementation.
     const allMonthNames = Object.keys(monthMap).sort((a, b) => b.length - a.length); // longest first
     for (const name of allMonthNames) {
-        const regex = new RegExp(`\\b${name.replace(/[^a-z0-9']/g, '')}\\b`, 'i');
+        // Escape regex special chars while preserving Unicode letters
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Use flexible boundary matching: the name must be surrounded by
+        // whitespace, punctuation, or string edges (works with Unicode)
+        const regex = new RegExp('(?:^|[\\s,;:.!?·•\'"\\-|])' + escaped + '(?=[\\s,;:.!?·•\'"\\-|]|$)', 'i');
         if (regex.test(dateStr)) {
             monthIndex = monthMap[name];
             monthSource = `custom month "${name}"`;
@@ -283,23 +302,109 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         }
     }
 
+    // ── Method 5: Flexible word+number scan (Unicode month name fallback) ──
+    // When Methods 1-4 all fail (e.g. Unicode month names not in calendar config),
+    // scan the entire string for any word token followed immediately by 1-2 digits.
+    // Check if that word is in the month map, then compute day-of-year.
+    // Also attempts to extract a 4-digit year from anywhere for leap-year handling.
+    const m5Regex = new RegExp('(' + WORD + ')\\s+(\\d{1,2})');
+    const wordNumberMatch = cleaned.match(m5Regex);
+    if (wordNumberMatch) {
+        const monthName = wordNumberMatch[1].toLowerCase();
+        const candidateDay = parseInt(wordNumberMatch[2], 10);
+        const candidateMonthIndex = monthMap[monthName];
+        if (candidateMonthIndex !== undefined && candidateDay >= 1 && candidateDay <= 31) {
+            const year = extractYear(cleaned);
+            if (year) {
+                const date = new Date(year, candidateMonthIndex, candidateDay);
+                const startOfYear = new Date(year, 0, 0);
+                const diff = date - startOfYear;
+                const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+                if (dayOfYear >= 1 && dayOfYear <= 366) {
+                    console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from flexible scan "${dateStr}"`);
+                    return dayOfYear;
+                }
+            }
+            // No year found — use monthDays array
+            const result = computeFromMonthDay(candidateMonthIndex, candidateDay);
+            if (result !== null) {
+                console.log(`[NWST BatchScan] Computed dayCount ${result} from flexible scan (no year) "${dateStr}"`);
+                return result;
+            }
+        }
+    }
+
+    // ── Method 6: Slash/hyphen/dot delimited date — "11/7/1125", "10/17/24" ──
+    // Catches token-efficient date formats where month, day, and year are
+    // all numeric and separated by / - or . (US convention: month/day/year).
+    // Only fires when Methods 1-5 all failed (no word-based month found).
+    // This prevents bug reports from users trying to shave tokens.
+    const delimRegex = /\b(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})\s*[\/\-\.]\s*(\d{2,4})\b/;
+    const delimMatch = cleaned.match(delimRegex);
+    if (delimMatch) {
+        const month = parseInt(delimMatch[1], 10);
+        const day = parseInt(delimMatch[2], 10);
+        let year = parseInt(delimMatch[3], 10);
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            // Normalize 2-digit years: "24" → 2024, "99" → 1999
+            if (year >= 0 && year < 100) {
+                year += year < 50 ? 2000 : 1900;
+            }
+            if (year >= 1000 && year <= 9999) {
+                const date = new Date(year, month - 1, day);
+                const startOfYear = new Date(year, 0, 0);
+                const diff = date - startOfYear;
+                const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+                if (dayOfYear >= 1 && dayOfYear <= 366) {
+                    console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from delimited date "${dateStr}"`);
+                    return dayOfYear;
+                }
+            }
+        }
+    }
+
     return null;
 }
 
 // ── Internal prompts ───────────────────────────────────────────────────────
 
 // Chunk analysis prompt — used for each chunk pass
-const BATCH_CHUNK_PROMPT = `You are analyzing a segment of a roleplay chat history to build a world state. Read carefully and extract:
+const BATCH_CHUNK_PROMPT = `You are analyzing a segment of a roleplay chat history to build a world state. Read carefully and extract structured scene-level information.
 
-1. Any explicit or implied date, time, season, or era information
-2. Setting details — location, climate, atmosphere, cultural context
-3. Upcoming events mentioned by characters or implied by the world
-4. World conditions — political tensions, social dynamics, spiritual/supernatural elements, environmental state
-5. Key facts, unresolved threads, planted details, character whereabouts
-6. Character social groupings and dynamics
-7. World-level context separately — what the SETTING, CONDITIONS, SEASON, and WORLD imply for upcoming events (distinct from chat-detected events). Note seasonal shifts, political undercurrents, environmental changes that could generate events even if no one in the chat mentioned them.
+=== SCENE STRUCTURE ===
+Break this chunk into narrative scenes. A new scene begins when:
+- The primary speaking character changes
+- A time skip or location change is implied
+- Explicit break markers appear (---, ***, ===)
+- A new topic or situation begins after a pause
 
-Accumulate your findings. If this is not the final chunk, do not produce final output yet — just summarize what you found in plain text for later synthesis.`;
+For EACH scene detected, extract:
+1. SCENE N — Characters present in this scene (list names)
+2. LOCATION — Where this scene takes place (if implied)
+3. MOOD — The emotional/narrative tone of the scene
+4. TIME CLUES — Any date, time, season, or era references in this scene
+5. KEY EVENTS — What happens in this scene (bullet points)
+
+=== CROSS-SCENE ANALYSIS ===
+After listing scenes, provide:
+6. SETTING CONTEXT — Cumulative location, climate, atmosphere, cultural context
+7. UPCOMING EVENTS — Events mentioned by characters or implied by the world
+8. WORLD CONDITIONS — Political tensions, social dynamics, spiritual/supernatural elements, environmental state (aggregated across all scenes in this chunk)
+9. KEY FACTS — Unresolved threads, planted details, character whereabouts (aggregated)
+10. CHARACTER GROUPINGS — Social groupings and dynamics observed
+
+=== WORLD-LEVEL NOTE ===
+Distinguish between chat-detected events (things characters are actively discussing/planning) and world-level context (seasonal shifts, political undercurrents, environmental changes that could generate events even if no one mentioned them).
+
+OUTPUT FORMAT:
+Scenes:
+- Scene 1: [Characters] at [Location] — [Mood]
+  • [Key events/observations]
+- Scene 2: [Characters] at [Location] — [Mood]
+  • [Key events/observations]
+
+Accumulated Analysis:
+[Then your cross-scene aggregated findings in plain text for later synthesis]`;
 
 // Final synthesis system prompt — used for the structured JSON pass
 const BATCH_SYNTHESIS_SYSTEM_PROMPT = `You are synthesizing a complete initial world state for a narrative roleplay tracking extension. You have already analyzed the full chat history. Now produce a structured JSON object.
@@ -422,32 +527,105 @@ export async function runBatchScan() {
 
         console.log(`[NWST BatchScan] Processing ${allMessages.length} messages in ${chunks.length} chunks...`);
 
-        // Process each chunk sequentially
+        // ── Progressive structured state accumulation ──────────────
+        // Instead of raw concatenation, we build a structured accumulation
+        // that organizes findings by scene, with progressive state aggregation.
+        // The synthesis pass receives this structured context rather than raw text.
         let accumulatedContext = '';
 
-        // Include setting context in the accumulated context so the synthesis
-        // pass always has it regardless of what was extracted from chunks
+        // Include setting context FIRST as authoritative anchor
         if (settingContext) {
             accumulatedContext += `=== SETTING CONTEXT (authoritative — use for date anchor and world details) ===\n${settingContext}\n\n`;
         }
 
+        // Progressive state accumulation — tracks narrative elements across chunks
+        // so each chunk's LLM can build on the previous chunk's findings.
+        // State is extracted via simple heuristics from each chunk's LLM response
+        // and passed as prior context to subsequent chunks.
+        const stateAccumulator = {
+            dateTimeClues: [],
+            knownCharacters: new Set(),
+            locationsMentioned: new Set(),
+            worldConditions: [],
+            activeThreads: []
+        };
+
         for (let i = 0; i < chunks.length; i++) {
-            const messagesPerChunk = Math.ceil(allMessages.length / chunks.length);
-            const startMsg = i * messagesPerChunk + 1;
-            const endMsg = Math.min((i + 1) * messagesPerChunk, allMessages.length);
+            // Compute actual message indices from the chunk content
+            const chunk = chunks[i];
+            const firstMsgIndex = allMessages.indexOf(chunk[0]);
+            const lastMsgIndex = allMessages.indexOf(chunk[chunk.length - 1]);
+            const startMsg = firstMsgIndex >= 0 ? firstMsgIndex + 1 : 1;
+            const endMsg = lastMsgIndex >= 0 ? lastMsgIndex + 1 : allMessages.length;
 
             nwstToast(`Processing messages ${startMsg}–${endMsg}...`, 'info');
 
-            const chunkText = formatChunkForLLM(chunks[i], i + 1, chunks.length, startMsg, endMsg, settingContext);
+            // Build progressive context for this chunk — includes what was
+            // found in PRIOR chunks so the LLM can refine rather than restart
+            let chunkContext = '';
+            if (i > 0) {
+                chunkContext += `== PRIOR STATE (from earlier chunks) ==\n`;
+                if (stateAccumulator.dateTimeClues.length > 0) {
+                    chunkContext += `Date/time clues so far: ${stateAccumulator.dateTimeClues.join('; ')}\n`;
+                }
+                if (stateAccumulator.knownCharacters.size > 0) {
+                    chunkContext += `Characters encountered: ${[...stateAccumulator.knownCharacters].join(', ')}\n`;
+                }
+                if (stateAccumulator.locationsMentioned.size > 0) {
+                    chunkContext += `Locations mentioned: ${[...stateAccumulator.locationsMentioned].join(', ')}\n`;
+                }
+                if (stateAccumulator.activeThreads.length > 0) {
+                    chunkContext += `Active threads: ${stateAccumulator.activeThreads.join('; ')}\n`;
+                }
+                chunkContext += `\nAnalyze this NEW chunk below, extending or revising the state above as needed.\n\n`;
+            }
+
+            const chunkText = formatChunkForLLM(chunk, i + 1, chunks.length, startMsg, endMsg, settingContext);
+            const fullUserPrompt = chunkContext + chunkText;
 
             const messages = [
                 { role: 'system', content: BATCH_CHUNK_PROMPT },
-                { role: 'user', content: chunkText }
+                { role: 'user', content: fullUserPrompt }
             ];
 
             const response = await generateWithProfile(profile, messages);
             if (response) {
-                accumulatedContext += `\n--- Chunk ${i + 1}/${chunks.length} Analysis ---\n${response}\n`;
+                // Accumulate with structured scene headers
+                const sceneCount = detectChunkScenes(chunk).length;
+                accumulatedContext += `\n=== Chunk ${i + 1}/${chunks.length} (Messages ${startMsg}–${endMsg}, ~${sceneCount} scene(s)) ===\n${response}\n`;
+
+                // Extract and accumulate key state from response for next chunk's prior state
+                // Use simple heuristics: lines containing "Characters:", "Location:", "Date:", "Time:", "Thread:", "Condition:"
+                const lines = response.split('\n');
+                for (const line of lines) {
+                    const lower = line.trim().toLowerCase();
+                    if (lower.startsWith('characters:')) {
+                        const names = line.replace(/^Characters?:\s*/i, '').split(',').map(n => n.trim()).filter(Boolean);
+                        names.forEach(n => stateAccumulator.knownCharacters.add(n));
+                    }
+                    if (lower.startsWith('location:')) {
+                        const loc = line.replace(/^Location:\s*/i, '').trim();
+                        if (loc) stateAccumulator.locationsMentioned.add(loc);
+                    }
+                    if (lower.startsWith('date:') || lower.startsWith('time:')) {
+                        const clue = line.replace(/^(Date|Time):\s*/i, '').trim();
+                        if (clue && !stateAccumulator.dateTimeClues.includes(clue)) {
+                            stateAccumulator.dateTimeClues.push(clue);
+                        }
+                    }
+                    if (lower.startsWith('thread:')) {
+                        const thread = line.replace(/^Thread:\s*/i, '').trim();
+                        if (thread && !stateAccumulator.activeThreads.includes(thread)) {
+                            stateAccumulator.activeThreads.push(thread);
+                        }
+                    }
+                    if (lower.startsWith('condition:')) {
+                        const cond = line.replace(/^Condition:\s*/i, '').trim();
+                        if (cond && !stateAccumulator.worldConditions.includes(cond)) {
+                            stateAccumulator.worldConditions.push(cond);
+                        }
+                    }
+                }
             }
         }
 
@@ -499,30 +677,216 @@ function getAllMessagesUnfiltered() {
     }
 }
 
+// ── Scene boundary detection ─────────────────────────────────────────────
+
+/** Regex patterns that indicate a scene break in narrative text.
+ *  NOTE: No `g` flag — `test()` with `g` maintains `lastIndex` state
+ *  across calls, causing incorrect results for repeated invocations. */
+const SCENE_BREAK_PATTERNS = [
+    /^-{3,}$/m,        // ---
+    /^\*{3,}$/m,       // ***
+    /^={3,}$/m,        // ===
+    /\b(the next day|meanwhile|later that|some time later|the following)\b/i,
+    /\b(a few (hours|days|weeks) later)\b/i,
+    /\b(elsewhere|simultaneously|back at|meanwhile,)\b/i,
+];
+
+/**
+ * Check if a message text contains scene break indicators.
+ * @param {string} text - The message text to check
+ * @returns {boolean} True if scene break detected
+ */
+function hasSceneBreak(text) {
+    if (!text) return false;
+    for (const pattern of SCENE_BREAK_PATTERNS) {
+        if (pattern.test(text)) return true;
+    }
+    return false;
+}
+
+/**
+ * Detect if there's a speaker change between consecutive messages.
+ * @param {object} prev - Previous message
+ * @param {object} curr - Current message
+ * @returns {boolean} True if speaker changed
+ */
+function isSpeakerChange(prev, curr) {
+    if (!prev || !curr) return false;
+    const prevName = prev.name || (prev.is_user ? 'User' : 'Character');
+    const currName = curr.name || (curr.is_user ? 'User' : 'Character');
+    return prevName !== currName;
+}
+
+/**
+ * Detect scene boundaries within a set of messages and return scene break indices.
+ * @param {object[]} messages - Array of message objects
+ * @param {number} startIdx - Index to start scanning from
+ * @param {number} endIdx - Index to stop scanning at
+ * @returns {number[]} Array of message indices where scenes break
+ */
+function detectSceneBreaks(messages, startIdx, endIdx) {
+    const breaks = [];
+    for (let i = startIdx + 1; i <= endIdx; i++) {
+        const msg = messages[i];
+        const prev = messages[i - 1];
+        // Check for explicit break markers in message text
+        if (msg.mes && hasSceneBreak(msg.mes)) {
+            breaks.push(i);
+            continue;
+        }
+        // Check for speaker change (scene transition signal)
+        if (isSpeakerChange(prev, msg)) {
+            breaks.push(i);
+            continue;
+        }
+        // Check for system messages interleaved (OOC notes, narration)
+        if (msg.is_system && prev && !prev.is_system) {
+            breaks.push(i);
+        }
+    }
+    return breaks;
+}
+
+/**
+ * Chunk messages with scene-awareness.
+ * Prefers splitting at scene boundaries (speaker changes, break markers)
+ * but still respects the approximate token limit to ensure each chunk fits
+ * in the LLM context window.
+ *
+ * @param {object[]} messages - Array of message objects from the chat
+ * @param {number} approxTokensPerChunk - Approximate token budget per chunk
+ * @returns {object[][]} Array of message chunks (each chunk is an array of message objects)
+ */
 function chunkMessages(messages, approxTokensPerChunk) {
     const charsPerChunk = approxTokensPerChunk * 4;
+    const minChunkChars = Math.floor(charsPerChunk * 0.4); // Don't split finer than 40% of budget
     const chunks = [];
-    let currentChunk = [];
-    let currentChars = 0;
+    let chunkStart = 0;
 
-    for (const msg of messages) {
-        const msgText = `[${msg.name || (msg.is_user ? 'User' : 'Character')}]: ${msg.mes || ''}`;
-        const msgChars = msgText.length;
+    while (chunkStart < messages.length) {
+        // Count characters in the window starting from chunkStart
+        let runningChars = 0;
+        let lastBreakWithinBudget = -1;
+        let endIdx = chunkStart;
 
-        if (currentChars + msgChars > charsPerChunk && currentChunk.length > 0) {
-            chunks.push(currentChunk);
-            currentChunk = [];
-            currentChars = 0;
+        for (let i = chunkStart; i < messages.length; i++) {
+            const msg = messages[i];
+            const msgText = `[${msg.name || (msg.is_user ? 'User' : 'Character')}]: ${msg.mes || ''}`;
+            const msgChars = msgText.length;
+
+            // If adding this message would exceed budget and we already have content
+            if (runningChars + msgChars > charsPerChunk && endIdx > chunkStart) {
+                // Check for scene breaks within the current accumulated range
+                const breaks = detectSceneBreaks(messages, chunkStart, i - 1);
+                // Find the last scene break that is within a reasonable range
+                for (const b of breaks) {
+                    const breakChars = messages.slice(chunkStart, b).reduce((sum, m) => {
+                        return sum + (`[${m.name || (m.is_user ? 'User' : 'Character')}]: ${m.mes || ''}`.length);
+                    }, 0);
+                    if (breakChars >= minChunkChars && breakChars <= charsPerChunk) {
+                        lastBreakWithinBudget = b;
+                    }
+                }
+
+                if (lastBreakWithinBudget > chunkStart) {
+                    // Split at the best scene boundary within budget
+                    chunks.push(messages.slice(chunkStart, lastBreakWithinBudget));
+                    chunkStart = lastBreakWithinBudget;
+                } else {
+                    // No good scene boundary found — split at current position
+                    chunks.push(messages.slice(chunkStart, i));
+                    chunkStart = i;
+                }
+                runningChars = 0;
+                lastBreakWithinBudget = -1;
+                endIdx = chunkStart;
+                break;
+            }
+
+            runningChars += msgChars;
+            endIdx = i + 1;
         }
 
-        currentChunk.push(msg);
-        currentChars += msgChars;
+        // If we consumed all remaining messages without hitting the budget
+        if (endIdx > chunkStart) {
+            chunks.push(messages.slice(chunkStart, endIdx));
+            chunkStart = endIdx;
+        }
     }
 
-    if (currentChunk.length > 0) chunks.push(currentChunk);
     return chunks;
 }
 
+/**
+ * Detect scene transitions within a chunk and return annotations.
+ * A scene boundary is created when there's an explicit break marker,
+ * or when a speaker change occurs after we've seen at least 2 characters
+ * in the current scene.
+ * @param {object[]} chunk - Array of message objects
+ * @returns {Array} Scene annotations [{ startIndex, endIndex, label, characters }]
+ */
+function detectChunkScenes(chunk) {
+    const scenes = [];
+    let currentScene = { startIndex: 0, label: 'Scene 1', characters: new Set() };
+    if (chunk.length > 0) {
+        const firstMsg = chunk[0];
+        currentScene.characters.add(firstMsg.name || (firstMsg.is_user ? 'User' : 'Character'));
+    }
+
+    for (let i = 1; i < chunk.length; i++) {
+        const msg = chunk[i];
+        const prev = chunk[i - 1];
+        const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+        const prevSender = prev.name || (prev.is_user ? 'User' : 'Character');
+
+        // Check for scene break
+        const explicitBreak = msg.mes && hasSceneBreak(msg.mes);
+        const speakerChange = sender !== prevSender;
+
+        if (explicitBreak || (speakerChange && currentScene.characters.size >= 2)) {
+            // Close current scene
+            scenes.push({
+                startIndex: currentScene.startIndex,
+                endIndex: i - 1,
+                label: currentScene.label,
+                characters: [...currentScene.characters]
+            });
+            // Open new scene
+            const sceneNum = scenes.length + 1;
+            currentScene = {
+                startIndex: i,
+                label: `Scene ${sceneNum}`,
+                characters: new Set([sender])
+            };
+        } else {
+            currentScene.characters.add(sender);
+        }
+    }
+
+    // Final scene
+    scenes.push({
+        startIndex: currentScene.startIndex,
+        endIndex: chunk.length - 1,
+        label: currentScene.label,
+        characters: [...currentScene.characters]
+    });
+
+    return scenes;
+}
+
+/**
+ * Format a message chunk for LLM consumption, with scene-aware annotations.
+ * Inserts scene break markers between detected narrative segments to help
+ * the LLM identify distinct scenes and their character compositions.
+ *
+ * @param {object[]} chunk - Array of message objects for this chunk
+ * @param {number} chunkNum - 1-based chunk index
+ * @param {number} totalChunks - Total number of chunks
+ * @param {number} startMsg - 1-based start message number (overall)
+ * @param {number} endMsg - 1-based end message number (overall)
+ * @param {string|null} settingContext - Optional setting context string
+ * @returns {string} Formatted chunk text with scene annotations
+ */
 function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg, settingContext) {
     let text = `CHUNK ${chunkNum}/${totalChunks} — Messages ${startMsg}–${endMsg}\n`;
 
@@ -538,8 +902,22 @@ function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg, setti
         text += `Continue building your understanding of the narrative.\n\n`;
     }
 
-    for (const msg of chunk) {
+    // Detect scenes within this chunk for annotation
+    const scenes = detectChunkScenes(chunk);
+    let sceneIdx = 0;
+
+    for (let i = 0; i < chunk.length; i++) {
+        const msg = chunk[i];
         const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+
+        // Insert scene break annotation when we cross into a new scene
+        if (sceneIdx < scenes.length && i === scenes[sceneIdx].startIndex) {
+            const scene = scenes[sceneIdx];
+            const charList = scene.characters.join(', ');
+            text += `\n--- ${scene.label}: Characters [${charList}] ---\n`;
+            sceneIdx++;
+        }
+
         text += `[${sender}]: ${msg.mes}\n`;
     }
 
@@ -573,9 +951,56 @@ async function synthesizeBatchResults(chatId, profile, accumulatedContext, allMe
 }
 
 function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) {
-    let prompt = `You have analyzed the full ${messageCount}-message chat history. Here is your accumulated analysis:\n\n`;
+    // ── Synthesis Budget ────────────────────────────────────────────
+    // Scale output quantity based on chat volume to prevent bloated or
+    // sparse initial world states. Longer chats produce more material.
+    const budgetScale = messageCount <= 20 ? 'compact' :
+        messageCount <= 80 ? 'moderate' :
+        messageCount <= 200 ? 'generous' : 'comprehensive';
+
+    const eventTargetMin = messageCount <= 20 ? 6 :
+        messageCount <= 80 ? 10 :
+        messageCount <= 200 ? 14 : 18;
+    const eventTargetMax = messageCount <= 20 ? 12 :
+        messageCount <= 80 ? 18 :
+        messageCount <= 200 ? 24 : 30;
+    const secretTargetMax = messageCount <= 20 ? 2 :
+        messageCount <= 80 ? 4 :
+        messageCount <= 200 ? 6 : 8;
+    const notebookFieldTarget = messageCount <= 20 ? 2 :
+        messageCount <= 80 ? 3 :
+        messageCount <= 200 ? 5 : 7;
+    const communityTarget = messageCount <= 20 ? 2 :
+        messageCount <= 80 ? 4 :
+        messageCount <= 200 ? 6 : 8;
+
+    // ── Build structured prompt ─────────────────────────────────────
+
+    // Extract structured overview from the accumulated context headers
+    const chunkMatches = accumulatedContext.match(/=== Chunk \d+\/\d+ \(Messages \d+–\d+, ~\d+ scene\(s\)\) ===/g) || [];
+    const totalChunks = chunkMatches.length;
+
+    let prompt = `You have analyzed the full ${messageCount}-message chat history across ${totalChunks} chunk(s).\n\n`;
+
+    // ── Accumulated Analysis (scene-structured) ─────────────────────
+    prompt += `=== ACCUMULATED SCENE-LEVEL ANALYSIS ===\n`;
     prompt += accumulatedContext;
-    prompt += `\n\nNow synthesize the COMPLETE initial world state as a single JSON object.\n\n`;
+    prompt += `\n\n`;
+    prompt += `=== SYNTHESIS INSTRUCTIONS ===\n`;
+    prompt += `Now synthesize the COMPLETE initial world state as a single JSON object.\n`;
+
+    // ── Synthesis Budget Guidance ───────────────────────────────────
+    prompt += `\n─── SYNTHESIS BUDGET (${budgetScale}) ───\n`;
+    prompt += `Based on the chat volume (${messageCount} messages), use these output targets:\n`;
+    prompt += `  Events: ${eventTargetMin}–${eventTargetMax} total (across all tiers and categories)\n`;
+    prompt += `    - Distribute: ~40% immediate/week, ~30% month, ~30% undetermined\n`;
+    prompt += `    - World events per tier: max ${Math.min(5, Math.ceil(eventTargetMax / 4))}\n`;
+    prompt += `    - Generated NPC events per tier: max ${Math.min(5, Math.ceil(eventTargetMax / 4))}\n`;
+    prompt += `    - Detected NPC events: no cap (facts from chat)\n`;
+    prompt += `  Secrets: 0–${secretTargetMax} (quality over quantity)\n`;
+    prompt += `  Notebook fields: aim for ${notebookFieldTarget}–${notebookFieldTarget + 2} bullets per applicable field\n`;
+    prompt += `  Communities: ${communityTarget} max (merge related factions)\n`;
+    prompt += `\nThese are GUIDELINES, not hard limits. A chat with rich material should exceed the minimum; a sparse chat should not pad.\n\n`;
 
     // Reiterate the date priority inline in the user prompt so it's impossible to miss
     prompt += `REMINDER — DATE RESOLUTION PRIORITY:\n`;
@@ -663,7 +1088,9 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
       "description": "What is PROJECTED to happen NEXT. Future tense. NEVER a past-tense recap of chat content.",
       "tier": "immediate|week|month|undetermined",
       "isNPC": "true if NPC-driven (character struggles, relationships, backstory, decisions — NPC name appears in title/description), false if world/player-facing (factions, festivals, environment, rumors)",
-      "scheduledDate": "REQUIRED when timing is clear — reference the dayCount above. Format: relative 'Day N+1' (story days) or absolute 'Month/Date' (calendar). OMIT for vague/uncertain timing — not all events need a pinned date."
+      "scheduledDate": "REQUIRED when timing is clear — reference the dayCount above. Format: relative 'Day N+1' (story days) or absolute 'Month/Date' (calendar). OMIT for vague/uncertain timing — not all events need a pinned date.",
+      "participants": ["CharacterName1", "CharacterName2"],
+      "participants_instructions": "List ALL characters involved in this event. Use the character names EXACTLY as they appear in chat. If a character is mentioned in relation to this event, include them. NPC events MUST include the NPC character. Use empty array [] only for world events with no direct character involvement (e.g. weather, natural disaster, festival with unspecified participants)."
     }
   ],
   "conditions": {
@@ -1034,4 +1461,118 @@ function showBatchScanLoading(show) {
         btn.disabled = show;
         btn.textContent = show ? 'Scanning...' : 'Run batch scan';
     }
+}
+
+// ── Event Participant Review (LLM-powered) ─────────────────────────────────
+
+/**
+ * Use the Planning LLM to review all events and add participants where missing.
+ * Called by the debug button in the Events tab.
+ *
+ * For each event that has an empty or missing participants array, the LLM
+ * analyzes the event title and description and determines which characters
+ * are involved, then updates the event in-place.
+ *
+ * @param {string} chatId
+ * @returns {Promise<{reviewed: number, updated: number}>}
+ */
+export async function reviewEventParticipants(chatId) {
+    const { getAllEvents, updateEvent, saveAllEvents } = await import('../data/events.js');
+
+    const events = getAllEvents(chatId);
+    if (!events || events.length === 0) {
+        return { reviewed: 0, updated: 0 };
+    }
+
+    // Only review events that need participants
+    const needsReview = events.filter(e =>
+        !Array.isArray(e.participants) || e.participants.length === 0
+    );
+
+    if (needsReview.length === 0) {
+        return { reviewed: events.length, updated: 0 };
+    }
+
+    const profile = resolveProfile('planningLLM');
+    if (!profile) {
+        throw new Error('No Planning LLM profile configured. Please set one in NWST Settings.');
+    }
+
+    const systemMessage = {
+        role: 'system',
+        content: 'You are an event analysis assistant. Given a list of narrative events, determine which characters are participants in each event. Return ONLY valid JSON — no markdown, no code fences, no extra text.'
+    };
+
+    let updated = 0;
+
+    // Process in batches of 10 to stay within context limits
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < needsReview.length; i += BATCH_SIZE) {
+        const batch = needsReview.slice(i, i + BATCH_SIZE);
+
+        const eventList = batch.map((ev, idx) =>
+            `[${idx + 1}] Title: "${ev.title}"\n` +
+            `    Description: ${ev.description || '(none)'}\n` +
+            `    Tier: ${ev.tier || 'undetermined'}\n` +
+            `    Type: ${ev.isNPC ? 'NPC event' : 'World event'}`
+        ).join('\n\n');
+
+        const userMessage = {
+            role: 'user',
+            content: [
+                'Review these events and add participants (character names involved):',
+                '',
+                eventList,
+                '',
+                'For each event, list the character names that are participants.',
+                'Use exact character names as they appear in the event title/description.',
+                'If an event has no clear character participants (e.g. a weather event or festival',
+                'with no specific characters), return an empty array.',
+                '',
+                'Return ONLY this JSON structure (no markdown, no code fences):',
+                '{',
+                '  "events": [',
+                '    { "index": 1, "participants": ["Name1", "Name2"] },',
+                '    { "index": 2, "participants": [] }',
+                '  ]',
+                '}'
+            ].join('\n')
+        };
+
+        try {
+            const { generateWithProfile } = await import('./connections.js');
+            const response = await generateWithProfile(profile, [systemMessage, userMessage], {
+                maxTokens: 500
+            });
+
+            if (!response) continue;
+
+            // Parse JSON
+            let jsonStr = response.trim();
+            const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (fenceMatch) jsonStr = fenceMatch[1].trim();
+
+            const result = JSON.parse(jsonStr);
+            if (!result.events || !Array.isArray(result.events)) continue;
+
+            for (const entry of result.events) {
+                const evIdx = entry.index - 1;
+                if (evIdx < 0 || evIdx >= batch.length) continue;
+                if (!Array.isArray(entry.participants)) continue;
+
+                const event = batch[evIdx];
+                event.participants = entry.participants;
+                updated++;
+            }
+        } catch (e) {
+            console.warn('[NWST BatchScan] Failed to review participant batch:', e);
+        }
+    }
+
+    // Save all updated events
+    if (updated > 0) {
+        await saveAllEvents(chatId, events);
+    }
+
+    return { reviewed: needsReview.length, updated };
 }
