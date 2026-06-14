@@ -79,6 +79,13 @@ export function buildSettingsTab() {
                     </div>
                     <select id="nwst-setting-narrativeConsistencyLLM" style="margin-bottom:12px"></select>
 
+                    <!-- No-think (per connection profile) -->
+                    <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin-bottom:4px">No-think (per profile)</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">
+                        Soft appends <code>/no_think</code> (safe, ignored if unsupported). Hard also sends API params (<code>think</code>/<code>enable_thinking=false</code>) — turn off if your backend errors.
+                    </div>
+                    <div id="nwst-nothink-rows" style="margin-bottom:16px"></div>
+
                     <!-- Scan frequency -->
                     <div style="font-size:12px;color:#666;margin-bottom:4px">Scan frequency</div>
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
@@ -829,6 +836,7 @@ function populateSettingsUI() {
 
     // Auto-promote events toggle
     setCheckbox('nwst-setting-autoPromoteEvents', getSetting('autoPromoteEvents') !== false);
+    renderNoThinkRows();
 
     const freqInput = document.getElementById('nwst-setting-scanFrequency');
     if (freqInput) freqInput.value = getScanFrequency();
@@ -992,11 +1000,51 @@ function populateConnectionProfileDropdowns() {
 
 // ── Wire events for all settings controls ─────────────────────────────────
 
+function renderNoThinkRows() {
+    const container = document.getElementById('nwst-nothink-rows');
+    if (!container) return;
+    const roleLabels = {
+        planningLLM: 'Planning',
+        dayAdvancementLLM: 'Day advancement',
+        narrativeConsistencyLLM: 'Narrative consistency',
+    };
+    const conns = getConnectionProfiles() || {};
+    const softMap = (getSetting('noThinkProfiles') && typeof getSetting('noThinkProfiles') === 'object') ? getSetting('noThinkProfiles') : {};
+    const hardMap = (getSetting('noThinkHardProfiles') && typeof getSetting('noThinkHardProfiles') === 'object') ? getSetting('noThinkHardProfiles') : {};
+
+    container.innerHTML = '';
+    for (const roleKey of Object.keys(roleLabels)) {
+        const pid = conns[roleKey] || '';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:14px;padding:5px 0;border-bottom:0.5px solid #2a2a2a';
+        const label = pid ? roleLabels[roleKey] : `${roleLabels[roleKey]} <span style="color:#a66">(no profile)</span>`;
+        const dis = pid ? '' : 'disabled';
+        row.innerHTML = `
+            <span style="flex:1;font-size:12px;color:#ccc">${label}</span>
+            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:#aaa;cursor:pointer"><input type="checkbox" class="nwst-nt-soft" ${softMap[pid] ? 'checked' : ''} ${dis}> soft</label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:#aaa;cursor:pointer"><input type="checkbox" class="nwst-nt-hard" ${hardMap[pid] ? 'checked' : ''} ${dis}> hard</label>
+        `;
+        const soft = row.querySelector('.nwst-nt-soft');
+        const hard = row.querySelector('.nwst-nt-hard');
+        if (soft) soft.addEventListener('change', () => {
+            const m = (getSetting('noThinkProfiles') && typeof getSetting('noThinkProfiles') === 'object') ? getSetting('noThinkProfiles') : {};
+            if (soft.checked) m[pid] = true; else delete m[pid];
+            setSetting('noThinkProfiles', m);
+        });
+        if (hard) hard.addEventListener('change', () => {
+            const m = (getSetting('noThinkHardProfiles') && typeof getSetting('noThinkHardProfiles') === 'object') ? getSetting('noThinkHardProfiles') : {};
+            if (hard.checked) m[pid] = true; else delete m[pid];
+            setSetting('noThinkHardProfiles', m);
+        });
+        container.appendChild(row);
+    }
+}
+
 function wireSettingsEvents() {
     // ── Connection profile dropdowns ─────────────────────────────
-    wireSelect('nwst-setting-planningLLM', (val) => setConnectionProfile('planningLLM', val));
-    wireSelect('nwst-setting-dayAdvancementLLM', (val) => setConnectionProfile('dayAdvancementLLM', val));
-    wireSelect('nwst-setting-narrativeConsistencyLLM', (val) => setConnectionProfile('narrativeConsistencyLLM', val));
+    wireSelect('nwst-setting-planningLLM', (val) => { setConnectionProfile('planningLLM', val); renderNoThinkRows(); });
+    wireSelect('nwst-setting-dayAdvancementLLM', (val) => { setConnectionProfile('dayAdvancementLLM', val); renderNoThinkRows(); });
+    wireSelect('nwst-setting-narrativeConsistencyLLM', (val) => { setConnectionProfile('narrativeConsistencyLLM', val); renderNoThinkRows(); });
 
     // ── Scan frequency ───────────────────────────────────────────
     wireInput('nwst-setting-scanMinimumMessages', (val) => {
