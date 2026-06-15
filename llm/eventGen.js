@@ -25,6 +25,7 @@ import { getNotebook } from '../data/notebook.js';
 import { getAllCommunities } from '../data/communities.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getMaxActiveEvents } from '../settings.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Internal prompts ──────────────────────────────────────────────────────
 
@@ -520,7 +521,7 @@ function runPlausibilityCheck(chatId, candidateEvents) {
     return candidateEvents.filter(event => {
         // Remove duplicates by title
         if (activeTitles.includes(event.title.toLowerCase().trim())) {
-            console.log(`[NWST EventGen] Discarded duplicate: "${event.title}"`);
+            dlog(`[NWST EventGen] Discarded duplicate: "${event.title}"`);
             return false;
         }
         // Remove events that are written in past tense (LLM failure to follow instructions)
@@ -529,7 +530,7 @@ function runPlausibilityCheck(chatId, candidateEvents) {
         const firstSentence = desc.split('.')[0].toLowerCase();
         const isPastTense = pastTenseMarkers.some(m => firstSentence.includes(m));
         if (isPastTense) {
-            console.log(`[NWST EventGen] Discarded past-tense event (should be in notebook): "${event.title}"`);
+            dlog(`[NWST EventGen] Discarded past-tense event (should be in notebook): "${event.title}"`);
             return false;
         }
         return true;

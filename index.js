@@ -50,15 +50,26 @@ const EXTENSION_FOLDER = 'third-party/Narrative-World-State-Tracker';
 
 // ── Logging helpers ────────────────────────────────────────────────────────
 
+// ── Logging helpers ────────────────────────────────────────────────────────
+// log() and debug() are both gated behind the "Debug F12 logging" toggle in
+// Settings, so the console stays quiet during normal use. errorLog() is NEVER
+// gated — real errors must always be visible.
+
+function isDebugOn() {
+    try {
+        const { extensionSettings } = SillyTavern.getContext();
+        return !!extensionSettings[MODULE_NAME]?.debugMode;
+    } catch (_) {
+        return false;
+    }
+}
+
 function log(...args) {
-    console.log(`[${MODULE_NAME_FANCY}]`, ...args);
+    if (isDebugOn()) console.log(`[${MODULE_NAME_FANCY}]`, ...args);
 }
 
 function debug(...args) {
-    const { extensionSettings } = SillyTavern.getContext();
-    if (extensionSettings[MODULE_NAME]?.debugMode) {
-        console.log(`[${MODULE_NAME_FANCY} DEBUG]`, ...args);
-    }
+    if (isDebugOn()) console.log(`[${MODULE_NAME_FANCY} DEBUG]`, ...args);
 }
 
 function errorLog(...args) {

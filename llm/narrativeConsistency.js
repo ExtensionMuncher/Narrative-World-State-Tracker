@@ -29,6 +29,7 @@ import { getChatId, nwstToast } from '../utils.js';
 import { getNotebook, getAllSecrets, addMysteryBullet, getMysteryField } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { isEnabled, isPaused, getSecretBudgetTokens } from '../settings.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -404,7 +405,7 @@ export async function runConsistencyCheck() {
     try {
         const profile = resolveProfile('narrativeConsistencyLLM');
         if (!profile) {
-            console.log('[NWST NarrativeConsistency] No Narrative Consistency profile configured — skipping check.');
+            dlog('[NWST NarrativeConsistency] No Narrative Consistency profile configured — skipping check.');
             return false;
         }
 
@@ -426,7 +427,7 @@ export async function runConsistencyCheck() {
             { role: 'user', content: userPrompt }
         ];
 
-        console.log('[NWST NarrativeConsistency] Running consistency check...');
+        dlog('[NWST NarrativeConsistency] Running consistency check...');
         const response = await generateWithProfile(profile, messages);
 
         if (!response) return false;
@@ -443,7 +444,7 @@ export async function runConsistencyCheck() {
             return true;
         }
 
-        console.log('[NWST NarrativeConsistency] No violations detected.');
+        dlog('[NWST NarrativeConsistency] No violations detected.');
         return false;
 
     } catch (err) {

@@ -38,6 +38,7 @@
 //   chatMetadata["nwst:communities"]
 //   chatMetadata["nwst:settingContext"]
 //   chatMetadata["nwst:snapshots"]
+import { dlog } from "../lib/debug.js";
 //   chatMetadata["nwst:seasonConfig"]
 //   chatMetadata["nwst:calendarConfig"]
 //
@@ -328,14 +329,14 @@ async function deleteAllChatData(chatId) {
 function chatHasData(chatId) {
     const meta = getChatMeta();
     if (!meta) {
-        console.log('[NWST Storage] chatHasData: chatMetadata unavailable, returning false');
+        dlog('[NWST Storage] chatHasData: chatMetadata unavailable, returning false');
         return false;
     }
 
     const contentKeys = ['worldState', 'events', 'notebook', 'communities'];
     const found = contentKeys.filter(k => meta[metaKey(k)] !== undefined);
 
-    console.log(`[NWST Storage] chatHasData: content keys found: ${found.join(', ') || 'none'}`);
+    dlog(`[NWST Storage] chatHasData: content keys found: ${found.join(', ') || 'none'}`);
     return found.length > 0;
 }
 
@@ -379,11 +380,11 @@ async function migrateLegacyData(chatId) {
             return false; // Nothing to migrate
         }
 
-        console.log(`[NWST Storage] Migrating legacy data for chatId="${chatId}" from extensionSettings → chatMetadata...`);
+        dlog(`[NWST Storage] Migrating legacy data for chatId="${chatId}" from extensionSettings → chatMetadata...`);
 
         // Only migrate if the new location is empty (don't overwrite newer data)
         if (chatHasData(chatId)) {
-            console.log('[NWST Storage] New storage already has data — skipping migration to avoid overwrite.');
+            dlog('[NWST Storage] New storage already has data — skipping migration to avoid overwrite.');
             return false;
         }
 
@@ -400,7 +401,7 @@ async function migrateLegacyData(chatId) {
 
         ctx.saveSettingsDebounced();
 
-        console.log(`[NWST Storage] Migration complete for chatId="${chatId}". Old data removed from extensionSettings.`);
+        dlog(`[NWST Storage] Migration complete for chatId="${chatId}". Old data removed from extensionSettings.`);
         return true;
 
     } catch (e) {

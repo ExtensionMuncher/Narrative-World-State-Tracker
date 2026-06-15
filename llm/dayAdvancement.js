@@ -24,6 +24,7 @@ import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getPlannerPrompt, getScanFrequency } from '../settings.js';
 import { computeDayOfYearFromDate } from './batchScan.js';
+import { dlog } from "../lib/debug.js";
 
 
 // ── Moon phase calculation (programmatic — no LLM involvement) ────────────
@@ -935,7 +936,7 @@ export async function advanceToNextDay() {
         const compactionThreshold = getSetting('eventCompactionThreshold') ?? 3;
         const compactResult = await compactEventHorizon(chatId, compactionThreshold);
         if (compactResult.compacted > 0) {
-            console.log(`[NWST DayAdvancement] Compacted ${compactResult.compacted} stale events.`);
+            dlog(`[NWST DayAdvancement] Compacted ${compactResult.compacted} stale events.`);
         }
 
         // 11. World event top-up — if the active world event pool is thin after
@@ -1138,7 +1139,7 @@ function parseForecastOnlyField(response, fieldName) {
         return Array.isArray(parsed[fieldName]) ? parsed[fieldName].slice(0, 7) : null;
     } catch (e) {
         console.error(`[NWST DayAdvancement] Parse ${fieldName} JSON error:`, e);
-        console.log('Raw response:', response);
+        dlog('Raw response:', response);
         return null;
     }
 }
@@ -1198,7 +1199,7 @@ function parseDayAdvancementResponse(response) {
         };
     } catch (e) {
         console.error('[NWST DayAdvancement] JSON parse error:', e);
-        console.log('Raw response:', response);
+        dlog('Raw response:', response);
         return null;
     }
 }
@@ -1231,7 +1232,7 @@ async function topUpWorldEvents(chatId) {
         const immediateWorldEvents = activeWorldEvents.filter(e => e.tier === 'immediate');
         const weekWorldEvents = activeWorldEvents.filter(e => e.tier === 'week');
 
-        console.log(`[NWST DayAdvancement] World event pool: ${activeWorldEvents.length} active (immediate: ${immediateWorldEvents.length}, week: ${weekWorldEvents.length})`);
+        dlog(`[NWST DayAdvancement] World event pool: ${activeWorldEvents.length} active (immediate: ${immediateWorldEvents.length}, week: ${weekWorldEvents.length})`);
 
         // Import and call event gen for world events only
         const { regenerateTierEvents } = await import('./eventGen.js');
@@ -1239,14 +1240,14 @@ async function topUpWorldEvents(chatId) {
         // ★ Always top up the immediate tier if it's empty — day advancement
         //    rolls immediate events as missed, so a fresh batch is expected.
         if (immediateWorldEvents.length < 1) {
-            console.log('[NWST DayAdvancement] Immediate tier empty — generating fresh batch...');
+            dlog('[NWST DayAdvancement] Immediate tier empty — generating fresh batch...');
             await regenerateTierEvents('immediate');
         }
 
         // ★ Top up the week tier if it's empty (less aggressive — week events
         //    survive day advancement, so they only need filling when genuinely thin).
         if (weekWorldEvents.length < 1) {
-            console.log('[NWST DayAdvancement] Week tier empty — generating fresh batch...');
+            dlog('[NWST DayAdvancement] Week tier empty — generating fresh batch...');
             await regenerateTierEvents('week');
         }
 
@@ -1254,7 +1255,7 @@ async function topUpWorldEvents(chatId) {
             window.nwstRefreshTabs('home', 'events');
         }
 
-        console.log('[NWST DayAdvancement] World event top-up complete.');
+        dlog('[NWST DayAdvancement] World event top-up complete.');
     } catch (e) {
         console.warn('[NWST DayAdvancement] topUpWorldEvents error:', e);
     }
@@ -1344,7 +1345,7 @@ async function saveDayBoundarySnapshot(chatId) {
         // Use a simple timestamp-based key for day boundary snapshots
         const rangeKey = `day_${Date.now()}`;
         await saveSnapshot(chatId, rangeKey, worldState, events, notebook);
-        console.log('[NWST DayAdvancement] Day boundary snapshot saved.');
+        dlog('[NWST DayAdvancement] Day boundary snapshot saved.');
     } catch (e) {
         console.warn('[NWST DayAdvancement] Failed to save snapshot:', e);
     }

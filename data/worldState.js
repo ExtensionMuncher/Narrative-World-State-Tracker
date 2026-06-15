@@ -31,6 +31,7 @@ import {
     DEFAULT_CALENDAR_CONFIG
 } from './storage.js';
 import { getMaxSnapshotCount } from '../settings.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Current Day ───────────────────────────────────────────────────────────
 
@@ -373,7 +374,7 @@ export async function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsS
         }
 
         if (toPrune.length > 0) {
-            console.log(`[NWST Storage] Pruned ${toPrune.length} old snapshot(s) — kept ${Object.keys(snapshots).length}/${maxCount} (${protected_keys.length} protected).`);
+            dlog(`[NWST Storage] Pruned ${toPrune.length} old snapshot(s) — kept ${Object.keys(snapshots).length}/${maxCount} (${protected_keys.length} protected).`);
         }
     }
 

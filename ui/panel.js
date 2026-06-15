@@ -14,6 +14,7 @@ import { buildSettingsTab, refreshSettingsUI } from './settings.js';
 import { buildEventsTab, refreshEventsUI } from './events.js';
 import { buildWorldStateTab, refreshWorldStateUI } from './worldState.js';
 import { buildNotebookTab, refreshNotebookUI } from './notebook.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Module state ──────────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ const builtTabs = {
  * @param {string} tabName - 'home' | 'events' | 'world' | 'notebook' | 'settings'
  */
 function onTabSwitched(tabName) {
-    console.log(`[NWST Panel] Tab switched to: ${tabName}`);
+    dlog(`[NWST Panel] Tab switched to: ${tabName}`);
 
     // Lazy-build on first access
     if (!builtTabs[tabName]) {
@@ -119,7 +120,7 @@ function refreshAllUI() {
     if (_refreshAllTimer) clearTimeout(_refreshAllTimer);
     _refreshAllTimer = setTimeout(() => {
         _refreshAllTimer = null;
-        console.log('[NWST Panel] Refreshing all built tabs for new chat...');
+        dlog('[NWST Panel] Refreshing all built tabs for new chat...');
         for (const [tabName, isBuilt] of Object.entries(builtTabs)) {
             if (isBuilt) {
                 refreshTab(tabName);

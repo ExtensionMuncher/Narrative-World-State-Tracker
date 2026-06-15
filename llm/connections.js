@@ -23,6 +23,7 @@
 
 import { getConnectionProfile } from '../settings.js';
 import { nwstToast } from '../utils.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Per-session warning tracker ───────────────────────────────────────────
 // Track which roles we've already warned about this session so we don't
@@ -147,7 +148,7 @@ export function resolveProfile(profileKey) {
     }
 
     // Profile found and valid
-    console.log(`[NWST Connections] ${profileKey}: using profile "${profile.name}" (${profile.id})`);
+    dlog(`[NWST Connections] ${profileKey}: using profile "${profile.name}" (${profile.id})`);
     return profile;
 }
 
@@ -218,7 +219,7 @@ export async function generateWithProfile(profile, messages, options = {}) {
             return '';
         }
 
-        console.log(`[NWST Connections] Calling LLM: profile="${profile.name || profile.id}" api="${profile.api || 'unknown'}"`);
+        dlog(`[NWST Connections] Calling LLM: profile="${profile.name || profile.id}" api="${profile.api || 'unknown'}"`);
 
         // Per-profile no-think. Settings are keyed by profile ID so each profile
         // independently controls reasoning suppression. Backward-compat: the old
@@ -265,7 +266,7 @@ export async function generateWithProfile(profile, messages, options = {}) {
         );
 
         const result = response?.content || '';
-        console.log(`[NWST Connections] Response received (${result.length} chars)`);
+        dlog(`[NWST Connections] Response received (${result.length} chars)`);
         return result;
 
     } catch (err) {

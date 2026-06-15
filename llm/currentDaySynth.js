@@ -17,6 +17,7 @@ import {
 import { getActiveEvents } from '../data/events.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getComputedSeason } from './dayAdvancement.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -114,7 +115,7 @@ export async function synthesizeCurrentDay(chatId, profileOverride) {
             spiritualClimate: parsed.spiritualClimate || currentDay.spiritualClimate
         });
 
-        console.log('[NWST CurrentDaySynth] Current Day block updated.');
+        dlog('[NWST CurrentDaySynth] Current Day block updated.');
         if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
         return true;
 
@@ -265,7 +266,7 @@ function parseSynthesisResponse(response) {
                 }
             }
             if (jsonResult.season || jsonResult.weatherToday) {
-                console.log('[NWST CurrentDaySynth] Parsed JSON response successfully.');
+                dlog('[NWST CurrentDaySynth] Parsed JSON response successfully.');
                 return jsonResult;
             }
         }
