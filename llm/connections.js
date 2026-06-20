@@ -122,7 +122,7 @@ export function resolveProfile(profileKey) {
     if (!configuredId) {
         if (!warnedRoles.has(`unconfigured:${profileKey}`)) {
             warnedRoles.add(`unconfigured:${profileKey}`);
-            console.warn(`[NWST Connections] ${profileKey}: no profile configured.`);
+            dlog(`[NWST Connections] ${profileKey}: no profile configured.`);
             nwstToast(
                 `NWST: No ${roleLabel} profile is configured. ` +
                 `This feature will be skipped until you set one in Settings → Connection Profiles.`,
@@ -137,7 +137,7 @@ export function resolveProfile(profileKey) {
     if (!profile) {
         if (!warnedRoles.has(`missing:${profileKey}`)) {
             warnedRoles.add(`missing:${profileKey}`);
-            console.warn(`[NWST Connections] ${profileKey}: configured profile "${configuredId}" no longer exists.`);
+            dlog(`[NWST Connections] ${profileKey}: configured profile "${configuredId}" no longer exists.`);
             nwstToast(
                 `NWST: The ${roleLabel} profile "${configuredId}" no longer exists. ` +
                 `This feature will be skipped until you update it in Settings → Connection Profiles.`,
@@ -246,7 +246,7 @@ export async function generateWithProfile(profile, messages, options = {}) {
                     outMessages.push({ role: 'user', content: '/no_think' });
                 }
             }
-        } catch (e) { console.warn('[NWST] no_think injection skipped:', e); }
+        } catch (e) { dlog('[NWST] no_think injection skipped:', e); }
 
         // No-think HARD switch (per-profile, opt-in). Off unless set for this
         // profile — some backends error on unknown body keys.

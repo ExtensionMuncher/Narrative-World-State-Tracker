@@ -394,7 +394,7 @@ export async function runScan() {
 
         const profile = resolveProfile('planningLLM');
         if (!profile) {
-            console.warn('[NWST Scanner] No Planning LLM profile — skipping scan.');
+            dlog('[NWST Scanner] No Planning LLM profile — skipping scan.');
             return;
         }
 

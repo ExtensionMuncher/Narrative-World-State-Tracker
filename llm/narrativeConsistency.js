@@ -31,6 +31,21 @@ import { resolveProfile, generateWithProfile } from './connections.js';
 import { isEnabled, isPaused, getSecretBudgetTokens } from '../settings.js';
 import { dlog } from "../lib/debug.js";
 
+// ── Character name matching helper ────────────────────────────────────────
+// ST stores the full character card title in msg.name (e.g. "Oyabun Ryōmen
+// Sukuna"), but whoKnows/whoDoesNotKnow lists typically use short names
+// (e.g. "Sukuna"). A strict equality check never matches these, so secrets
+// never inject. This helper does a bidirectional substring match: a secret
+// name matches a scene character if either string contains the other.
+function nameMatches(secretName, sceneName) {
+    if (!secretName || !sceneName) return false;
+    const a = secretName.toLowerCase().trim();
+    const b = sceneName.toLowerCase().trim();
+    if (a === b) return true;
+    // Bidirectional substring: "sukuna" matches "oyabun ryōmen sukuna"
+    return a.includes(b) || b.includes(a);
+}
+
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
 const CONSISTENCY_SYSTEM_PROMPT = `You are a narrative consistency monitor for an ongoing roleplay. Your job is to check whether any character has acted on knowledge they should NOT possess according to the secrets and hidden knowledge tracker.
@@ -110,7 +125,7 @@ function scoreSecretRelevance(secret, sceneCharacters, recentMessageTexts, curre
     // Must have at least one whoKnows character present (baseline)
     if (!secret.whoKnows || secret.whoKnows.length === 0) return 0;
     const knowsPresent = secret.whoKnows.some(name =>
-        sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
+        sceneCharacters.some(sc => nameMatches(name, sc))
     );
     if (!knowsPresent) return 0;
 
@@ -124,7 +139,7 @@ function scoreSecretRelevance(secret, sceneCharacters, recentMessageTexts, curre
     // Active risk: whoDoesNotKnow character is ALSO present
     if (secret.whoDoesNotKnow && secret.whoDoesNotKnow.length > 0) {
         const unknowingPresent = secret.whoDoesNotKnow.some(name =>
-            sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
+            sceneCharacters.some(sc => nameMatches(name, sc))
         );
         if (unknowingPresent) {
             score += SCORE.ACTIVE_RISK;
