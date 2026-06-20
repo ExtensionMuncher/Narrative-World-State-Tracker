@@ -23,6 +23,8 @@ import { getNotebook, addCoreBullet, addMysteryBullet, addSecret, getAllSecrets 
 import { getAllCommunities, updateCommunitySummary, addCommunity } from '../data/communities.js';
 import { resolveProfile } from './connections.js';
 import { runConsistencyCheck } from './narrativeConsistency.js';
+import { runSecretsSidecar } from './secretsSidecar.js';
+import { getSidecarCadence } from '../settings.js';
 import { detectNPCEventsFromChat } from './eventGen.js';
 import { dlog } from "../lib/debug.js";
 
@@ -46,6 +48,7 @@ import { dlog } from "../lib/debug.js";
 // always starts from a clean boundary, never from the warmup count.
 
 let messageCountAtLastScan = 0;  // Set after each completed scan
+let messageCountAtLastSidecar = 0;  // Independent cadence for the secrets sidecar
 let warmupMessageCount = 0;      // Counts messages during Phase 1 warmup
 let scanPhase = 'warmup';        // 'warmup' | 'cadence'
 let scanTimer = null;
@@ -337,6 +340,20 @@ async function checkAndScan() {
     if (!isEnabled() || isPaused() || isScanning) return;
 
     const currentCount = getCurrentMessageCount();
+
+    // ── SECRETS SIDECAR — independent cadence ────────────────────────────
+    // The sidecar runs on its own interval (default 10 msgs), separate from
+    // the main scanner cadence. It only fires if there are secrets to analyze
+    // (the sidecar itself no-ops cheaply when there are none). Runs in all
+    // phases — secrets matter even early in a chat.
+    const sidecarCadence = getSidecarCadence();
+    if (currentCount - messageCountAtLastSidecar >= sidecarCadence) {
+        messageCountAtLastSidecar = currentCount;
+        // Fire-and-forget — do not block the main scan path on the sidecar
+        runSecretsSidecar().catch(e =>
+            dlog('[NWST Scanner] Secrets sidecar error (non-fatal):', e)
+        );
+    }
 
     // ── PHASE 1: WARMUP ──────────────────────────────────────────────────
     // Count messages silently until the minimum floor is reached.

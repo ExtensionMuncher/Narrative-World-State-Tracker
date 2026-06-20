@@ -136,6 +136,51 @@ export function getMaxActiveEvents() { return getSetting('injection').maxActiveE
 /** Get the secret injection token budget cap. @returns {number} */
 export function getSecretBudgetTokens() { return getSetting('injection').secretBudgetTokens ?? 600; }
 
+/** Max number of secrets injected at once (hard count cap). @returns {number} */
+export function getMaxSecretsInjected() { return getSetting('injection').maxSecretsInjected ?? 4; }
+
+/** Secrets engine config object (cadence, threshold, weights). @returns {object} */
+export function getSecretsConfig() {
+    const s = getSetting('secrets') || {};
+    return {
+        sidecarCadence: s.sidecarCadence ?? 10,
+        injectionThreshold: s.injectionThreshold ?? 30,
+        weights: s.weights ?? {}
+    };
+}
+
+/** Sidecar cadence in messages. @returns {number} */
+export function getSidecarCadence() { return getSecretsConfig().sidecarCadence; }
+
+/** Score threshold for injection eligibility. @returns {number} */
+export function getInjectionThreshold() { return getSecretsConfig().injectionThreshold; }
+
+/** Scoring weights object. @returns {object} */
+export function getScoringWeights() {
+    const defaults = {
+        knowerPresent: 30, unawarePresent: 20, bothPresent: 40,
+        npcCutawayHolder: 35, groupMatch: 25, anchorMatch: 20,
+        revealConditionMatch: 35, pressureMatch: 25, continuityRisk: 45,
+        priorityLow: -15, priorityNormal: 0, priorityHigh: 20, priorityCritical: 50
+    };
+    return { ...defaults, ...(getSecretsConfig().weights || {}) };
+}
+
+/** Update a single scoring weight. @param {string} key @param {number} value */
+export function setScoringWeight(key, value) {
+    const s = getSetting('secrets') || {};
+    if (!s.weights) s.weights = {};
+    s.weights[key] = value;
+    setSetting('secrets', s);
+}
+
+/** Update a secrets config scalar (sidecarCadence, injectionThreshold). */
+export function setSecretsConfigValue(key, value) {
+    const s = getSetting('secrets') || {};
+    s[key] = value;
+    setSetting('secrets', s);
+}
+
 /** Set the secret injection token budget cap. @param {number} value */
 export function setSecretBudgetTokens(value) { setInjectionSetting('secretBudgetTokens', Math.max(100, parseInt(value) || 600)); }
 

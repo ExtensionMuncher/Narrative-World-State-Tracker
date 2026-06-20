@@ -49,7 +49,7 @@ import {
     isEnabled, isPaused, getDensityMode
 } from '../settings.js';
 import { getChatId, getSetting } from '../index.js';
-import { getSelectiveSecretInjection } from '../llm/narrativeConsistency.js';
+import { buildSecretsInjection } from '../llm/secretsInjection.js';
 import { getLunarAngle, getDegreesPerDay, getMoonPhenomena, computeSeason } from '../llm/dayAdvancement.js';
 import { dlog } from "../lib/debug.js";
 
@@ -143,7 +143,7 @@ export function buildInjectionBlock(chatId) {
     // ── Selective Secret Injection ───────────────────────────────
     // Always instant JS lookup — no API call, no density difference.
     // Secrets are injected as-is in all modes; they're already concise.
-    const secretBlock = getSelectiveSecretInjection(chatId);
+    const secretBlock = buildSecretsInjection(chatId);
     if (secretBlock) parts.push(secretBlock);
 
     if (parts.length === 0) return '';
