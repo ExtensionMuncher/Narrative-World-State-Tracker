@@ -117,6 +117,12 @@ const DEFAULT_CALENDAR_CONFIG = {
 };
 
 const DEFAULT_SNAPSHOTS = {};
+const DEFAULT_ALIAS_REGISTRY = [];
+const DEFAULT_SECRETS_SIDECAR_STATE = null;
+const DEFAULT_SECRETS_META = {
+    userCharacterName: '',
+    userCharacterAliases: ''
+};
 
 const DEFAULTS = {
     worldState:     DEFAULT_WORLD_STATE,
@@ -126,7 +132,13 @@ const DEFAULTS = {
     settingContext: DEFAULT_SETTING_CONTEXT,
     seasonConfig:   DEFAULT_SEASON_CONFIG,
     calendarConfig: DEFAULT_CALENDAR_CONFIG,
-    snapshots:      DEFAULT_SNAPSHOTS
+    snapshots:      DEFAULT_SNAPSHOTS,
+    DEFAULT_ALIAS_REGISTRY,
+    DEFAULT_SECRETS_SIDECAR_STATE,
+    DEFAULT_SECRETS_META,
+    aliasRegistry:  DEFAULT_ALIAS_REGISTRY,
+    secretsSidecarState: DEFAULT_SECRETS_SIDECAR_STATE,
+    secretsMeta:    DEFAULT_SECRETS_META
 };
 
 // ── Internal helpers ──────────────────────────────────────────────────────
@@ -440,5 +452,8 @@ export {
     DEFAULT_SEASON_CONFIG,
     DEFAULT_CALENDAR_CONFIG,
     DEFAULT_SNAPSHOTS,
+    DEFAULT_ALIAS_REGISTRY,
+    DEFAULT_SECRETS_SIDECAR_STATE,
+    DEFAULT_SECRETS_META,
     DEFAULTS
 };

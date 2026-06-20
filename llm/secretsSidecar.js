@@ -33,9 +33,10 @@
 
 import { getChatId, nwstToast } from '../utils.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
-import { isEnabled, isPaused } from '../settings.js';
+import { isEnabled, isPaused, getSidecarScanRange } from '../settings.js';
 import { getAllSecrets } from '../data/notebook.js';
 import { buildAliasRegistry } from '../data/aliasRegistry.js';
+import { getUserCharacterIdentity } from '../data/secretsMeta.js';
 import { dlog } from '../lib/debug.js';
 
 const SIDECAR_STATE_KEY = 'nwst:secretsSidecarState';
@@ -66,7 +67,7 @@ RULES:
 
 // ── Build the sidecar user prompt ─────────────────────────────────────────
 
-function buildSidecarPrompt(recentMessages, registry, secrets) {
+function buildSidecarPrompt(recentMessages, registry, secrets, userIdentity) {
     let prompt = '';
 
     // Roster of canonical entities
@@ -101,7 +102,7 @@ function buildSidecarPrompt(recentMessages, registry, secrets) {
 
 // ── Get recent messages (prose only, visibility-respecting) ───────────────
 
-function getRecentProseMessages(count = 12) {
+function getRecentProseMessages(count = 5) {
     try {
         const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
@@ -208,16 +209,17 @@ export async function runSecretsSidecar() {
 
     try {
         const registry = buildAliasRegistry(chatId);
-        const recentMessages = getRecentProseMessages(12);
+        const scanRange = Math.max(1, parseInt(getSidecarScanRange(), 10) || 5);
+        const recentMessages = getRecentProseMessages(scanRange);
         if (recentMessages.length === 0) return null;
 
-        const userPrompt = buildSidecarPrompt(recentMessages, registry, secrets);
+        const userPrompt = buildSidecarPrompt(recentMessages, registry, secrets, getUserCharacterIdentity(chatId));
         const messages = [
             { role: 'system', content: SIDECAR_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
         ];
 
-        dlog('[NWST SecretsSidecar] Running scene analysis...');
+        dlog(`[NWST SecretsSidecar] Running scene analysis on last ${recentMessages.length}/${scanRange} prose messages...`);
         const response = await generateWithProfile(profile, messages);
         if (!response) return null;
 
@@ -227,6 +229,10 @@ export async function runSecretsSidecar() {
         // Stamp with the current message index for staleness tracking
         const ctx = SillyTavern.getContext();
         analysis.analyzedAtMessageIndex = (ctx.chat || []).length;
+        analysis.scanRange = scanRange;
+        analysis.messagesAnalyzed = recentMessages.length;
+        analysis.messageRangeStart = Math.max(1, analysis.analyzedAtMessageIndex - recentMessages.length + 1);
+        analysis.messageRangeEnd = analysis.analyzedAtMessageIndex;
 
         await saveSidecarState(chatId, analysis);
         dlog('[NWST SecretsSidecar] Scene analysis complete:', analysis);
@@ -251,15 +257,24 @@ export function getSceneContext(chatId) {
     if (!chatId) chatId = getChatId();
 
     const registry = buildAliasRegistry(chatId);
+    const scanRange = Math.max(1, parseInt(getSidecarScanRange(), 10) || 5);
+    const userIdentity = getUserCharacterIdentity(chatId);
+    const userCanonical = userIdentity.name ? registry.resolve(userIdentity.name) : null;
 
-    // Always run the cheap JS prose scan on the most recent messages
-    const recentMessages = getRecentProseMessages(8);
+    // Always run the cheap JS prose scan on the most recent messages.
+    // User/PC identity is the only non-prose exception: if a recent user message
+    // exists and a PC identity is configured, add it explicitly so first-person
+    // user prose still counts as the PC being present.
+    const recentMessages = getRecentProseMessages(scanRange);
     const jsDetected = new Set();
+    let userMessagePresent = false;
     for (const msg of recentMessages) {
+        if (msg.is_user) userMessagePresent = true;
         for (const c of registry.scanProse(msg.mes || '')) {
             jsDetected.add(c);
         }
     }
+    if (userMessagePresent && userCanonical) jsDetected.add(userCanonical);
 
     // Layer the cached sidecar analysis on top (if present)
     const sidecar = getSidecarState(chatId);
@@ -271,29 +286,42 @@ export function getSceneContext(chatId) {
     let sidecarFresh = false;
 
     if (sidecar) {
-        // Merge sidecar's pronoun-resolved characters with JS-detected ones
-        const merged = new Set([...charactersPresent, ...(sidecar.charactersPresent || [])]);
-        charactersPresent = Array.from(merged);
-        sceneType = sidecar.sceneType || 'unknown';
-        activePressures = sidecar.activePressures || [];
-        sceneSummary = sidecar.sceneSummary || '';
-
-        // Staleness: is the sidecar read recent enough to trust its scene-type?
+        // Staleness: only trust semantic sidecar output while it is fresh.
+        // Stale sceneType/pressures/characters can otherwise haunt later scenes.
         try {
             const ctx = SillyTavern.getContext();
             const currentIdx = (ctx.chat || []).length;
             const age = currentIdx - (sidecar.analyzedAtMessageIndex || 0);
-            sidecarFresh = age <= 12; // within roughly one sidecar window
+            // Keep semantic sidecar data only while it still overlaps the
+            // configured prose window. Cadence decides when the LLM runs;
+            // scan range decides how far its cached scene read may reach.
+            const freshnessWindow = Math.max(1, parseInt(getSidecarScanRange(), 10) || 5);
+            sidecarFresh = age <= freshnessWindow;
         } catch (e) { /* default false */ }
+
+        if (sidecarFresh) {
+            // Merge sidecar's pronoun-resolved characters with JS-detected ones
+            const merged = new Set([...charactersPresent, ...(sidecar.charactersPresent || [])]);
+            charactersPresent = Array.from(merged);
+            sceneType = sidecar.sceneType || 'unknown';
+            activePressures = sidecar.activePressures || [];
+            sceneSummary = sidecar.sceneSummary || '';
+        }
     }
 
     return {
         charactersPresent,        // canonical IDs
+        groupsPresent: charactersPresent.filter(c => registry.isGroup?.(c)),
+        userCharacter: userCanonical,
+        isPlayerPresent: !!(userCanonical && charactersPresent.includes(userCanonical)),
         sceneType,
         activePressures,
         sceneSummary,
-        sidecarFresh,             // if false, scoring should lean on JS signals
-        recentText: recentMessages.map(m => m.mes || '').join('\n'),
+        sidecarFresh,             // if false, scoring uses only fresh JS signals
+        sidecarAge: sidecar?.analyzedAtMessageIndex ? Math.max(0, ((SillyTavern.getContext().chat || []).length) - sidecar.analyzedAtMessageIndex) : null,
+        sidecarScanRange: Math.max(1, parseInt(getSidecarScanRange(), 10) || 5),
+        recentMessageCount: recentMessages.length,
+        recentText: recentMessages.map(m => m.mes || '').join('\\n'),
         registry                  // pass through so scoring can resolve names
     };
 }

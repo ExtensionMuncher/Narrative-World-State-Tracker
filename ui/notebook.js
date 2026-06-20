@@ -394,9 +394,10 @@ function refreshSecretsSection() {
                         ${SECRET_TYPES.map(t => `<option value="${t.value}"${secret.type === t.value ? ' selected' : ''}>${t.label}</option>`).join('')}
                     </select>
                     <select class="nwst-secret-priority-select" title="Injection priority — controls when this secret is injected into the main prompt" style="width:auto;font-size:11px;padding:3px 6px">
-                        <option value="high"${(secret.injectionPriority || 'normal') === 'high' ? ' selected' : ''}>⬆ High — always inject</option>
-                        <option value="normal"${(secret.injectionPriority || 'normal') === 'normal' ? ' selected' : ''}>◈ Normal — inject when at risk</option>
-                        <option value="low"${(secret.injectionPriority || 'normal') === 'low' ? ' selected' : ''}>⬇ Low — monitor only, never inject</option>
+                        <option value="critical"${(secret.injectionPriority || 'normal') === 'critical' ? ' selected' : ''}>‼ Critical — continuity guard</option>
+                        <option value="high"${(secret.injectionPriority || 'normal') === 'high' ? ' selected' : ''}>⬆ High — hotter/more eager</option>
+                        <option value="normal"${(secret.injectionPriority || 'normal') === 'normal' ? ' selected' : ''}>◈ Normal — standard relevance</option>
+                        <option value="low"${(secret.injectionPriority || 'normal') === 'low' ? ' selected' : ''}>⬇ Low — background/rare</option>
                     </select>
                     <button class="menu_button nwst-btn-danger nwst-secret-delete" style="font-size:11px;padding:3px 9px;margin-left:auto">Delete secret</button>
                 </div>

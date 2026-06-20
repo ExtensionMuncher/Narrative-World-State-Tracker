@@ -144,6 +144,7 @@ export function getSecretsConfig() {
     const s = getSetting('secrets') || {};
     return {
         sidecarCadence: s.sidecarCadence ?? 10,
+        sidecarScanRange: s.sidecarScanRange ?? 5,
         injectionThreshold: s.injectionThreshold ?? 30,
         weights: s.weights ?? {}
     };
@@ -151,6 +152,9 @@ export function getSecretsConfig() {
 
 /** Sidecar cadence in messages. @returns {number} */
 export function getSidecarCadence() { return getSecretsConfig().sidecarCadence; }
+
+/** Number of recent prose messages the secrets sidecar and JS scanner inspect. @returns {number} */
+export function getSidecarScanRange() { return getSecretsConfig().sidecarScanRange; }
 
 /** Score threshold for injection eligibility. @returns {number} */
 export function getInjectionThreshold() { return getSecretsConfig().injectionThreshold; }
@@ -226,6 +230,7 @@ export function exportGlobalSettings() {
         connections: getConnectionProfiles(),
         scanFrequency: getScanFrequency(),
         injection: getInjectionSettings(),
+        secrets: getSecretsConfig(),
         plannerPrompt: getPlannerPrompt()
     };
     return JSON.stringify(settings, null, 2);
@@ -248,6 +253,7 @@ export function importGlobalSettings(jsonString) {
         if (imported.connections) setSetting('connections', imported.connections);
         if (imported.scanFrequency !== undefined) setScanFrequency(imported.scanFrequency);
         if (imported.injection) setSetting('injection', imported.injection);
+        if (imported.secrets) setSetting('secrets', imported.secrets);
         if (imported.plannerPrompt !== undefined) setPlannerPrompt(imported.plannerPrompt);
 
         return true;

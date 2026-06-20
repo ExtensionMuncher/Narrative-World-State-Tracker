@@ -297,15 +297,14 @@ export async function addSecret(chatId, secretData) {
         evidenceShown: secretData.evidenceShown || '',
         pressureRisk: secretData.pressureRisk || '',
         revealConditions: secretData.revealConditions || '',
-        // Injection priority:
-        //   'high'   — always inject when a whoKnows character is present
-        //   'normal' — inject only when a whoDoesNotKnow character is ALSO present (active risk)
-        //   'low'    — never inject into main prompt; consistency monitor only
+        // Injection priority modifies the v2 relevance score. It does not decide basic triggering.
         injectionPriority: secretData.injectionPriority || 'normal',
         // Relevance scoring fields (used by getSelectiveSecretInjection):
         //   lastInjectionMsgIndex — message counter from chat.length at time of last injection.
         //   -1 means never injected. Used for cooldown and stale-bonus calculations.
         lastInjectionMsgIndex: secretData.lastInjectionMsgIndex ?? -1,
+        // Optional v2 trigger anchors. Preserve exactly to avoid event-promotion data loss.
+        triggerAnchors: secretData.triggerAnchors || null,
         //   relevanceKeywords — comma-separated keywords auto-extracted from title + evidence +
         //   revealConditions on creation. Used for keyword matching against recent chat messages.
         relevanceKeywords: secretData.relevanceKeywords || extractRelevanceKeywords(secretData)

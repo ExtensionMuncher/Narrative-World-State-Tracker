@@ -26,6 +26,7 @@ import { getChatId } from '../utils.js';
 import { getAllSecrets } from './notebook.js';
 import { getAllEvents } from './events.js';
 import { getAllCommunities } from './communities.js';
+import { getUserCharacterIdentity } from './secretsMeta.js';
 
 const ALIAS_KEY = 'nwst:aliasRegistry';
 
@@ -143,16 +144,18 @@ export function buildAliasRegistry(chatId) {
     // entity map: canonicalId -> { canonical, display, aliases:Set }
     const entities = new Map();
 
-    function ensureEntity(canonical, display) {
+    function ensureEntity(canonical, display, kind = 'character') {
         if (!canonical) return null;
         if (!entities.has(canonical)) {
             entities.set(canonical, {
                 canonical,
                 display: display || canonical,
-                aliases: new Set([canonical])
+                aliases: new Set([canonical]),
+                kinds: new Set([kind])
             });
         }
         const e = entities.get(canonical);
+        e.kinds.add(kind);
         // Prefer a non-canonical-looking display if we get a better one
         if (display && display.length > 0 && e.display === e.canonical) {
             e.display = display;
@@ -160,14 +163,66 @@ export function buildAliasRegistry(chatId) {
         return e;
     }
 
-    function addName(rawName) {
+    function addName(rawName, kind = 'character') {
         if (!rawName || typeof rawName !== 'string') return;
         const trimmed = rawName.trim();
         if (!trimmed) return;
         const canonical = toCanonicalId(trimmed);
         if (!canonical) return;
-        const e = ensureEntity(canonical, trimmed);
+        const e = ensureEntity(canonical, trimmed, kind);
         e.aliases.add(canonical);
+    }
+
+    function mergeEntities(sourceCanonical, targetCanonical) {
+        if (!sourceCanonical || !targetCanonical || sourceCanonical === targetCanonical) return;
+        const source = entities.get(sourceCanonical);
+        const target = entities.get(targetCanonical);
+        if (!source || !target) return;
+        for (const a of source.aliases) target.aliases.add(a);
+        for (const k of source.kinds) target.kinds.add(k);
+        if (target.display === target.canonical && source.display) target.display = source.display;
+        entities.delete(sourceCanonical);
+    }
+
+    const UNSAFE_SHORT_ALIASES = new Set([
+        'the','and','of','no','de','la','le','el','a','an','to','in','on','for',
+        'king','queen','lord','lady','sir','madam','master','mistress','oyabun',
+        'team','group','faction','network','committee','staff','servants',
+        'surveillance','operatives','unknown','someone','everyone'
+    ]);
+
+    function isSafeShortAlias(token) {
+        return token && token.length >= 3 && !UNSAFE_SHORT_ALIASES.has(token) && !/^\d+$/.test(token);
+    }
+
+    function addOrMergeShortNameAliases() {
+        const snapshot = Array.from(entities.values());
+        const tokenOwners = new Map();
+        for (const e of snapshot) {
+            const parts = e.canonical.split(' ').filter(isSafeShortAlias);
+            if (parts.length < 2) continue;
+            for (const token of [parts[0], parts[parts.length - 1]]) {
+                if (!isSafeShortAlias(token)) continue;
+                if (!tokenOwners.has(token)) tokenOwners.set(token, new Set());
+                tokenOwners.get(token).add(e.canonical);
+            }
+        }
+        for (const e of Array.from(entities.values())) {
+            if (!entities.has(e.canonical)) continue;
+            const parts = e.canonical.split(' ').filter(isSafeShortAlias);
+            if (parts.length < 2) continue;
+            for (const token of [parts[0], parts[parts.length - 1]]) {
+                if (!isSafeShortAlias(token)) continue;
+                const owners = tokenOwners.get(token);
+                if (!owners || owners.size !== 1) continue; // collision guard
+                if (entities.has(token)) {
+                    mergeEntities(e.canonical, token); // prefer explicit short-name entity when it exists
+                } else {
+                    const current = entities.get(e.canonical);
+                    if (current) current.aliases.add(token);
+                }
+            }
+        }
     }
 
     // ── 1. Auto-build from secrets ─────────────────────────────
@@ -177,32 +232,53 @@ export function buildAliasRegistry(chatId) {
         for (const n of (secret.whoDoesNotKnow || []))  addName(n);
         // Trigger anchors if present (v2 secrets)
         if (secret.triggerAnchors) {
-            for (const n of (secret.triggerAnchors.characters || [])) addName(n);
-            for (const n of (secret.triggerAnchors.aliases   || [])) addName(n);
+            for (const n of (secret.triggerAnchors.characters || [])) addName(n, 'character');
+            for (const n of (secret.triggerAnchors.aliases   || [])) addName(n, 'character');
+            for (const n of (secret.triggerAnchors.groups    || [])) addName(n, 'group');
+            for (const n of (secret.triggerAnchors.organizations || [])) addName(n, 'group');
         }
     }
 
-    // ── 2. Auto-build from events (participants in titles/descriptions) ──
-    // Events don't have a structured participant field, so we only pull
-    // explicit names if a future schema adds them. For now, skip — prose
-    // scanning handles event-mentioned characters.
+    // Configured user/PC identity is treated as a real entity, but only
+    // sceneContext decides whether it is present in a user message.
+    const pc = getUserCharacterIdentity(chatId);
+    if (pc.name) {
+        addName(pc.name, 'user_pc');
+        const pcCanonical = toCanonicalId(pc.name);
+        const e = ensureEntity(pcCanonical, pc.name, 'user_pc');
+        for (const alias of pc.aliases || []) {
+            const ac = toCanonicalId(alias);
+            if (ac) e.aliases.add(ac);
+        }
+    }
+
+    // ── 2. Auto-build from events ──────────────────────────────
+    const events = getAllEvents(chatId) || [];
+    for (const evt of events) {
+        if (Array.isArray(evt.participants)) {
+            for (const n of evt.participants) addName(n, 'character');
+        }
+    }
 
     // ── 3. Auto-build from communities (members) ───────────────
     const communities = getAllCommunities(chatId) || [];
     for (const com of communities) {
         if (com.members && typeof com.members === 'string') {
             for (const m of com.members.split(',')) {
-                addName(m);
+                addName(m, 'character');
             }
         }
         // Community name itself can be a group entity
-        if (com.name) addName(com.name);
+        if (com.name) addName(com.name, 'group');
     }
+
+    // ── 3.5 Auto-merge safe first/full-name variants ───────────
+    addOrMergeShortNameAliases();
 
     // ── 4. Merge manual alias groups (these take precedence) ───
     const manualGroups = getManualAliases(chatId);
     for (const group of manualGroups) {
-        const e = ensureEntity(group.canonical, group.display);
+        const e = ensureEntity(group.canonical, group.display, 'manual');
         e.aliases.add(group.canonical);
         for (const a of (group.aliases || [])) {
             const ac = toCanonicalId(a);
@@ -259,7 +335,8 @@ export function buildAliasRegistry(chatId) {
             return Array.from(entities.values()).map(e => ({
                 canonical: e.canonical,
                 display: e.display,
-                aliases: Array.from(e.aliases)
+                aliases: Array.from(e.aliases),
+                kinds: Array.from(e.kinds || [])
             }));
         },
 
@@ -271,6 +348,16 @@ export function buildAliasRegistry(chatId) {
                 }
             }
             return out;
+        },
+
+        isGroup(canonical) {
+            const e = entities.get(canonical);
+            return !!e && (e.kinds?.has('group') || e.kinds?.has('organization'));
+        },
+
+        isUserPc(canonical) {
+            const e = entities.get(canonical);
+            return !!e && e.kinds?.has('user_pc');
         },
 
         /**
@@ -292,8 +379,13 @@ export function buildAliasRegistry(chatId) {
             for (const e of entities.values()) {
                 for (const alias of e.aliases) {
                     if (alias.length < 3) continue;
+                    const aliasNorm = alias
+                        .replace(/[^\w\s]/g, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    if (aliasNorm.length < 3) continue;
                     // Multi-word aliases: check as a phrase. Single-word: word boundary.
-                    if (padded.includes(' ' + alias + ' ')) {
+                    if (padded.includes(' ' + aliasNorm + ' ')) {
                         found.add(e.canonical);
                         break;
                     }

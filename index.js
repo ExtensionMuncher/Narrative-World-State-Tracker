@@ -181,6 +181,9 @@ const defaultSettings = {
         // Sidecar cadence — how often the scene analyzer LLM runs (messages)
         sidecarCadence: 10,
 
+        // Sidecar scan range — how many recent prose messages the sidecar reads
+        sidecarScanRange: 5,
+
         // Score threshold a secret must reach to be eligible for injection
         injectionThreshold: 30,
 

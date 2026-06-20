@@ -23,7 +23,7 @@ import {
     getMaxSnapshotCount, setMaxSnapshotCount,
     getInjectionSettings, setInjectionSetting, getMaxActiveEvents, getDensityMode,
     getSecretBudgetTokens, setSecretBudgetTokens,
-    getMaxSecretsInjected, getSidecarCadence, getInjectionThreshold,
+    getMaxSecretsInjected, getSidecarCadence, getSidecarScanRange, getInjectionThreshold,
     getScoringWeights, setScoringWeight, setSecretsConfigValue,
     exportGlobalSettings, importGlobalSettings,
     exportChatData, importChatData,
@@ -35,6 +35,7 @@ import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG } from '../data/storage.js';
 import { runBatchScan } from '../llm/batchScan.js';
+import { getSecretsMeta, setSecretsMeta } from '../data/secretsMeta.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
 
@@ -528,6 +529,17 @@ export function buildSettingsTab() {
 
                     <div class="nwst-setting-row">
                         <div>
+                            <div class="nwst-setting-label">Sidecar scan range</div>
+                            <div class="nwst-setting-sub">How many recent prose messages the sidecar and cheap JS scan inspect. Default 5 keeps cutaways focused and avoids stale scene bleed.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-sidecarScanRange" value="5" min="1" max="50" style="width:52px;text-align:center">
+                            <span style="font-size:12px;color:#666">msgs</span>
+                        </div>
+                    </div>
+
+                    <div class="nwst-setting-row">
+                        <div>
                             <div class="nwst-setting-label">Injection threshold</div>
                             <div class="nwst-setting-sub">Minimum relevance score a secret must reach to be eligible for injection.</div>
                         </div>
@@ -540,6 +552,16 @@ export function buildSettingsTab() {
                     </div>
                     <div id="nwst-scoring-weights"></div>
                     <button class="menu_button nwst-btn" id="nwst-setting-resetWeights" style="font-size:11px;padding:3px 9px;margin-top:8px">Reset weights to defaults</button>
+
+                    <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin:16px 0 6px">User/PC identity</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.4">
+                        Optional per-chat identity for your protagonist. If a recent user message is present, this PC is counted as present even when the prose is first-person or does not name them.
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+                        <input type="text" id="nwst-secret-pc-name" placeholder="User/PC canonical name (e.g. Sachiko)" style="font-size:12px">
+                        <input type="text" id="nwst-secret-pc-aliases" placeholder="PC aliases, comma-separated (e.g. Furukawa Sachiko)" style="font-size:12px">
+                        <button class="menu_button nwst-btn" id="nwst-secret-pc-save" style="font-size:11px;padding:3px 9px;align-self:flex-start">Save PC identity</button>
+                    </div>
 
                     <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin:16px 0 6px">Alias manager</div>
                     <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.4">
@@ -622,9 +644,10 @@ export function buildSettingsTab() {
                     <div class="nwst-setting-sub" style="margin-bottom:8px">Bulk-override the injection priority of ALL existing secrets. Useful for testing the priority system — resets all secrets to a single level.</div>
                     <div style="display:flex;align-items:center;gap:8px">
                         <select id="nwst-debug-priority-target" style="width:auto;font-size:11px;padding:3px 6px;flex:1">
-                            <option value="high">⬆ High — always inject</option>
-                            <option value="normal">◈ Normal — inject when at risk</option>
-                            <option value="low">⬇ Low — monitor only</option>
+                            <option value="critical">‼ Critical — continuity guard</option>
+                            <option value="high">⬆ High — hotter/more eager</option>
+                            <option value="normal">◈ Normal — standard relevance</option>
+                            <option value="low">⬇ Low — background/rare</option>
                         </select>
                         <button class="menu_button nwst-btn" id="nwst-debug-apply-priority" style="flex-shrink:0">Apply to all</button>
                     </div>
@@ -1024,6 +1047,13 @@ function populateSettingsUI() {
     if (maxSecInput) maxSecInput.value = getMaxSecretsInjected();
     const sidecarCadInput = document.getElementById('nwst-setting-sidecarCadence');
     if (sidecarCadInput) sidecarCadInput.value = getSidecarCadence();
+    const sidecarRangeInput = document.getElementById('nwst-setting-sidecarScanRange');
+    if (sidecarRangeInput) sidecarRangeInput.value = getSidecarScanRange();
+    const pcMeta = getSecretsMeta(getChatId());
+    const pcNameInput = document.getElementById('nwst-secret-pc-name');
+    const pcAliasesInput = document.getElementById('nwst-secret-pc-aliases');
+    if (pcNameInput) pcNameInput.value = pcMeta.userCharacterName || '';
+    if (pcAliasesInput) pcAliasesInput.value = pcMeta.userCharacterAliases || '';
     const threshInput = document.getElementById('nwst-setting-injectionThreshold');
     if (threshInput) threshInput.value = getInjectionThreshold();
     renderScoringWeights();
@@ -1307,7 +1337,19 @@ function wireSettingsEvents() {
     wireInput('nwst-setting-maxActiveEvents', (val) => setInjectionSetting('maxActiveEvents', Math.max(4, parseInt(val) || 12)));
     wireInput('nwst-setting-maxSecretsInjected', (val) => setInjectionSetting('maxSecretsInjected', Math.max(1, parseInt(val) || 4)));
     wireInput('nwst-setting-sidecarCadence', (val) => setSecretsConfigValue('sidecarCadence', Math.max(1, parseInt(val) || 10)));
+    wireInput('nwst-setting-sidecarScanRange', (val) => setSecretsConfigValue('sidecarScanRange', Math.max(1, parseInt(val) || 5)));
     wireInput('nwst-setting-injectionThreshold', (val) => setSecretsConfigValue('injectionThreshold', Math.max(0, parseInt(val) || 30)));
+
+    const savePcBtn = document.getElementById('nwst-secret-pc-save');
+    if (savePcBtn) {
+        savePcBtn.onclick = async () => {
+            await setSecretsMeta(getChatId(), {
+                userCharacterName: (document.getElementById('nwst-secret-pc-name')?.value || '').trim(),
+                userCharacterAliases: (document.getElementById('nwst-secret-pc-aliases')?.value || '').trim()
+            });
+            nwstToast('Secrets PC identity saved.', 'success');
+        };
+    }
 
     const addAliasBtn = document.getElementById('nwst-alias-add');
     if (addAliasBtn) {
@@ -1931,17 +1973,18 @@ Respond with ONLY a valid JSON object in the following format, no other text:
   "secrets": [
     {
       "id": "secret-id-here",
-      "injectionPriority": "high|normal|low",
+      "injectionPriority": "critical|high|normal|low",
       "reasoning": "Brief explanation for this assignment"
     }
   ]
 }
 
 Analyze each secret carefully. Consider:
-- Is the secret time-sensitive or about to be revealed? → high
-- Does the secret have active tension (characters who know vs. characters who don't)? → normal
-- Is the secret resolved, background, or no longer relevant to current events? → low
-- WhoKnows and WhoDoesNotKnow lists — secrets with both present are actively relevant`
+- Would omission likely cause a continuity/knowledge-boundary break? → critical
+- Is the secret time-sensitive, hot, or approaching reveal? → high
+- Does the secret have active narrative pressure? → normal
+- Is the secret distant, background, or no longer active? → low
+- WhoKnows and WhoDoesNotKnow lists matter, but prose relevance and cutaways matter too`
             };
 
             const userMessage = {
@@ -1993,7 +2036,7 @@ Analyze each secret carefully. Consider:
                         skipped++;
                         continue;
                     }
-                    const valid = ['high', 'normal', 'low'];
+                    const valid = ['critical', 'high', 'normal', 'low'];
                     if (!valid.includes(entry.injectionPriority)) {
                         skipped++;
                         continue;

@@ -19,7 +19,7 @@ import { getSceneContext, getSidecarState } from './secretsSidecar.js';
 import { buildAliasRegistry } from '../data/aliasRegistry.js';
 import {
     getInjectionThreshold, getSecretBudgetTokens,
-    getMaxSecretsInjected, getScoringWeights
+    getMaxSecretsInjected, getScoringWeights, getSidecarScanRange
 } from '../settings.js';
 
 /**
@@ -48,10 +48,18 @@ export function buildSecretsDebugReport(chatId) {
     out += `Characters present: ${scene.charactersPresent.map(c => registry.getDisplay(c)).join(', ') || '(none detected)'}\n`;
     out += `Scene type: ${scene.sceneType}\n`;
     out += `Active pressures: ${scene.activePressures.join(', ') || '(none)'}\n`;
+    out += `Configured scan range: last ${getSidecarScanRange()} prose message(s)\n`;
+    out += `Fresh JS scan used: ${scene.recentMessageCount ?? '?'} message(s)\n`;
     out += `Sidecar fresh: ${scene.sidecarFresh ? 'yes' : 'no (stale or never run)'}\n`;
     if (sidecar) {
         out += `Sidecar summary: ${sidecar.sceneSummary || '(none)'}\n`;
         out += `Sidecar last ran at message: ${sidecar.analyzedAtMessageIndex ?? '?'}\n`;
+        out += `Sidecar age: ${scene.sidecarAge ?? '?'} message(s)\n`;
+        out += `Sidecar read range: ${sidecar.messagesAnalyzed ?? '?'} message(s)`;
+        if (sidecar.messageRangeStart && sidecar.messageRangeEnd) {
+            out += ` (messages ${sidecar.messageRangeStart}–${sidecar.messageRangeEnd})`;
+        }
+        out += `\n`;
     } else {
         out += `Sidecar: has not run yet (using pure-JS entity detection only)\n`;
     }

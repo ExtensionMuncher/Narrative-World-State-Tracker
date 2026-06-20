@@ -186,7 +186,7 @@ function buildSynthesisPrompt(accumulatedContext, existingSecrets) {
     "evidenceShown": "What evidence has been shown",
     "pressureRisk": "Risk if revealed",
     "revealConditions": "When it might be revealed",
-    "injectionPriority": "high|normal|low"
+    "injectionPriority": "critical|high|normal|low"
   }
 ]\n\n`;
     prompt += `CRITICAL — QUALITY CHECKLIST:\n`;

@@ -35,6 +35,21 @@ import {
     getSecretBudgetTokens, getMaxSecretsInjected
 } from '../settings.js';
 
+function normalizeAnchorText(value) {
+    return String(value || '')
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^\w\s-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function splitKeywordString(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') return value.split(',');
+    return [];
+}
+
 // ── Trigger anchor inference ──────────────────────────────────────────────
 // v2 secrets may have an explicit triggerAnchors object. Older secrets don't.
 // For those, infer anchors from the secret's existing text fields so the
@@ -55,7 +70,8 @@ function getSecretAnchors(secret) {
         for (const arr of [ta.concepts, ta.objects, ta.locations, ta.organizations, ta.groups, ta.phrases, ta.emotions]) {
             for (const item of (arr || [])) {
                 if (typeof item === 'string' && item.trim().length >= 3) {
-                    phrases.add(item.toLowerCase().trim());
+                    const norm = normalizeAnchorText(item);
+                    if (norm.length >= 3) phrases.add(norm);
                 }
             }
         }
@@ -66,22 +82,22 @@ function getSecretAnchors(secret) {
     // skip very common narrative-filler words. This makes inferred anchors
     // distinctive enough to be a real signal rather than matching everything.
     const sources = [
-        secret.pressureRisk, secret.revealConditions, secret.evidenceShown
+        secret.title, secret.secret, secret.pressureRisk, secret.revealConditions, secret.evidenceShown
     ];
     for (const src of sources) {
         if (typeof src !== 'string') continue;
-        const words = src.toLowerCase().match(/\b[a-z]{5,}\b/g) || [];
+        const words = normalizeAnchorText(src).match(/\b[a-z0-9][a-z0-9-]{3,}\b/g) || [];
         for (const w of words) {
             if (!STOPWORDS.has(w) && !COMMON_FILLER.has(w)) phrases.add(w);
         }
     }
 
-    // relevanceKeywords (v1 field) if present
-    if (Array.isArray(secret.relevanceKeywords)) {
-        for (const kw of secret.relevanceKeywords) {
-            if (typeof kw === 'string' && kw.trim().length >= 3) {
-                phrases.add(kw.toLowerCase().trim());
-            }
+    // relevanceKeywords (v1 field) if present. Older exports often store this
+    // as a comma-separated string, so accept both arrays and strings.
+    for (const kw of splitKeywordString(secret.relevanceKeywords)) {
+        if (typeof kw === 'string' && kw.trim().length >= 3) {
+            const norm = normalizeAnchorText(kw);
+            if (norm.length >= 3 && !STOPWORDS.has(norm) && !COMMON_FILLER.has(norm)) phrases.add(norm);
         }
     }
 
@@ -137,8 +153,7 @@ export function scoreSecret(secret, sceneContext, weights) {
     const reasons = [];
     const registry = sceneContext.registry;
     const present = new Set(sceneContext.charactersPresent); // canonical IDs
-    const text = (sceneContext.recentText || '').toLowerCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const text = normalizeAnchorText(sceneContext.recentText || '');
 
     // Resolve the secret's knowers/unaware to canonical IDs
     const knowers = (secret.whoKnows || []).map(n => registry.resolve(n)).filter(Boolean);
@@ -172,12 +187,27 @@ export function scoreSecret(secret, sceneContext, weights) {
         reasons.push(`${sceneContext.sceneType} involving holder (+${weights.npcCutawayHolder})`);
     }
 
+    // ── Group/faction/entity match ─────────────────────────────
+    // Groups are entities too. If a detected group/organization is explicitly
+    // tied to the secret through knowers/unaware/anchors/text, award groupMatch.
+    const secretEntityText = normalizeAnchorText(`${secret.title || ''} ${secret.secret || ''} ${secret.evidenceShown || ''} ${secret.pressureRisk || ''} ${secret.revealConditions || ''} ${(secret.whoKnows || []).join(' ')} ${(secret.whoDoesNotKnow || []).join(' ')}`);
+    const groupsPresent = sceneContext.groupsPresent || [];
+    const groupHit = groupsPresent.some(g => {
+        const display = normalizeAnchorText(registry.getDisplay?.(g) || g);
+        return (g && secretEntityText.includes(g)) || (display.length >= 3 && secretEntityText.includes(display));
+    });
+    if (groupHit) {
+        score += weights.groupMatch;
+        reasons.push(`group/faction match (+${weights.groupMatch})`);
+    }
+
     // ── Active pressure match ──────────────────────────────────
     // The sidecar's activePressures are free-text tags. Match them against
-    // the secret's title and pressureRisk.
-    const secretPressureText = `${secret.title || ''} ${secret.pressureRisk || ''}`.toLowerCase();
+    // the secret's title and pressureRisk. getSceneContext only passes these
+    // through while the sidecar read is fresh.
+    const secretPressureText = normalizeAnchorText(`${secret.title || ''} ${secret.secret || ''} ${secret.pressureRisk || ''}`);
     for (const pressure of (sceneContext.activePressures || [])) {
-        const p = pressure.toLowerCase().trim();
+        const p = normalizeAnchorText(pressure);
         if (p.length >= 3 && secretPressureText.includes(p)) {
             score += weights.pressureMatch;
             reasons.push(`active pressure "${pressure}" (+${weights.pressureMatch})`);
@@ -199,7 +229,7 @@ export function scoreSecret(secret, sceneContext, weights) {
 
     // ── Reveal condition referenced in prose ───────────────────
     if (secret.revealConditions && typeof secret.revealConditions === 'string') {
-        const revealWords = secret.revealConditions.toLowerCase().match(/\b[a-z]{5,}\b/g) || [];
+        const revealWords = normalizeAnchorText(secret.revealConditions).match(/\b[a-z0-9][a-z0-9-]{3,}\b/g) || [];
         const meaningful = revealWords.filter(w => !STOPWORDS.has(w));
         const hits = meaningful.filter(w => text.includes(w)).length;
         // Require at least 2 meaningful reveal-condition words to appear
