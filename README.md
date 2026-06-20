@@ -8,7 +8,7 @@ No additional features planned at this time. Strictly for bug fixes and refineme
 ---
 
 # Secrets Engine (v2) — Technical & User Documentation
-### Complete Overhaul Implemented 6/20/26
+### ✅ Complete Overhaul Implemented 6/20/26
 
 The Secrets Engine is a prose-based hidden-state system. It tracks who knows what, who must not know, and what narrative pressure is active — then injects the most relevant secrets into the main prompt as narrator guidance. It is built for multi-character, cutaway-heavy roleplay where dramatic irony lives in scenes the player character isn't even in.
 
