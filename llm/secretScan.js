@@ -20,6 +20,7 @@
 import { getChatId, nwstToast } from '../utils.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getNotebook, addSecret } from '../data/notebook.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
@@ -306,7 +307,7 @@ export async function scanForSecrets(chatId) {
     const chunkSize = Math.floor(maxContext * 0.6);
     const chunks = chunkMessages(allMessages, chunkSize);
 
-    console.log(`[NWST SecretScan] Scanning ${allMessages.length} messages in ${chunks.length} chunks...`);
+    dlog(`[NWST SecretScan] Scanning ${allMessages.length} messages in ${chunks.length} chunks...`);
 
     // ── 5. Process each chunk sequentially ─────────────────────────────────
     let accumulatedContext = '';
@@ -385,7 +386,7 @@ export async function scanForSecrets(chatId) {
         }
     }
 
-    console.log(`[NWST SecretScan] Added ${addedCount} new secret(s) (${candidates.length} detected, ${newSecrets.length} after dedup).`);
+    dlog(`[NWST SecretScan] Added ${addedCount} new secret(s) (${candidates.length} detected, ${newSecrets.length} after dedup).`);
 
     if (typeof window?.nwstRefreshTabs === 'function') {
         window.nwstRefreshTabs('notebook');

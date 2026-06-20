@@ -50,15 +50,26 @@ const EXTENSION_FOLDER = 'third-party/Narrative-World-State-Tracker';
 
 // ── Logging helpers ────────────────────────────────────────────────────────
 
+// ── Logging helpers ────────────────────────────────────────────────────────
+// log() and debug() are both gated behind the "Debug F12 logging" toggle in
+// Settings, so the console stays quiet during normal use. errorLog() is NEVER
+// gated — real errors must always be visible.
+
+function isDebugOn() {
+    try {
+        const { extensionSettings } = SillyTavern.getContext();
+        return !!extensionSettings[MODULE_NAME]?.debugMode;
+    } catch (_) {
+        return false;
+    }
+}
+
 function log(...args) {
-    console.log(`[${MODULE_NAME_FANCY}]`, ...args);
+    if (isDebugOn()) console.log(`[${MODULE_NAME_FANCY}]`, ...args);
 }
 
 function debug(...args) {
-    const { extensionSettings } = SillyTavern.getContext();
-    if (extensionSettings[MODULE_NAME]?.debugMode) {
-        console.log(`[${MODULE_NAME_FANCY} DEBUG]`, ...args);
-    }
+    if (isDebugOn()) console.log(`[${MODULE_NAME_FANCY} DEBUG]`, ...args);
 }
 
 function errorLog(...args) {
@@ -108,6 +119,17 @@ const defaultSettings = {
         dayAdvancementLLM: '',
         narrativeConsistencyLLM: '',
     },
+
+    // No-think soft switch: append "/no_think" to each LLM call to disable
+    // reasoning on supporting models (Qwen3, etc.). Harmless to others.
+    noThink: false,
+    // No-think hard switch: also send API params (think/enable_thinking=false).
+    // Off by default — some backends error on unknown body keys.
+    noThinkHard: false,
+    // Per-profile no-think, keyed by connection profile ID. These take
+    // precedence over the blanket booleans above when present.
+    noThinkProfiles: {},
+    noThinkHardProfiles: {},
 
     // Scanner cadence
     scanFrequency: 20,

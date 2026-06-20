@@ -29,6 +29,22 @@ import { getChatId, nwstToast } from '../utils.js';
 import { getNotebook, getAllSecrets, addMysteryBullet, getMysteryField } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { isEnabled, isPaused, getSecretBudgetTokens } from '../settings.js';
+import { dlog } from "../lib/debug.js";
+
+// ── Character name matching helper ────────────────────────────────────────
+// ST stores the full character card title in msg.name (e.g. "Oyabun Ryōmen
+// Sukuna"), but whoKnows/whoDoesNotKnow lists typically use short names
+// (e.g. "Sukuna"). A strict equality check never matches these, so secrets
+// never inject. This helper does a bidirectional substring match: a secret
+// name matches a scene character if either string contains the other.
+function nameMatches(secretName, sceneName) {
+    if (!secretName || !sceneName) return false;
+    const a = secretName.toLowerCase().trim();
+    const b = sceneName.toLowerCase().trim();
+    if (a === b) return true;
+    // Bidirectional substring: "sukuna" matches "oyabun ryōmen sukuna"
+    return a.includes(b) || b.includes(a);
+}
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
@@ -109,7 +125,7 @@ function scoreSecretRelevance(secret, sceneCharacters, recentMessageTexts, curre
     // Must have at least one whoKnows character present (baseline)
     if (!secret.whoKnows || secret.whoKnows.length === 0) return 0;
     const knowsPresent = secret.whoKnows.some(name =>
-        sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
+        sceneCharacters.some(sc => nameMatches(name, sc))
     );
     if (!knowsPresent) return 0;
 
@@ -123,7 +139,7 @@ function scoreSecretRelevance(secret, sceneCharacters, recentMessageTexts, curre
     // Active risk: whoDoesNotKnow character is ALSO present
     if (secret.whoDoesNotKnow && secret.whoDoesNotKnow.length > 0) {
         const unknowingPresent = secret.whoDoesNotKnow.some(name =>
-            sceneCharacters.some(sc => sc.toLowerCase() === name.toLowerCase())
+            sceneCharacters.some(sc => nameMatches(name, sc))
         );
         if (unknowingPresent) {
             score += SCORE.ACTIVE_RISK;
@@ -404,7 +420,7 @@ export async function runConsistencyCheck() {
     try {
         const profile = resolveProfile('narrativeConsistencyLLM');
         if (!profile) {
-            console.log('[NWST NarrativeConsistency] No Narrative Consistency profile configured — skipping check.');
+            dlog('[NWST NarrativeConsistency] No Narrative Consistency profile configured — skipping check.');
             return false;
         }
 
@@ -426,7 +442,7 @@ export async function runConsistencyCheck() {
             { role: 'user', content: userPrompt }
         ];
 
-        console.log('[NWST NarrativeConsistency] Running consistency check...');
+        dlog('[NWST NarrativeConsistency] Running consistency check...');
         const response = await generateWithProfile(profile, messages);
 
         if (!response) return false;
@@ -443,7 +459,7 @@ export async function runConsistencyCheck() {
             return true;
         }
 
-        console.log('[NWST NarrativeConsistency] No violations detected.');
+        dlog('[NWST NarrativeConsistency] No violations detected.');
         return false;
 
     } catch (err) {

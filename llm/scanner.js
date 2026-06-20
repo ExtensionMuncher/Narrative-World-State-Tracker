@@ -24,6 +24,7 @@ import { getAllCommunities, updateCommunitySummary, addCommunity } from '../data
 import { resolveProfile } from './connections.js';
 import { runConsistencyCheck } from './narrativeConsistency.js';
 import { detectNPCEventsFromChat } from './eventGen.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Scanner state ─────────────────────────────────────────────────────────
 //
@@ -274,7 +275,7 @@ export function startScanner() {
         if (savedState && savedState.scanPhase === 'cadence') {
             scanPhase = 'cadence';
             messageCountAtLastScan = savedState.messageCountAtLastScan;
-            console.log(`[NWST Scanner] Restored cadence position from before reload (last scan at msg ${messageCountAtLastScan}).`);
+            dlog(`[NWST Scanner] Restored cadence position from before reload (last scan at msg ${messageCountAtLastScan}).`);
         } else {
             // No persisted state — first load after the patch was installed,
             // or state was cleared. Position the cadence counter at the most
@@ -286,18 +287,18 @@ export function startScanner() {
             const frequency = getScanFrequency();
             const estimatedLastScan = currentCount - (currentCount % frequency);
             messageCountAtLastScan = estimatedLastScan;
-            console.log(`[NWST Scanner] No persisted state — positioning cadence at msg ${estimatedLastScan}, next scan at msg ${estimatedLastScan + frequency}.`);
+            dlog(`[NWST Scanner] No persisted state — positioning cadence at msg ${estimatedLastScan}, next scan at msg ${estimatedLastScan + frequency}.`);
         }
     } else {
         scanPhase = 'warmup';
         warmupMessageCount = getCurrentMessageCount();
-        console.log(`[NWST Scanner] No batch scan data — starting in warmup phase (floor: ${getScanMinimumMessages()} messages).`);
+        dlog(`[NWST Scanner] No batch scan data — starting in warmup phase (floor: ${getScanMinimumMessages()} messages).`);
     }
 
     const { eventSource, event_types } = SillyTavern.getContext();
     eventSource.on(event_types.MESSAGE_RECEIVED, checkAndScan);
     scanTimer = 'event-driven';
-    console.log(`[NWST Scanner] Started (cadence: every ${getScanFrequency()} messages).`);
+    dlog(`[NWST Scanner] Started (cadence: every ${getScanFrequency()} messages).`);
 }
 
 export function stopScanner() {
@@ -309,7 +310,7 @@ export function stopScanner() {
         console.warn('[NWST Scanner] Error detaching listeners:', e);
     }
     scanTimer = null;
-    console.log('[NWST Scanner] Stopped.');
+    dlog('[NWST Scanner] Stopped.');
 }
 
 export function restartScanner() {
@@ -326,7 +327,7 @@ export function notifyBatchScanComplete() {
     if (scanPhase === 'warmup') {
         scanPhase = 'cadence';
         messageCountAtLastScan = getCurrentMessageCount();
-        console.log('[NWST Scanner] Batch scan completed during warmup — transitioning to cadence phase.');
+        dlog('[NWST Scanner] Batch scan completed during warmup — transitioning to cadence phase.');
     }
 }
 
@@ -351,17 +352,17 @@ async function checkAndScan() {
             // Batch scan done — skip initial scan, go straight to cadence
             scanPhase = 'cadence';
             messageCountAtLastScan = currentCount;
-            console.log('[NWST Scanner] Batch scan detected mid-warmup — skipping initial scan, entering cadence.');
+            dlog('[NWST Scanner] Batch scan detected mid-warmup — skipping initial scan, entering cadence.');
             return;
         }
 
         if (messagesSinceStart < floor) {
-            console.log(`[NWST Scanner] Warmup: ${messagesSinceStart}/${floor} messages.`);
+            dlog(`[NWST Scanner] Warmup: ${messagesSinceStart}/${floor} messages.`);
             return; // Not ready yet
         }
 
         // Floor reached — fire the initial scan
-        console.log(`[NWST Scanner] Warmup complete (${messagesSinceStart} messages). Running initial scan...`);
+        dlog(`[NWST Scanner] Warmup complete (${messagesSinceStart} messages). Running initial scan...`);
         nwstToast('Running initial world state scan...', 'info');
         await runScan();
 
@@ -369,7 +370,7 @@ async function checkAndScan() {
         scanPhase = 'cadence';
         messageCountAtLastScan = getCurrentMessageCount();
         saveScannerState(); // Persist immediately after initial scan
-        console.log('[NWST Scanner] Initial scan complete. Entering cadence phase.');
+        dlog('[NWST Scanner] Initial scan complete. Entering cadence phase.');
         return;
     }
 
@@ -385,7 +386,7 @@ async function checkAndScan() {
 
 export async function runScan() {
     isScanning = true;
-    console.log('[NWST Scanner] Running scan...');
+    dlog('[NWST Scanner] Running scan...');
 
     try {
         const chatId = getChatId();
@@ -393,7 +394,7 @@ export async function runScan() {
 
         const profile = resolveProfile('planningLLM');
         if (!profile) {
-            console.warn('[NWST Scanner] No Planning LLM profile — skipping scan.');
+            dlog('[NWST Scanner] No Planning LLM profile — skipping scan.');
             return;
         }
 
@@ -411,11 +412,11 @@ export async function runScan() {
             { role: 'user', content: userPrompt }
         ];
 
-        console.log('[NWST Scanner] Calling Planning LLM...');
+        dlog('[NWST Scanner] Calling Planning LLM...');
         const response = await generateWithProfile(profile, messages);
 
         if (!response) {
-            console.log('[NWST Scanner] Empty response.');
+            dlog('[NWST Scanner] Empty response.');
             return;
         }
 
@@ -431,7 +432,7 @@ export async function runScan() {
         // Run narrative consistency check (secrets monitoring)
         await runConsistencyCheck();
 
-        console.log('[NWST Scanner] Scan complete.');
+        dlog('[NWST Scanner] Scan complete.');
 
     } catch (err) {
         console.error('[NWST Scanner] Scan failed:', err);
@@ -600,12 +601,12 @@ async function applyScanResults(chatId, response, recentMessages) {
         result = JSON.parse(jsonStr);
     } catch (e) {
         console.warn('[NWST Scanner] Could not parse scan response as JSON. Logging raw response.');
-        console.log('[NWST Scanner] Raw response:', response.substring(0, 800));
+        dlog('[NWST Scanner] Raw response:', response.substring(0, 800));
         return false;
     }
 
     if (!result || result.noChanges === true) {
-        console.log('[NWST Scanner] LLM indicated no changes needed.');
+        dlog('[NWST Scanner] LLM indicated no changes needed.');
         return false;
     }
 
@@ -647,7 +648,7 @@ async function applyScanResults(chatId, response, recentMessages) {
             ['political', 'social', 'spiritual', 'environmental'].includes(condName)) {
             await updateConditionContent(chatId, condName, content.trim());
             hadUpdates = true;
-            console.log(`[NWST Scanner] Updated world condition: ${condName}`);
+            dlog(`[NWST Scanner] Updated world condition: ${condName}`);
         }
     }
 
@@ -669,7 +670,7 @@ async function applyScanResults(chatId, response, recentMessages) {
             });
         }
         hadUpdates = true;
-        console.log(`[NWST Scanner] Updated community: ${update.name}`);
+        dlog(`[NWST Scanner] Updated community: ${update.name}`);
     }
 
     // ── Store detected NPC events for user review ─────────────────────────
@@ -699,7 +700,7 @@ async function applyScanResults(chatId, response, recentMessages) {
             chatMetadata['nwst:pendingEvents'] = existing;
             await saveMetadata();
             hadUpdates = true;
-            console.log(`[NWST Scanner] ${detectedEvents.length} NPC event(s) proposed for review.`);
+            dlog(`[NWST Scanner] ${detectedEvents.length} NPC event(s) proposed for review.`);
         } catch (e) {
             console.error('[NWST Scanner] Failed to store pending events:', e);
         }
@@ -740,7 +741,7 @@ async function applyScanResults(chatId, response, recentMessages) {
 
             existingTitles.add(titleLower);
             hadUpdates = true;
-            console.log(`[NWST Scanner] Detected new secret: "${secretData.title}" (${secretData.type})`);
+            dlog(`[NWST Scanner] Detected new secret: "${secretData.title}" (${secretData.type})`);
         }
     }
 

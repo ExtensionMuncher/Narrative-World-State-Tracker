@@ -26,6 +26,7 @@ import { getAllEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
 import { regenerateForecast, computeSeason } from './dayAdvancement.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Date computation helper ─────────────────────────────────────────────────
 
@@ -188,7 +189,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
             const diff = date - startOfYear;
             const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
             if (dayOfYear >= 1 && dayOfYear <= 366) {
-                console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from date "${dateStr}"`);
+                dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from date "${dateStr}"`);
                 return dayOfYear;
             }
         }
@@ -206,7 +207,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
             const diff = date - startOfYear;
             const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
             if (dayOfYear >= 1 && dayOfYear <= 366) {
-                console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from ISO date "${dateStr}"`);
+                dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from ISO date "${dateStr}"`);
                 return dayOfYear;
             }
         }
@@ -221,7 +222,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         const monthIndex = monthMap[monthName];
         const result = computeFromMonthDay(monthIndex, day);
         if (result !== null) {
-            console.log(`[NWST BatchScan] Computed dayCount ${result} from month+day "${dateStr}"`);
+            dlog(`[NWST BatchScan] Computed dayCount ${result} from month+day "${dateStr}"`);
             return result;
         }
     }
@@ -297,7 +298,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
     if (monthIndex !== undefined && day !== undefined) {
         const result = computeFromMonthDay(monthIndex, day);
         if (result !== null) {
-            console.log(`[NWST BatchScan] Computed dayCount ${result} from ordinals "${dateStr}" (${monthSource}, day=${day})`);
+            dlog(`[NWST BatchScan] Computed dayCount ${result} from ordinals "${dateStr}" (${monthSource}, day=${day})`);
             return result;
         }
     }
@@ -321,14 +322,14 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
                 const diff = date - startOfYear;
                 const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
                 if (dayOfYear >= 1 && dayOfYear <= 366) {
-                    console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from flexible scan "${dateStr}"`);
+                    dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from flexible scan "${dateStr}"`);
                     return dayOfYear;
                 }
             }
             // No year found — use monthDays array
             const result = computeFromMonthDay(candidateMonthIndex, candidateDay);
             if (result !== null) {
-                console.log(`[NWST BatchScan] Computed dayCount ${result} from flexible scan (no year) "${dateStr}"`);
+                dlog(`[NWST BatchScan] Computed dayCount ${result} from flexible scan (no year) "${dateStr}"`);
                 return result;
             }
         }
@@ -356,7 +357,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
                 const diff = date - startOfYear;
                 const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
                 if (dayOfYear >= 1 && dayOfYear <= 366) {
-                    console.log(`[NWST BatchScan] Computed dayCount ${dayOfYear} from delimited date "${dateStr}"`);
+                    dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from delimited date "${dateStr}"`);
                     return dayOfYear;
                 }
             }
@@ -480,7 +481,7 @@ CRITICAL RULES:
  */
 export async function runBatchScan() {
     const chatId = getChatId();
-    console.log(`[NWST BatchScan] runBatchScan called with chatId="${chatId}"`);
+    dlog(`[NWST BatchScan] runBatchScan called with chatId="${chatId}"`);
     if (!chatId) {
         nwstToast('No active chat detected.', 'error');
         return false;
@@ -491,7 +492,7 @@ export async function runBatchScan() {
     try {
         const { listCurrentChatKeys } = await import('../data/storage.js');
         const keys = listCurrentChatKeys();
-        console.log(`[NWST BatchScan] DIAG: chatHasData=${hasData}, current chat NWST keys: [${keys.join(', ') || '(none)'}]`);
+        dlog(`[NWST BatchScan] DIAG: chatHasData=${hasData}, current chat NWST keys: [${keys.join(', ') || '(none)'}]`);
     } catch (e) {
         console.warn('[NWST BatchScan] DIAG logging failed:', e);
     }
@@ -525,7 +526,7 @@ export async function runBatchScan() {
         const chunkSize = Math.floor(maxContext * 0.6);
         const chunks = chunkMessages(allMessages, chunkSize);
 
-        console.log(`[NWST BatchScan] Processing ${allMessages.length} messages in ${chunks.length} chunks...`);
+        dlog(`[NWST BatchScan] Processing ${allMessages.length} messages in ${chunks.length} chunks...`);
 
         // ── Progressive structured state accumulation ──────────────
         // Instead of raw concatenation, we build a structured accumulation
@@ -641,7 +642,7 @@ export async function runBatchScan() {
             const { scanForSecrets } = await import('./secretScan.js');
             const secretsAdded = await scanForSecrets(chatId);
             if (secretsAdded > 0) {
-                console.log(`[NWST BatchScan] Secrets scan added ${secretsAdded} new secret(s).`);
+                dlog(`[NWST BatchScan] Secrets scan added ${secretsAdded} new secret(s).`);
             }
         } catch (e) {
             console.warn('[NWST BatchScan] Secrets scan failed (non-fatal):', e);
@@ -1160,7 +1161,7 @@ function parseBatchSynthesis(response) {
         return JSON.parse(jsonStr);
     } catch (e) {
         console.warn('[NWST BatchScan] Could not parse synthesis JSON:', e);
-        console.log('Raw response (first 500 chars):', response.substring(0, 500));
+        dlog('Raw response (first 500 chars):', response.substring(0, 500));
         return null;
     }
 }
@@ -1191,7 +1192,7 @@ async function applyBatchResults(chatId, result) {
             }
         }
         if (addedCount > 0) {
-            console.log(`[NWST BatchScan] Seeded ${addedCount} secret(s) from synthesis.`);
+            dlog(`[NWST BatchScan] Seeded ${addedCount} secret(s) from synthesis.`);
         }
     }
 
@@ -1209,7 +1210,7 @@ async function applyBatchResults(chatId, result) {
                 result.currentDay.dateDisplay = before;
                 if (!result.currentDay.dateSub || result.currentDay.dateSub.trim() === '') {
                     result.currentDay.dateSub = after;
-                    console.log(`[NWST BatchScan] Extracted dateSub from dateDisplay pipe: "${result.currentDay.dateSub}"`);
+                    dlog(`[NWST BatchScan] Extracted dateSub from dateDisplay pipe: "${result.currentDay.dateSub}"`);
                 }
             }
         }
@@ -1223,7 +1224,7 @@ async function applyBatchResults(chatId, result) {
         if (computedDayCount && computedDayCount > 0) {
             const oldVal = result.currentDay.dayCount;
             result.currentDay.dayCount = computedDayCount;
-            console.log(`[NWST BatchScan] dayCount SET from dateDisplay: ${oldVal ?? 'none'} → ${computedDayCount} (from "${result.currentDay.dateDisplay}")`);
+            dlog(`[NWST BatchScan] dayCount SET from dateDisplay: ${oldVal ?? 'none'} → ${computedDayCount} (from "${result.currentDay.dateDisplay}")`);
         } else {
             // Normalize dayCount to integer (LLM may output string, null, etc.)
             const rawDayCount = result.currentDay.dayCount;
@@ -1236,10 +1237,10 @@ async function applyBatchResults(chatId, result) {
                 const existingDay = getCurrentDay(chatId);
                 if (existingDay?.dayCount && existingDay.dayCount > 0) {
                     result.currentDay.dayCount = existingDay.dayCount;
-                    console.log(`[NWST BatchScan] Preserved existing dayCount: ${result.currentDay.dayCount}`);
+                    dlog(`[NWST BatchScan] Preserved existing dayCount: ${result.currentDay.dayCount}`);
                 } else {
                     result.currentDay.dayCount = 1;
-                    console.log(`[NWST BatchScan] Set default dayCount: 1`);
+                    dlog(`[NWST BatchScan] Set default dayCount: 1`);
                 }
             }
             // else: keep LLM's dayCount since it's a plausible positive integer and no date to compute from
@@ -1259,11 +1260,11 @@ async function applyBatchResults(chatId, result) {
                 });
                 if (foundSeason) {
                     result.currentDay.season = foundSeason.charAt(0).toUpperCase() + foundSeason.slice(1);
-                    console.log(`[NWST BatchScan] Normalized season from verbose description to "${result.currentDay.season}"`);
+                    dlog(`[NWST BatchScan] Normalized season from verbose description to "${result.currentDay.season}"`);
                 } else {
                     const firstSentence = seasonText.split(/[.\n;]/)[0].trim();
                     result.currentDay.season = firstSentence;
-                    console.log(`[NWST BatchScan] Trimmed season to first segment: "${result.currentDay.season.substring(0, 60)}"`);
+                    dlog(`[NWST BatchScan] Trimmed season to first segment: "${result.currentDay.season.substring(0, 60)}"`);
                 }
             }
         }
@@ -1281,12 +1282,12 @@ async function applyBatchResults(chatId, result) {
                 });
                 if (foundSeason) {
                     result.currentDay.season = foundSeason.charAt(0).toUpperCase() + foundSeason.slice(1);
-                    console.log(`[NWST BatchScan] Normalized season from verbose description to "${result.currentDay.season}"`);
+                    dlog(`[NWST BatchScan] Normalized season from verbose description to "${result.currentDay.season}"`);
                 } else {
                     // No recognized season word — take just first sentence
                     const firstSentence = seasonText.split(/[.\n;]/)[0].trim();
                     result.currentDay.season = firstSentence;
-                    console.log(`[NWST BatchScan] Trimmed season to first segment: "${result.currentDay.season.substring(0, 60)}"`);
+                    dlog(`[NWST BatchScan] Trimmed season to first segment: "${result.currentDay.season.substring(0, 60)}"`);
                 }
             }
         }
@@ -1303,7 +1304,7 @@ async function applyBatchResults(chatId, result) {
             const computedSeason = computeSeason(result.currentDay.dayCount, seasonConfig);
             if (computedSeason !== null && computedSeason !== undefined) {
                 result.currentDay.season = computedSeason;
-                console.log(`[NWST BatchScan] Overrode season with configured value: "${computedSeason}"`);
+                dlog(`[NWST BatchScan] Overrode season with configured value: "${computedSeason}"`);
             }
         }
 
@@ -1347,7 +1348,7 @@ async function applyBatchResults(chatId, result) {
 
             // Detected NPC events bypass the pool cap — they are facts, not generated content
             if (!isDetected && poolUsed >= poolCap) {
-                console.log(`[NWST BatchScan] Event pool cap (${poolCap}) reached — skipping generated event: "${event.title}"`);
+                dlog(`[NWST BatchScan] Event pool cap (${poolCap}) reached — skipping generated event: "${event.title}"`);
                 continue;
             }
 
@@ -1376,13 +1377,13 @@ async function applyBatchResults(chatId, result) {
 
     if (result.notebook) {
         // DIAGNOSTIC: Log notebook structure before save
-        console.log(`[NWST BatchScan] DIAG: result.notebook has keys: [${Object.keys(result.notebook).join(', ')}], has secrets: ${'secrets' in result.notebook}`);
+        dlog(`[NWST BatchScan] DIAG: result.notebook has keys: [${Object.keys(result.notebook).join(', ')}], has secrets: ${'secrets' in result.notebook}`);
         // Check whether secrets from result.secrets were already added to metadata
         try {
             const { getNotebook } = await import('../data/notebook.js');
             const existingBeforeOverwrite = getNotebook(chatId);
-            console.log(`[NWST BatchScan] DIAG: existing notebook before saveNotebook — secrets count: ${existingBeforeOverwrite.secrets?.length ?? 'N/A'}`);
-            console.log(`[NWST BatchScan] DIAG: existing core.unresolvedDetail count: ${existingBeforeOverwrite.core?.unresolvedDetail?.length ?? 'N/A'}`);
+            dlog(`[NWST BatchScan] DIAG: existing notebook before saveNotebook — secrets count: ${existingBeforeOverwrite.secrets?.length ?? 'N/A'}`);
+            dlog(`[NWST BatchScan] DIAG: existing core.unresolvedDetail count: ${existingBeforeOverwrite.core?.unresolvedDetail?.length ?? 'N/A'}`);
         } catch (e) { /* non-fatal */ }
 
         // ── Validate & normalize notebook fields: ensure string[] fields are arrays, not raw strings ──
@@ -1403,16 +1404,16 @@ async function applyBatchResults(chatId, result) {
             }
         }
         if (normalized > 0) {
-            console.log(`[NWST BatchScan] Normalized ${normalized} string fields to arrays in notebook`);
+            dlog(`[NWST BatchScan] Normalized ${normalized} string fields to arrays in notebook`);
         }
 
         const { saveNotebook } = await import('../data/notebook.js');
-        console.log(`[NWST BatchScan] DIAG: About to saveNotebook — result.notebook has secrets? ${'secrets' in result.notebook}, core keys: ${Object.keys(result.notebook.core || {}).join(', ')}`);
+        dlog(`[NWST BatchScan] DIAG: About to saveNotebook — result.notebook has secrets? ${'secrets' in result.notebook}, core keys: ${Object.keys(result.notebook.core || {}).join(', ')}`);
         await saveNotebook(chatId, result.notebook);
         // Verify after save
         try {
             const afterOverwrite = getNotebook(chatId);
-            console.log(`[NWST BatchScan] DIAG: after saveNotebook — secrets count: ${afterOverwrite.secrets?.length ?? 'N/A'}, core.unresolvedDetail count: ${afterOverwrite.core?.unresolvedDetail?.length ?? 'N/A'}`);
+            dlog(`[NWST BatchScan] DIAG: after saveNotebook — secrets count: ${afterOverwrite.secrets?.length ?? 'N/A'}, core.unresolvedDetail count: ${afterOverwrite.core?.unresolvedDetail?.length ?? 'N/A'}`);
         } catch (e) { /* non-fatal */ }
         nwstToast('Notebook seeded.', 'info');
     }
@@ -1448,7 +1449,7 @@ async function applyBatchResults(chatId, result) {
     // Events are already complete — the batch synthesis prompt above was instructed to generate
     // BOTH detected events (from chat analysis) AND world-level events (from setting/conditions/season)
     // in a SINGLE pass. No separate world event generation call is needed.
-    console.log('[NWST BatchScan] Events generated in single synthesis pass (no separate world event call).');
+    dlog('[NWST BatchScan] Events generated in single synthesis pass (no separate world event call).');
 }
 
 // ── Loading UI ─────────────────────────────────────────────────────────────

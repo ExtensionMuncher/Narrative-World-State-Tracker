@@ -32,6 +32,7 @@ import {
 
 import { getCurrentDay } from './worldState.js';
 import { getNotebook, addCoreBullet, saveNotebook } from './notebook.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Unique ID generator ───────────────────────────────────────────────────
 
@@ -202,7 +203,7 @@ export async function setEventStatus(chatId, eventId, newStatus) {
                     autoPromoted: true
                 });
                 if (promoResult) {
-                    console.log(`[NWST Events] Auto-promoted event "${updated.title}" to secret "${promoResult.title}" (${promoResult.type})`);
+                    dlog(`[NWST Events] Auto-promoted event "${updated.title}" to secret "${promoResult.title}" (${promoResult.type})`);
                 }
             }
         } catch (e) {
@@ -380,7 +381,7 @@ export async function promoteEventToSecret(chatId, eventId, options = {}) {
         event.knowledgeSummary = knowledgeSummary;
         await saveAllEvents(chatId, events);
 
-        console.log(`[NWST Events] Promoted event "${event.title}" → secret "${secret.title}" (${secretType}, id: ${secret.id})`);
+        dlog(`[NWST Events] Promoted event "${event.title}" → secret "${secret.title}" (${secretType}, id: ${secret.id})`);
 
         return secret;
 
@@ -505,7 +506,7 @@ async function inferKnowledgeDistribution(event) {
         // Remove overlap: if a character appears in both, they go to whoKnows
         const finalNotKnows = filteredNotKnows.filter(n => !filteredKnows.includes(n));
 
-        console.log(`[NWST Events] Knowledge distribution inferred: knows=${filteredKnows.join(',') || 'none'}, unaware=${finalNotKnows.join(',') || 'none'}`);
+        dlog(`[NWST Events] Knowledge distribution inferred: knows=${filteredKnows.join(',') || 'none'}, unaware=${finalNotKnows.join(',') || 'none'}`);
 
         return {
             whoKnows: filteredKnows,
@@ -564,9 +565,9 @@ export async function migrateEventData(chatId) {
 
     if (migrated > 0) {
         await saveAllEvents(chatId, events);
-        console.log(`[NWST Events] Migrated ${migrated}/${events.length} events for chat ${chatId}.`);
+        dlog(`[NWST Events] Migrated ${migrated}/${events.length} events for chat ${chatId}.`);
     } else {
-        console.log(`[NWST Events] No event migration needed for chat ${chatId}.`);
+        dlog(`[NWST Events] No event migration needed for chat ${chatId}.`);
     }
 
     return migrated;
@@ -798,7 +799,7 @@ export async function compactEventHorizon(chatId, thresholdDays = 3) {
         await saveNotebook(chatId, notebook);
         await saveAllEvents(chatId, remaining);
 
-        console.log(`[NWST Events] Compacted ${compactable.length} resolved/missed events into Past Events (doNotForget).`);
+        dlog(`[NWST Events] Compacted ${compactable.length} resolved/missed events into Past Events (doNotForget).`);
 
         return { compacted: compactable.length, summaries };
 

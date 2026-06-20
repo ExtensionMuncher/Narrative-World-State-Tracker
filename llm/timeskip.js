@@ -28,6 +28,7 @@ import { getNotebook, saveNotebook } from '../data/notebook.js';
 import { getPlannerPrompt } from '../settings.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle, computeLunarAngleFromDate, getMoonPhaseForAngle, computeSeason } from './dayAdvancement.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Internal prompt ───────────────────────────────────────────────────────
 
@@ -168,7 +169,7 @@ export async function executeTimeSkip(skipDescription) {
             { role: 'user', content: userPrompt }
         ];
 
-        console.log('[NWST Timeskip] Calling Planning LLM with full context...');
+        dlog('[NWST Timeskip] Calling Planning LLM with full context...');
         const response = await generateWithProfile(profile, messages);
 
         if (!response) {
@@ -516,7 +517,7 @@ async function applyNotebookUpdates(chatId, updates) {
 
     // This is a simplified application — refined during integration testing
     // The LLM response format for notebook updates will be calibrated with real responses
-    console.log('[NWST Timeskip] Notebook updates applied.');
+    dlog('[NWST Timeskip] Notebook updates applied.');
 }
 
 // ── Loading UI ────────────────────────────────────────────────────────────

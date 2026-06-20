@@ -23,6 +23,7 @@
 
 import { getConnectionProfile } from '../settings.js';
 import { nwstToast } from '../utils.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Per-session warning tracker ───────────────────────────────────────────
 // Track which roles we've already warned about this session so we don't
@@ -121,7 +122,7 @@ export function resolveProfile(profileKey) {
     if (!configuredId) {
         if (!warnedRoles.has(`unconfigured:${profileKey}`)) {
             warnedRoles.add(`unconfigured:${profileKey}`);
-            console.warn(`[NWST Connections] ${profileKey}: no profile configured.`);
+            dlog(`[NWST Connections] ${profileKey}: no profile configured.`);
             nwstToast(
                 `NWST: No ${roleLabel} profile is configured. ` +
                 `This feature will be skipped until you set one in Settings → Connection Profiles.`,
@@ -136,7 +137,7 @@ export function resolveProfile(profileKey) {
     if (!profile) {
         if (!warnedRoles.has(`missing:${profileKey}`)) {
             warnedRoles.add(`missing:${profileKey}`);
-            console.warn(`[NWST Connections] ${profileKey}: configured profile "${configuredId}" no longer exists.`);
+            dlog(`[NWST Connections] ${profileKey}: configured profile "${configuredId}" no longer exists.`);
             nwstToast(
                 `NWST: The ${roleLabel} profile "${configuredId}" no longer exists. ` +
                 `This feature will be skipped until you update it in Settings → Connection Profiles.`,
@@ -147,7 +148,7 @@ export function resolveProfile(profileKey) {
     }
 
     // Profile found and valid
-    console.log(`[NWST Connections] ${profileKey}: using profile "${profile.name}" (${profile.id})`);
+    dlog(`[NWST Connections] ${profileKey}: using profile "${profile.name}" (${profile.id})`);
     return profile;
 }
 
@@ -218,17 +219,54 @@ export async function generateWithProfile(profile, messages, options = {}) {
             return '';
         }
 
-        console.log(`[NWST Connections] Calling LLM: profile="${profile.name || profile.id}" api="${profile.api || 'unknown'}"`);
+        dlog(`[NWST Connections] Calling LLM: profile="${profile.name || profile.id}" api="${profile.api || 'unknown'}"`);
+
+        // Per-profile no-think. Settings are keyed by profile ID so each profile
+        // independently controls reasoning suppression. Backward-compat: the old
+        // blanket booleans (noThink / noThinkHard), if true, apply to all profiles
+        // until a per-profile map is set.
+        const s = ctx.extensionSettings?.nwst || {};
+        const softMap = (s.noThinkProfiles && typeof s.noThinkProfiles === 'object') ? s.noThinkProfiles : null;
+        const hardMap = (s.noThinkHardProfiles && typeof s.noThinkHardProfiles === 'object') ? s.noThinkHardProfiles : null;
+        const softOn = softMap ? !!softMap[profile.id] : !!s.noThink;
+        const hardOn = hardMap ? !!hardMap[profile.id] : !!s.noThinkHard;
+
+        // No-think soft switch: append "/no_think" to the LAST user message.
+        let outMessages = messages;
+        try {
+            if (softOn) {
+                outMessages = messages.map(m => ({ ...m }));
+                let idx = -1;
+                for (let i = outMessages.length - 1; i >= 0; i--) {
+                    if (outMessages[i].role === 'user') { idx = i; break; }
+                }
+                if (idx >= 0) {
+                    outMessages[idx].content = (outMessages[idx].content || '') + '\n\n/no_think';
+                } else {
+                    outMessages.push({ role: 'user', content: '/no_think' });
+                }
+            }
+        } catch (e) { dlog('[NWST] no_think injection skipped:', e); }
+
+        // No-think HARD switch (per-profile, opt-in). Off unless set for this
+        // profile — some backends error on unknown body keys.
+        const overridePayload = {};
+        if (hardOn) {
+            overridePayload.think = false;
+            overridePayload.enable_thinking = false;
+            overridePayload.chat_template_kwargs = { enable_thinking: false };
+        }
 
         const response = await ctx.ConnectionManagerRequestService.sendRequest(
             profile.id,
-            messages,
+            outMessages,
             options.maxTokens,
-            { extractData: true, includePreset: true, stream: false }
+            { extractData: true, includePreset: true, stream: false },
+            overridePayload
         );
 
         const result = response?.content || '';
-        console.log(`[NWST Connections] Response received (${result.length} chars)`);
+        dlog(`[NWST Connections] Response received (${result.length} chars)`);
         return result;
 
     } catch (err) {

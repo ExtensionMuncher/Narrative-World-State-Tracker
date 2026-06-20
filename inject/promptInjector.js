@@ -51,6 +51,7 @@ import {
 import { getChatId, getSetting } from '../index.js';
 import { getSelectiveSecretInjection } from '../llm/narrativeConsistency.js';
 import { getLunarAngle, getDegreesPerDay, getMoonPhenomena, computeSeason } from '../llm/dayAdvancement.js';
+import { dlog } from "../lib/debug.js";
 
 // ── Role string → numeric mapper ──────────────────────────────────────────
 
@@ -443,12 +444,12 @@ export function registerPromptInjection() {
     updateInjection();
     cleanupStalePromptManagerEntry();
 
-    console.log('[NWST PromptInjector] Prompt injection registered.');
-    console.log(`  - Density mode: ${getDensityMode()}`);
-    console.log(`  - Inject Current Day: ${isInjectCurrentDay()}`);
-    console.log(`  - Inject Events: ${isInjectEvents()}`);
-    console.log(`  - Inject World Conditions: ${isInjectWorldConditions()}`);
-    console.log(`  - Placement: ${getInjectionPlacement()}`);
+    dlog('[NWST PromptInjector] Prompt injection registered.');
+    dlog(`  - Density mode: ${getDensityMode()}`);
+    dlog(`  - Inject Current Day: ${isInjectCurrentDay()}`);
+    dlog(`  - Inject Events: ${isInjectEvents()}`);
+    dlog(`  - Inject World Conditions: ${isInjectWorldConditions()}`);
+    dlog(`  - Placement: ${getInjectionPlacement()}`);
 }
 
 function cleanupStalePromptManagerEntry() {
