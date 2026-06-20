@@ -7,7 +7,7 @@ No additional features planned at this time. Strictly for bug fixes and refineme
 
 ---
 
-# NWST Secrets Engine (v2) — Technical & User Documentation
+# Secrets Engine (v2) — Technical & User Documentation
 ### Complete Overhaul Implemented 6/20/26
 
 The Secrets Engine is a prose-based hidden-state system. It tracks who knows what, who must not know, and what narrative pressure is active — then injects the most relevant secrets into the main prompt as narrator guidance. It is built for multi-character, cutaway-heavy roleplay where dramatic irony lives in scenes the player character isn't even in.
@@ -30,13 +30,13 @@ The engine is built in four layers, each with one job, none reaching into anothe
 
 ### Layer 1 — Alias Registry (`data/aliasRegistry.js`)
 
-Resolves the many ways an entity is named down to a single canonical ID. "Oyabun Ryōmen Sukuna," "King of Curses," and "Sukuna" all resolve to `sukuna`.
+Resolves the many ways an entity is named down to a single canonical ID. "Full Title Variant," "Epithet Variant," and "Character A" all resolve to `character_a`.
 
 Two sources, merged:
 - **Auto-built** — every name in your secrets' Who Knows / Who Does Not Know lists and your community members becomes a canonical entity automatically. No setup required.
 - **Manual** — alias groups you define in the Alias Manager. These let you collapse variants the auto-builder can't know are the same person, and they take precedence.
 
-The registry never reads the character card name or message metadata. Detection happens purely by scanning prose. Diacritics are stripped internally for matching (so "Ryū" matches "Ryu") but preserved in display names for the UI. Typographic apostrophes and all punctuation are normalized, so "Sukuna's" still matches at a word boundary.
+The registry never reads the character card name or message metadata. Detection happens purely by scanning prose. Diacritics are stripped internally for matching (so accented and unaccented spellings still match) but preserved in display names for the UI. Typographic apostrophes and all punctuation are normalized, so "Character A's" still matches at a word boundary.
 
 ### Layer 2 — Sidecar Scene Analyzer (`llm/secretsSidecar.js`)
 
@@ -47,10 +47,10 @@ It exists to fill the gap pure JavaScript can't cover: resolving pronouns ("he w
 It returns:
 ```
 {
-  charactersPresent: ["sukuna", "satoru"],   // canonical IDs, pronouns resolved
+  charactersPresent: ["character_a", "character_b"],   // canonical IDs, pronouns resolved
   sceneType: "npc_cutaway",                   // player_present | npc_cutaway | surveillance | faction | mixed
   activePressures: ["surveillance"],          // free-text pressure tags
-  sceneSummary: "Satoru and Suguru observe..."// one-line scene summary
+  sceneSummary: "Character B and Character C observe..."// one-line scene summary
 }
 ```
 
@@ -68,9 +68,9 @@ Formats the winning secrets as narrator guidance with explicit knowledge boundar
 
 ```
 [SECRET CONTINUITY — Narrator Guidance Only]
-Secret: Sachiko is under 24/7 surveillance by Kagutsuchi-gumi operatives.
-Known by: Sukuna, Gojō, Surveillance Team.
-Unknown to: Sachiko, Hitomi.
+Secret: Character A is under 24/7 surveillance by Faction X operatives.
+Known by: Character B, Character C, Monitoring Cell.
+Unknown to: Character A, Character D.
 Use: Maintain dramatic irony and the pressure around this secret. Do not let
      unaware characters learn this unless the scene naturally reveals evidence.
 Current relevance: this is a scene where the secret-holder is active away from
