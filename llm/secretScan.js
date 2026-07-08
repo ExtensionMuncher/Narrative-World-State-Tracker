@@ -64,9 +64,10 @@ Each secret object must follow this exact schema:
   "whoKnows": ["Character name who knows this secret"],
   "whoDoesNotKnow": ["Character name who does NOT know this secret"],
   "evidenceShown": "What evidence has been shown in the chat so far (if any)",
-  "pressureRisk": "What pressure or risk would be created if this secret were revealed",
+  "pressureRisk": "A concrete 1-2 sentence description of the SPECIFIC consequences if revealed — who is hurt, what breaks, what escalates. Narrative, not a severity label. Bad: 'high risk'. Good: 'If Victor makes a violent move, it could trigger Kellan's possessive instincts, leading to gang violence and police involvement via Rowan.'",
   "revealConditions": "Under what circumstances this secret might be revealed",
-  "injectionPriority": "high" | "normal" | "low"
+  "injectionPriority": "high" | "normal" | "low",
+  "triggerAnchors": ["3-7 distinctive words or short phrases UNIQUE to this secret that, if they appear in the prose, signal the scene is about this secret. Include the subject's name and specific concepts/objects/places. AVOID generic words and AVOID broad themes shared with other secrets (e.g. prefer 'tattoo, courier, debt' over 'syndicate, surveillance'). e.g. for a secret about a character's hidden affiliation: their name, 'affiliate', 'courier', 'tattoo'"]
 }
 
 IMPORTANT RULES:
@@ -184,9 +185,10 @@ function buildSynthesisPrompt(accumulatedContext, existingSecrets) {
     "whoKnows": ["CharacterName"],
     "whoDoesNotKnow": ["CharacterName"],
     "evidenceShown": "What evidence has been shown",
-    "pressureRisk": "Risk if revealed",
+    "pressureRisk": "Specific consequences if revealed (1-2 sentences, narrative not a label)",
+    "triggerAnchors": ["distinctive", "unique", "words"],
     "revealConditions": "When it might be revealed",
-    "injectionPriority": "high|normal|low"
+    "injectionPriority": "critical|high|normal|low"
   }
 ]\n\n`;
     prompt += `CRITICAL — QUALITY CHECKLIST:\n`;
@@ -378,7 +380,10 @@ export async function scanForSecrets(chatId) {
                 evidenceShown: secret.evidenceShown || '',
                 pressureRisk: secret.pressureRisk || '',
                 revealConditions: secret.revealConditions || '',
-                injectionPriority: secret.injectionPriority || 'normal'
+                injectionPriority: secret.injectionPriority || 'normal',
+                triggerAnchors: Array.isArray(secret.triggerAnchors) && secret.triggerAnchors.length
+                    ? { phrases: secret.triggerAnchors.filter(a => typeof a === 'string' && a.trim()) }
+                    : undefined
             });
             addedCount++;
         } catch (err) {

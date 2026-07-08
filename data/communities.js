@@ -134,7 +134,7 @@ export function findSimilarCommunity(existingCommunities, name, members) {
                 score = Math.max(score, 0.75);
             }
 
-            // 3. Significant word overlap (e.g., "Kurosaki Family" ↔ "Kurosaki Household")
+            // 3. Significant word overlap (e.g., "Whitlock Family" ↔ "Whitlock Household")
             const proposedWords = new Set(proposedName.split(/\s+/));
             const existingWords = new Set(existingName.split(/\s+/));
             const wordOverlap = jaccardSimilarity(proposedWords, existingWords);

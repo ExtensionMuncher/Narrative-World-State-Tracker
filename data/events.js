@@ -285,6 +285,41 @@ function inferSecretType(event, options = {}) {
  * @param {boolean} [options.autoPromoted=false] - Whether this was triggered automatically (vs manual)
  * @returns {Promise<object|null>} The created secret, or null on failure
  */
+/**
+ * Extract distinctive subject-matter words from an event's actual title and
+ * description, for use as secret trigger anchors. This gives promoted-event
+ * secrets real anchor words to match against prose, instead of relying only
+ * on the templated pressureRisk/revealConditions boilerplate (which is generic
+ * and produces weak anchor matching).
+ * @param {object} event
+ * @returns {object} triggerAnchors object for the scoring engine
+ */
+function buildEventAnchors(event) {
+    const ANCHOR_STOP = new Set([
+        'this','that','with','from','they','them','their','there','where','when',
+        'what','which','would','could','should','about','into','over','under',
+        'been','have','will','still','some','more','very','than','then','only',
+        'event','events','scheduled','originally','resolved','missed','status',
+        'character','characters','will','being','these','those','such','they',
+        'after','before','during','through','where','while','because','around'
+    ]);
+    const phrases = new Set();
+    const sources = [event.title, event.description];
+    for (const src of sources) {
+        if (typeof src !== 'string') continue;
+        const words = src.toLowerCase()
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            .match(/\b[a-z]{5,}\b/g) || [];
+        for (const w of words) {
+            if (!ANCHOR_STOP.has(w)) phrases.add(w);
+        }
+    }
+    return {
+        characters: Array.isArray(event.participants) ? event.participants.slice() : [],
+        phrases: Array.from(phrases).slice(0, 12)  // cap to keep it focused
+    };
+}
+
 export async function promoteEventToSecret(chatId, eventId, options = {}) {
     try {
         const events = getAllEvents(chatId);
@@ -363,7 +398,11 @@ export async function promoteEventToSecret(chatId, eventId, options = {}) {
             evidenceShown: evidenceShown,
             pressureRisk: pressureRisk,
             revealConditions: revealConditions,
-            injectionPriority: 'normal'
+            injectionPriority: 'normal',
+            // v2: give the scoring engine distinctive anchor words drawn from the
+            // event's real title/description, so anchor matching works on promoted
+            // secrets instead of relying only on templated boilerplate text.
+            triggerAnchors: options.customSecret?.triggerAnchors || buildEventAnchors(event)
         });
 
         if (!secret) {

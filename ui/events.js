@@ -56,6 +56,26 @@ export function refreshEventsUI() {
     const chatId = getChatId();
     const grouped = getEventsGroupedByTier(chatId);
 
+    // ── Validity review section (events the day-advance review flagged) ──
+    const flagged = getAllEvents(chatId).filter(ev => ev.validityFlag
+        && (ev.status === 'pending' || ev.status === 'inprogress'));
+    let validityHtml = '';
+    if (flagged.length > 0) {
+        validityHtml += `<div class="nwst-event-group" style="border:1px solid #b8860b;border-radius:8px;padding:8px;margin-bottom:10px">`;
+        validityHtml += `<div class="nwst-lbl" style="margin-bottom:6px">⚠ Validity review — do these still make sense?</div>`;
+        for (const ev of flagged) {
+            const reason = (ev.validityFlag.reason || '').replace(/</g, '&lt;');
+            validityHtml += `<div style="margin-bottom:8px;padding:6px;background:rgba(184,134,11,0.08);border-radius:6px">`;
+            validityHtml += `<div style="font-weight:600;font-size:13px">${(ev.title || '').replace(/</g, '&lt;')}</div>`;
+            validityHtml += `<div style="font-size:12px;color:#bbb;margin:3px 0">${reason} <span style="color:#888">(flagged ${ev.validityFlag.flaggedOn || ''})</span></div>`;
+            validityHtml += `<div style="display:flex;gap:6px;margin-top:4px">`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-validity-keep" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✓ Keep event</button>`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-validity-miss" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✗ Mark missed</button>`;
+            validityHtml += `</div></div>`;
+        }
+        validityHtml += `</div>`;
+    }
+
     const tierConfigs = [
         { key: 'immediate', label: 'Immediate' },
         { key: 'week', label: 'This week' },
@@ -63,7 +83,7 @@ export function refreshEventsUI() {
         { key: 'undetermined', label: 'Undetermined', noRegen: true }
     ];
 
-    let html = '';
+    let html = validityHtml;
 
     for (const tier of tierConfigs) {
         const events = grouped[tier.key] || [];
@@ -276,6 +296,28 @@ function wireEventItemEvents() {
     }
 
     // ── Tier Regen buttons ────────────────────────────────────
+    container.querySelectorAll('.nwst-validity-keep').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const eventId = btn.dataset.eventId;
+            await updateEvent(getChatId(), eventId, { validityFlag: null });
+            nwstToast('Event kept — flag cleared.', 'success');
+            refreshEventsUI();
+        };
+    });
+
+    container.querySelectorAll('.nwst-validity-miss').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const eventId = btn.dataset.eventId;
+            const chatId = getChatId();
+            await updateEvent(chatId, eventId, { validityFlag: null });
+            await setEventStatus(chatId, eventId, 'missed');
+            nwstToast('Event marked missed — it will compact into the notebook after the usual delay.', 'info');
+            refreshEventsUI();
+        };
+    });
+
     container.querySelectorAll('.nwst-events-tier-regen').forEach(btn => {
         btn.onclick = async () => {
             const tier = btn.getAttribute('data-tier');

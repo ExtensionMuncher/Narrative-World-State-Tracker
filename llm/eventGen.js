@@ -60,7 +60,7 @@ WORLD EVENTS — ambient happenings that exist in the world independent of any c
   - ENVIRONMENTAL: Weather shifts, wildlife patterns, blooming/flowering seasons, river flooding, wildfire seasons, earthquake seasons
   - CULTURAL: Market days, temple ceremonies, coming-of-age rites, mourning periods, victory celebrations, anniversary commemorations
   - These are EXTRAPOLATED from world context and setting — they should feel like organic world rhythms, NOT textual extractions
-  - MOON PHASE CAVEAT: Moon phases are timing context only. Do NOT create events whose titles or primary subject is a moon phase (e.g. "Full Moon Patrol", "Waning Gibbous Ceremony"). A "Patrol under the full moon" describes timing — "Full Moon Patrol" treats the moon phase as the event subject. Exception: if the setting context explicitly describes moon-based cultural traditions (e.g. Heian-era tsukimi), culturally-appropriate moon-referenced events are allowed.
+  - MOON PHASE CAVEAT: Moon phases are timing context only. Do NOT create events whose titles or primary subject is a moon phase (e.g. "Full Moon Patrol", "Waning Gibbous Ceremony"). A "Patrol under the full moon" describes timing — "Full Moon Patrol" treats the moon phase as the event subject. Exception: if the setting context explicitly describes moon-based cultural traditions (e.g. traditional harvest moon-viewing festivals), culturally-appropriate moon-referenced events are allowed.
 
 ---
 

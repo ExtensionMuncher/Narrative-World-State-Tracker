@@ -49,7 +49,7 @@ import {
     isEnabled, isPaused, getDensityMode
 } from '../settings.js';
 import { getChatId, getSetting } from '../index.js';
-import { getSelectiveSecretInjection } from '../llm/narrativeConsistency.js';
+import { buildSecretsInjection } from '../llm/secretsInjection.js';
 import { getLunarAngle, getDegreesPerDay, getMoonPhenomena, computeSeason } from '../llm/dayAdvancement.js';
 import { dlog } from "../lib/debug.js";
 
@@ -143,7 +143,7 @@ export function buildInjectionBlock(chatId) {
     // ── Selective Secret Injection ───────────────────────────────
     // Always instant JS lookup — no API call, no density difference.
     // Secrets are injected as-is in all modes; they're already concise.
-    const secretBlock = getSelectiveSecretInjection(chatId);
+    const secretBlock = buildSecretsInjection(chatId);
     if (secretBlock) parts.push(secretBlock);
 
     if (parts.length === 0) return '';
@@ -431,6 +431,12 @@ export function updateInjection() {
         INJECTION_KEY, config.content, config.position,
         config.depth || 0, false, config.role ?? extension_prompt_roles.SYSTEM
     );
+    // The preview key carries the SAME content at position 0 (IN_PROMPT) so the
+    // world-state block is visible in ST's Prompt List / Inspect view (the same
+    // pattern other extensions use, e.g. rst_stat_block_preview). When the main
+    // injection is placed at-depth, the preview key is what surfaces it in the
+    // prompt manager UI. This is intentional visibility, not duplicate content
+    // in the sense of two independent blocks — they share one logical injection.
     setExtensionPrompt(
         PREVIEW_KEY, config.content, 0, 0, false, extension_prompt_roles.SYSTEM
     );
@@ -457,13 +463,17 @@ function cleanupStalePromptManagerEntry() {
         const { chatCompletionSettings, saveSettingsDebounced } = SillyTavern.getContext();
         if (!chatCompletionSettings || !Array.isArray(chatCompletionSettings.prompts)) return;
         let changed = false;
-        const promptIdx = chatCompletionSettings.prompts.findIndex(p => p?.identifier === INJECTION_KEY);
-        if (promptIdx !== -1) { chatCompletionSettings.prompts.splice(promptIdx, 1); changed = true; }
-        if (Array.isArray(chatCompletionSettings.prompt_order)) {
-            for (const charOrder of chatCompletionSettings.prompt_order) {
-                if (Array.isArray(charOrder?.order)) {
-                    const orderIdx = charOrder.order.findIndex(e => e?.identifier === INJECTION_KEY);
-                    if (orderIdx !== -1) { charOrder.order.splice(orderIdx, 1); changed = true; }
+        // Remove stale prompt manager entries for BOTH the injection key and the
+        // preview key.
+        for (const key of [INJECTION_KEY, PREVIEW_KEY]) {
+            const promptIdx = chatCompletionSettings.prompts.findIndex(p => p?.identifier === key);
+            if (promptIdx !== -1) { chatCompletionSettings.prompts.splice(promptIdx, 1); changed = true; }
+            if (Array.isArray(chatCompletionSettings.prompt_order)) {
+                for (const charOrder of chatCompletionSettings.prompt_order) {
+                    if (Array.isArray(charOrder?.order)) {
+                        const orderIdx = charOrder.order.findIndex(e => e?.identifier === key);
+                        if (orderIdx !== -1) { charOrder.order.splice(orderIdx, 1); changed = true; }
+                    }
                 }
             }
         }

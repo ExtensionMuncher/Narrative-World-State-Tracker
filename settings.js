@@ -136,6 +136,63 @@ export function getMaxActiveEvents() { return getSetting('injection').maxActiveE
 /** Get the secret injection token budget cap. @returns {number} */
 export function getSecretBudgetTokens() { return getSetting('injection').secretBudgetTokens ?? 600; }
 
+/** Max number of secrets injected at once (hard count cap). @returns {number} */
+export function getMaxSecretsInjected() { return getSetting('injection').maxSecretsInjected ?? 4; }
+
+/** Secrets engine config object (cadence, threshold, weights). @returns {object} */
+export function getSecretsConfig() {
+    const s = getSetting('secrets') || {};
+    return {
+        sidecarCadence: s.sidecarCadence ?? 10,
+        sidecarScanRange: s.sidecarScanRange ?? 5,
+        injectionThreshold: s.injectionThreshold ?? 50,
+        decayThreshold: s.decayThreshold ?? 250,
+        reconcileCadence: s.reconcileCadence ?? 0,
+        weights: s.weights ?? {}
+    };
+}
+
+/** Sidecar cadence in messages. @returns {number} */
+export function getSidecarCadence() { return getSecretsConfig().sidecarCadence; }
+
+/** Number of recent prose messages the secrets sidecar and JS scanner inspect. @returns {number} */
+export function getSidecarScanRange() { return getSecretsConfig().sidecarScanRange; }
+
+/** Score threshold for injection eligibility. @returns {number} */
+export function getInjectionThreshold() { return getSecretsConfig().injectionThreshold; }
+
+/** Messages-since-injection before a secret is flagged dormant (0 = off). @returns {number} */
+export function getSecretDecayThreshold() { const s = getSetting('secrets') || {}; return s.decayThreshold ?? 250; }
+
+/** Auto-reconcile cadence in scans (0 = manual only). @returns {number} */
+export function getReconcileCadence() { const s = getSetting('secrets') || {}; return s.reconcileCadence ?? 0; }
+
+/** Scoring weights object. @returns {object} */
+export function getScoringWeights() {
+    const defaults = {
+        knowerPresent: 30, unawarePresent: 20, bothPresent: 40, coPresenceOnly: 5, sharedThemeMatch: 5,
+        npcCutawayHolder: 35, groupMatch: 25, anchorMatch: 20,
+        revealConditionMatch: 35, pressureMatch: 25, continuityRisk: 45,
+        priorityLow: -15, priorityNormal: 0, priorityHigh: 20, priorityCritical: 50
+    };
+    return { ...defaults, ...(getSecretsConfig().weights || {}) };
+}
+
+/** Update a single scoring weight. @param {string} key @param {number} value */
+export function setScoringWeight(key, value) {
+    const s = getSetting('secrets') || {};
+    if (!s.weights) s.weights = {};
+    s.weights[key] = value;
+    setSetting('secrets', s);
+}
+
+/** Update a secrets config scalar (sidecarCadence, injectionThreshold). */
+export function setSecretsConfigValue(key, value) {
+    const s = getSetting('secrets') || {};
+    s[key] = value;
+    setSetting('secrets', s);
+}
+
 /** Set the secret injection token budget cap. @param {number} value */
 export function setSecretBudgetTokens(value) { setInjectionSetting('secretBudgetTokens', Math.max(100, parseInt(value) || 600)); }
 
@@ -181,7 +238,21 @@ export function exportGlobalSettings() {
         connections: getConnectionProfiles(),
         scanFrequency: getScanFrequency(),
         injection: getInjectionSettings(),
-        plannerPrompt: getPlannerPrompt()
+        secrets: getSecretsConfig(),
+        plannerPrompt: getPlannerPrompt(),
+        noThink: getSetting('noThink'),
+        noThinkHard: getSetting('noThinkHard'),
+        noThinkProfiles: getSetting('noThinkProfiles'),
+        noThinkHardProfiles: getSetting('noThinkHardProfiles'),
+        scanMinimumMessages: getScanMinimumMessages(),
+        maxSnapshotCount: getMaxSnapshotCount(),
+        eventCompactionThreshold: getSetting('eventCompactionThreshold'),
+        autoPromoteEvents: getSetting('autoPromoteEvents'),
+        eventValidityReview: getSetting('eventValidityReview'),
+        moonCycleDays: getSetting('moonCycleDays'),
+        enableMoons: getSetting('enableMoons'),
+        moons: getSetting('moons'),
+        enableMoonPhenomena: getSetting('enableMoonPhenomena')
     };
     return JSON.stringify(settings, null, 2);
 }
@@ -203,7 +274,21 @@ export function importGlobalSettings(jsonString) {
         if (imported.connections) setSetting('connections', imported.connections);
         if (imported.scanFrequency !== undefined) setScanFrequency(imported.scanFrequency);
         if (imported.injection) setSetting('injection', imported.injection);
+        if (imported.secrets) setSetting('secrets', imported.secrets);
         if (imported.plannerPrompt !== undefined) setPlannerPrompt(imported.plannerPrompt);
+        if (imported.noThink !== undefined) setSetting('noThink', imported.noThink);
+        if (imported.noThinkHard !== undefined) setSetting('noThinkHard', imported.noThinkHard);
+        if (imported.noThinkProfiles !== undefined) setSetting('noThinkProfiles', imported.noThinkProfiles);
+        if (imported.noThinkHardProfiles !== undefined) setSetting('noThinkHardProfiles', imported.noThinkHardProfiles);
+        if (imported.scanMinimumMessages !== undefined) setScanMinimumMessages(imported.scanMinimumMessages);
+        if (imported.maxSnapshotCount !== undefined) setMaxSnapshotCount(imported.maxSnapshotCount);
+        if (imported.eventCompactionThreshold !== undefined) setSetting('eventCompactionThreshold', imported.eventCompactionThreshold);
+        if (imported.autoPromoteEvents !== undefined) setSetting('autoPromoteEvents', imported.autoPromoteEvents);
+        if (imported.eventValidityReview !== undefined) setSetting('eventValidityReview', imported.eventValidityReview);
+        if (imported.moonCycleDays !== undefined) setSetting('moonCycleDays', imported.moonCycleDays);
+        if (imported.enableMoons !== undefined) setSetting('enableMoons', imported.enableMoons);
+        if (imported.moons !== undefined) setSetting('moons', imported.moons);
+        if (imported.enableMoonPhenomena !== undefined) setSetting('enableMoonPhenomena', imported.enableMoonPhenomena);
 
         return true;
     } catch (e) {
@@ -255,13 +340,18 @@ export function importChatData(chatId, jsonString) {
  * @returns {string} JSON string
  */
 export function exportAll(chatId) {
-    const bundle = {
-        version: '1.0.0',
-        exportedAt: new Date().toISOString(),
-        globalSettings: JSON.parse(exportGlobalSettings()),
-        chatData: getAllChatData(chatId)
-    };
-    return JSON.stringify(bundle, null, 2);
+    try {
+        const bundle = {
+            version: '1.0.0',
+            exportedAt: new Date().toISOString(),
+            globalSettings: JSON.parse(exportGlobalSettings()),
+            chatData: getAllChatData(chatId)
+        };
+        return JSON.stringify(bundle, null, 2);
+    } catch (e) {
+        console.error('[NWST Settings] Export all failed:', e);
+        return null;
+    }
 }
 
 /**
@@ -272,19 +362,23 @@ export function exportAll(chatId) {
  * @param {string} jsonString - The bundle JSON string
  * @returns {boolean} True on success
  */
-export function importAll(chatId, jsonString) {
+export async function importAll(chatId, jsonString) {
     try {
         const bundle = JSON.parse(jsonString);
-        if (typeof bundle !== 'object' || bundle === null) return false;
+        if (typeof bundle !== 'object' || bundle === null) {
+            console.error('[NWST Settings] Import all: parsed bundle is not an object');
+            return false;
+        }
 
         // Restore global settings
         if (bundle.globalSettings) {
             importGlobalSettings(JSON.stringify(bundle.globalSettings));
         }
 
-        // Restore chat data
+        // Restore chat data — MUST await the async write or the success toast
+        // fires before data is actually persisted (and failures stay silent).
         if (bundle.chatData) {
-            setAllChatData(chatId, bundle.chatData);
+            await setAllChatData(chatId, bundle.chatData);
         }
 
         return true;

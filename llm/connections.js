@@ -163,6 +163,7 @@ function getRoleLabel(profileKey) {
         case 'planningLLM':             return 'Planning LLM';
         case 'dayAdvancementLLM':       return 'Day Advancement LLM';
         case 'narrativeConsistencyLLM': return 'Narrative Consistency LLM';
+        case 'secretsSidecarLLM':       return 'Secrets Sidecar LLM';
         default:                        return profileKey;
     }
 }

@@ -23,6 +23,9 @@ import {
     getMaxSnapshotCount, setMaxSnapshotCount,
     getInjectionSettings, setInjectionSetting, getMaxActiveEvents, getDensityMode,
     getSecretBudgetTokens, setSecretBudgetTokens,
+    getMaxSecretsInjected, getSidecarCadence, getSidecarScanRange, getInjectionThreshold,
+    getSecretDecayThreshold, getReconcileCadence,
+    getScoringWeights, setScoringWeight, setSecretsConfigValue,
     exportGlobalSettings, importGlobalSettings,
     exportChatData, importChatData,
     exportAll, importAll
@@ -33,6 +36,7 @@ import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG } from '../data/storage.js';
 import { runBatchScan } from '../llm/batchScan.js';
+import { getSecretsMeta, setSecretsMeta } from '../data/secretsMeta.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
 
@@ -78,6 +82,13 @@ export function buildSettingsTab() {
                         Monitors secrets for knowledge leaks, flags inconsistencies, and manages selective secret injection. A reliable mid-size model is recommended (Mistral Small 24B, Qwen 3.5 9B, or equivalent) — this is a consistency check, not a creative task.
                     </div>
                     <select id="nwst-setting-narrativeConsistencyLLM" style="margin-bottom:12px"></select>
+
+                    <!-- Secrets Sidecar LLM -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Secrets Sidecar</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        Analyzes each scene for the prose-based secrets engine — who is present (resolving pronouns), what kind of scene it is, and which narrative pressures are active. Runs frequently on its own cadence, so use a <strong>cheap, fast model</strong> (Mistral-Nemo, Haiku, a local 8B). This is NOT the heavy consistency model.
+                    </div>
+                    <select id="nwst-setting-secretsSidecarLLM" style="margin-bottom:12px"></select>
 
                     <!-- No-think (per connection profile) -->
                     <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin-bottom:4px">No-think (per profile)</div>
@@ -445,6 +456,16 @@ export function buildSettingsTab() {
                         </label>
                     </div>
                     <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Event validity review on day advance</div>
+                            <div class="nwst-setting-sub">After each day advancement, the Planning LLM checks whether any active event's premise has become impossible or moot (e.g. a key character permanently removed). Suspect events are only FLAGGED for your Keep / Mark-missed decision in the Events tab — never removed automatically. One extra API call per day advance, skipped when there are no active events.</div>
+                        </div>
+                        <label class="nwst-toggle">
+                            <input type="checkbox" id="nwst-setting-eventValidityReview" checked>
+                            <span class="nwst-slider"></span>
+                        </label>
+                    </div>
+                    <div class="nwst-setting-row">
                         <div><div class="nwst-setting-label">Injection placement</div></div>
                         <select id="nwst-setting-placement" style="width:180px;flex-shrink:0">
                             <option value="before_main">Before Main Prompt / Story String</option>
@@ -478,6 +499,112 @@ export function buildSettingsTab() {
                             <span id="nwst-setting-secretBudget-value" style="font-size:12px;min-width:40px;text-align:center">600</span>
                             <span style="font-size:12px;color:#666">tokens</span>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+        <!-- ── Secrets Engine (prose-based scoring) ─────────────── -->
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-secrets">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Secrets engine</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-secrets">
+                <div class="nwst-card">
+                    <div style="font-size:11px;color:#999;margin-bottom:12px;line-height:1.4">
+                        The prose-based secrets engine scores every secret against the current scene and injects the most relevant ones. These controls tune how aggressively secrets are injected. Use <code>/secretsdebug</code> in chat to see live scoring.
+                    </div>
+
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Max secrets injected</div>
+                            <div class="nwst-setting-sub">Hard cap on how many secrets inject at once, regardless of token budget. Whichever limit is hit first wins.</div>
+                        </div>
+                        <input type="number" id="nwst-setting-maxSecretsInjected" value="4" min="1" max="20" style="width:52px;text-align:center;flex-shrink:0">
+                    </div>
+
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Sidecar cadence</div>
+                            <div class="nwst-setting-sub">How often the scene-analyzer LLM runs (in messages). Lower = fresher scene reads, more API calls.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-sidecarCadence" value="10" min="1" max="50" style="width:52px;text-align:center">
+                            <span style="font-size:12px;color:#666">msgs</span>
+                        </div>
+                    </div>
+
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Sidecar scan range</div>
+                            <div class="nwst-setting-sub">How many recent prose messages the sidecar and cheap JS scan inspect. Default 5 keeps cutaways focused and avoids stale scene bleed.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-sidecarScanRange" value="5" min="1" max="50" style="width:52px;text-align:center">
+                            <span style="font-size:12px;color:#666">msgs</span>
+                        </div>
+                    </div>
+
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Injection threshold</div>
+                            <div class="nwst-setting-sub">Minimum relevance score a secret must reach to be eligible for injection.</div>
+                        </div>
+                        <input type="number" id="nwst-setting-injectionThreshold" value="50" min="0" max="200" style="width:52px;text-align:center;flex-shrink:0">
+                    </div>
+
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Dormancy decay</div>
+                            <div class="nwst-setting-sub">Messages since a secret last injected before it's flagged for archive review. High/Critical secrets are exempt. Set 0 to disable.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-decayThreshold" value="250" min="0" max="9999" style="width:60px;text-align:center">
+                            <span style="font-size:12px;color:#666">msgs</span>
+                        </div>
+                    </div>
+
+                    <div class="nwst-setting-row">
+                        <div>
+                            <div class="nwst-setting-label">Auto-tidy notebook</div>
+                            <div class="nwst-setting-sub">Automatically run the notebook reconciliation pass every N scans (merges duplicates, clarifies, removes dead threads — all undoable). Set 0 for manual only via the Tidy button.</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+                            <input type="number" id="nwst-setting-reconcileCadence" value="0" min="0" max="100" style="width:60px;text-align:center">
+                            <span style="font-size:12px;color:#666">scans</span>
+                        </div>
+                    </div>
+
+                    <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin:14px 0 6px">Scoring weights</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.4">
+                        How strongly each signal pushes a secret toward injection. Higher = that signal matters more. Negative values (priority Low) push secrets down.
+                    </div>
+                    <div id="nwst-scoring-weights"></div>
+                    <button class="menu_button nwst-btn" id="nwst-setting-resetWeights" style="font-size:11px;padding:3px 9px;margin-top:8px">Reset weights to defaults</button>
+
+                    <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin:16px 0 6px">User/PC identity</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.4">
+                        Optional per-chat identity for your protagonist. If a recent user message is present, this PC is counted as present even when the prose is first-person or does not name them.
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+                        <input type="text" id="nwst-secret-pc-name" placeholder="User/PC canonical name (e.g. Mira)" style="font-size:12px">
+                        <input type="text" id="nwst-secret-pc-aliases" placeholder="PC aliases, comma-separated (e.g. Mira Halden)" style="font-size:12px">
+                        <button class="menu_button nwst-btn" id="nwst-secret-pc-save" style="font-size:11px;padding:3px 9px;align-self:flex-start">Save PC identity</button>
+                    </div>
+
+                    <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin:16px 0 6px">Alias manager</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.4">
+                        Collapse the different ways a character is named in prose down to one canonical name. The engine auto-detects names from your secrets and communities, but you can add aliases it can't infer (e.g. "the Silver Fox" → Kellan). Pretty names show in the UI; matching happens internally.
+                    </div>
+                    <div id="nwst-alias-list" style="margin-bottom:10px"></div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                        <input type="text" id="nwst-alias-canonical" placeholder="Canonical name (e.g. Kellan)" style="font-size:12px">
+                        <input type="text" id="nwst-alias-variants" placeholder="Aliases, comma-separated (e.g. the Silver Fox, Captain, Kellan Vance)" style="font-size:12px">
+                        <button class="menu_button nwst-btn" id="nwst-alias-add" style="font-size:11px;padding:3px 9px;align-self:flex-start">+ Add alias group</button>
                     </div>
                 </div>
             </div>
@@ -528,13 +655,13 @@ export function buildSettingsTab() {
                 <span class="nwst-accordion-arrow">▶</span>
             </div>
             <div class="nwst-accordion-body" id="nwst-accordion-debug">
-                <div class="nwst-setting-label" style="margin-bottom:4px">F12 Console Logging</div>
+                <div class="nwst-setting-label" style="margin-bottom:4px">Debug logging</div>
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
                     <label class="nwst-toggle" title="Enable verbose debug logging to the browser console (F12)">
                         <input type="checkbox" id="nwst-debug-logging-toggle" ${isDebugMode() ? 'checked' : ''}>
                         <span class="nwst-toggle-slider"></span>
                     </label>
-                    <span style="font-size:11px;color:var(--SmartThemeBodyColor,#ddd)">Log detailed debug info to the F12 console</span>
+                    <span style="font-size:11px;color:var(--SmartThemeBodyColor,#ddd)">Log NWST internal activity (scans, injections, scoring) to the browser console (opened with F12)</span>
                 </div>
                 <div class="nwst-setting-sub" style="margin-bottom:8px">Manual trigger buttons for testing LLM functions. These run immediately and may use API credits.</div>
                 <div class="nwst-btn-row" style="margin-top:4px">
@@ -542,15 +669,20 @@ export function buildSettingsTab() {
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-communities">👥 Scan for communities</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-worldstate">🌍 Scan world state</button>
                     <button class="menu_button nwst-btn-debug" id="nwst-debug-review-participants" title="Use the Planning LLM to review all events and add participants where missing">🔎 Review event participants</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-secrets-report" title="Show the secrets scoring report — scene context, per-secret scores, and inject/skip reasons">📊 Secrets scoring report</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-run-sidecar" title="Run the secrets sidecar scene analyzer now (uses one API call)">🔬 Run sidecar now</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-consistency-scan" title="Deep scan: reads ALL visible chat messages against every secret and applies updates — characters who learned a secret are moved to Who Knows, revealed secrets are flagged for archive review, contradictions are noted. One API call; long chats mean a large prompt.">🩺 Consistency scan (visible)</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-backfill-anchors" title="Generate trigger anchors for secrets that don't have them yet (one Planning LLM call per secret)">🏷️ Generate missing anchors</button>
                 </div>
                 <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
                     <div class="nwst-setting-label" style="margin-bottom:4px">Adjust Secret Priority</div>
                     <div class="nwst-setting-sub" style="margin-bottom:8px">Bulk-override the injection priority of ALL existing secrets. Useful for testing the priority system — resets all secrets to a single level.</div>
                     <div style="display:flex;align-items:center;gap:8px">
                         <select id="nwst-debug-priority-target" style="width:auto;font-size:11px;padding:3px 6px;flex:1">
-                            <option value="high">⬆ High — always inject</option>
-                            <option value="normal">◈ Normal — inject when at risk</option>
-                            <option value="low">⬇ Low — monitor only</option>
+                            <option value="critical">‼ Critical — continuity guard</option>
+                            <option value="high">⬆ High — hotter/more eager</option>
+                            <option value="normal">◈ Normal — standard relevance</option>
+                            <option value="low">⬇ Low — background/rare</option>
                         </select>
                         <button class="menu_button nwst-btn" id="nwst-debug-apply-priority" style="flex-shrink:0">Apply to all</button>
                     </div>
@@ -819,6 +951,96 @@ function renderCalendarDaysList() {
 
 // ── Populate UI with current settings values ──────────────────────────────
 
+// Weight field definitions for the secrets engine UI
+const SCORING_WEIGHT_FIELDS = [
+    { key: 'knowerPresent',        label: 'Knower present',          hint: 'a character who knows the secret is in the scene' },
+    { key: 'unawarePresent',       label: 'Unaware party present',   hint: 'a character who must not know is in the scene' },
+    { key: 'bothPresent',          label: 'Both present (subject referenced)', hint: 'knower + unaware present AND the secret\'s subject is referenced in the scene' },
+    { key: 'coPresenceOnly',       label: 'Co-present only',          hint: 'knower + unaware present but the secret\'s subject is NOT referenced — coincidental co-presence' },
+    { key: 'sharedThemeMatch',     label: 'Shared theme match',      hint: 'a theme word shared across multiple secrets matched, but no distinctive subject anchor — weak signal' },
+    { key: 'npcCutawayHolder',     label: 'NPC cutaway w/ holder',   hint: 'cutaway/surveillance/faction scene with the secret-holder' },
+    { key: 'groupMatch',           label: 'Group/faction match',     hint: 'a group tied to the secret is present' },
+    { key: 'anchorMatch',          label: 'Distinctive anchor match', hint: 'a word distinctive to THIS secret (not a shared theme) appears in the scene' },
+    { key: 'revealConditionMatch', label: 'Reveal condition match',  hint: 'prose approaches the secret\'s reveal conditions' },
+    { key: 'pressureMatch',        label: 'Pressure match',          hint: 'the secret\'s pressure/risk is active in the scene' },
+    { key: 'continuityRisk',       label: 'Continuity risk',         hint: 'omitting a relevant Critical secret risks a break' },
+    { key: 'priorityLow',          label: 'Priority: Low',           hint: 'modifier added when secret is Low priority' },
+    { key: 'priorityNormal',       label: 'Priority: Normal',        hint: 'modifier added when secret is Normal priority' },
+    { key: 'priorityHigh',         label: 'Priority: High',          hint: 'modifier added when secret is High priority' },
+    { key: 'priorityCritical',     label: 'Priority: Critical',      hint: 'modifier added when secret is Critical priority' },
+];
+
+function renderScoringWeights() {
+    const container = document.getElementById('nwst-scoring-weights');
+    if (!container) return;
+    const weights = getScoringWeights();
+    let html = '';
+    for (const field of SCORING_WEIGHT_FIELDS) {
+        const val = weights[field.key] ?? 0;
+        html += `
+        <div class="nwst-setting-row" style="padding:5px 0">
+            <div>
+                <div class="nwst-setting-label" style="font-size:12px">${field.label}</div>
+                <div class="nwst-setting-sub">${field.hint}</div>
+            </div>
+            <input type="number" class="nwst-weight-input" data-weight-key="${field.key}" value="${val}" min="-100" max="100" style="width:56px;text-align:center;flex-shrink:0">
+        </div>`;
+    }
+    container.innerHTML = html;
+    // Wire each weight input
+    container.querySelectorAll('.nwst-weight-input').forEach(input => {
+        input.onchange = function () {
+            const key = this.getAttribute('data-weight-key');
+            const v = parseInt(this.value);
+            if (!isNaN(v)) setScoringWeight(key, v);
+        };
+    });
+}
+
+async function renderAliasList() {
+    const container = document.getElementById('nwst-alias-list');
+    if (!container) return;
+    try {
+        const { getManualAliases } = await import('../data/aliasRegistry.js');
+        const groups = getManualAliases(getChatId());
+        if (!groups || groups.length === 0) {
+            container.innerHTML = '<div style="font-size:11px;color:#999;font-style:italic">No manual aliases yet.</div>';
+            return;
+        }
+        let html = '';
+        for (const g of groups) {
+            const aliasStr = (g.aliases || []).filter(a => a !== g.canonical).join(', ');
+            html += `
+            <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:0.5px solid var(--SmartThemeBorderColor,#444)">
+                <div style="flex:1">
+                    <div style="font-size:12px;font-weight:500">${escapeHtmlLocal(g.display || g.canonical)}</div>
+                    <div style="font-size:11px;color:#999">${escapeHtmlLocal(aliasStr || '(no extra aliases)')}</div>
+                </div>
+                <button class="menu_button nwst-btn-danger nwst-alias-remove" data-canonical="${escapeHtmlLocal(g.canonical)}" style="font-size:11px;padding:2px 8px;flex-shrink:0">Remove</button>
+            </div>`;
+        }
+        container.innerHTML = html;
+        container.querySelectorAll('.nwst-alias-remove').forEach(btn => {
+            btn.onclick = async function () {
+                const canonical = this.getAttribute('data-canonical');
+                const { removeManualAlias } = await import('../data/aliasRegistry.js');
+                await removeManualAlias(getChatId(), canonical);
+                renderAliasList();
+                nwstToast('Alias group removed.', 'info');
+            };
+        });
+    } catch (e) {
+        container.innerHTML = '<div style="font-size:11px;color:#999">Could not load aliases.</div>';
+    }
+}
+
+function escapeHtmlLocal(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+}
+
 function populateSettingsUI() {
     // Connection profile dropdowns
     populateConnectionProfileDropdowns();
@@ -836,6 +1058,7 @@ function populateSettingsUI() {
 
     // Auto-promote events toggle
     setCheckbox('nwst-setting-autoPromoteEvents', getSetting('autoPromoteEvents') !== false);
+    setCheckbox('nwst-setting-eventValidityReview', getSetting('eventValidityReview') !== false);
     renderNoThinkRows();
 
     const freqInput = document.getElementById('nwst-setting-scanFrequency');
@@ -857,6 +1080,26 @@ function populateSettingsUI() {
     const inj = getInjectionSettings();
     const maxEvInput = document.getElementById('nwst-setting-maxActiveEvents');
     if (maxEvInput) maxEvInput.value = getMaxActiveEvents();
+
+    const maxSecInput = document.getElementById('nwst-setting-maxSecretsInjected');
+    if (maxSecInput) maxSecInput.value = getMaxSecretsInjected();
+    const sidecarCadInput = document.getElementById('nwst-setting-sidecarCadence');
+    if (sidecarCadInput) sidecarCadInput.value = getSidecarCadence();
+    const sidecarRangeInput = document.getElementById('nwst-setting-sidecarScanRange');
+    if (sidecarRangeInput) sidecarRangeInput.value = getSidecarScanRange();
+    const pcMeta = getSecretsMeta(getChatId());
+    const pcNameInput = document.getElementById('nwst-secret-pc-name');
+    const pcAliasesInput = document.getElementById('nwst-secret-pc-aliases');
+    if (pcNameInput) pcNameInput.value = pcMeta.userCharacterName || '';
+    if (pcAliasesInput) pcAliasesInput.value = pcMeta.userCharacterAliases || '';
+    const threshInput = document.getElementById('nwst-setting-injectionThreshold');
+    if (threshInput) threshInput.value = getInjectionThreshold();
+    const decayInput = document.getElementById('nwst-setting-decayThreshold');
+    if (decayInput) decayInput.value = getSecretDecayThreshold();
+    const reconcileInput = document.getElementById('nwst-setting-reconcileCadence');
+    if (reconcileInput) reconcileInput.value = getReconcileCadence();
+    renderScoringWeights();
+    renderAliasList();
 
     const densitySelect = document.getElementById('nwst-setting-densityMode');
     if (densitySelect) densitySelect.value = getDensityMode() || 'combined';
@@ -959,7 +1202,8 @@ function populateConnectionProfileDropdowns() {
     const dropdowns = [
         { id: 'nwst-setting-planningLLM', profileKey: 'planningLLM' },
         { id: 'nwst-setting-dayAdvancementLLM', profileKey: 'dayAdvancementLLM' },
-        { id: 'nwst-setting-narrativeConsistencyLLM', profileKey: 'narrativeConsistencyLLM' }
+        { id: 'nwst-setting-narrativeConsistencyLLM', profileKey: 'narrativeConsistencyLLM' },
+        { id: 'nwst-setting-secretsSidecarLLM', profileKey: 'secretsSidecarLLM' }
     ];
 
     // Get connection profiles from ST's connection manager
@@ -1007,6 +1251,7 @@ function renderNoThinkRows() {
         planningLLM: 'Planning',
         dayAdvancementLLM: 'Day advancement',
         narrativeConsistencyLLM: 'Narrative consistency',
+        secretsSidecarLLM: 'Secrets sidecar',
     };
     const conns = getConnectionProfiles() || {};
     const softMap = (getSetting('noThinkProfiles') && typeof getSetting('noThinkProfiles') === 'object') ? getSetting('noThinkProfiles') : {};
@@ -1045,6 +1290,7 @@ function wireSettingsEvents() {
     wireSelect('nwst-setting-planningLLM', (val) => { setConnectionProfile('planningLLM', val); renderNoThinkRows(); });
     wireSelect('nwst-setting-dayAdvancementLLM', (val) => { setConnectionProfile('dayAdvancementLLM', val); renderNoThinkRows(); });
     wireSelect('nwst-setting-narrativeConsistencyLLM', (val) => { setConnectionProfile('narrativeConsistencyLLM', val); renderNoThinkRows(); });
+    wireSelect('nwst-setting-secretsSidecarLLM', (val) => { setConnectionProfile('secretsSidecarLLM', val); renderNoThinkRows(); });
 
     // ── Scan frequency ───────────────────────────────────────────
     wireInput('nwst-setting-scanMinimumMessages', (val) => {
@@ -1062,6 +1308,9 @@ function wireSettingsEvents() {
     });
 
     // ── Event→Secret auto-promotion ──────────────────────────
+    wireCheckbox('nwst-setting-eventValidityReview', (checked) => {
+        setSetting('eventValidityReview', checked);
+    });
     wireCheckbox('nwst-setting-autoPromoteEvents', (checked) => {
         setSetting('autoPromoteEvents', checked);
     });
@@ -1131,6 +1380,60 @@ function wireSettingsEvents() {
     // ── Injection toggles ────────────────────────────────────────
     wireCheckbox('nwst-setting-injectCurrentDay', (checked) => setInjectionSetting('injectCurrentDay', checked));
     wireInput('nwst-setting-maxActiveEvents', (val) => setInjectionSetting('maxActiveEvents', Math.max(4, parseInt(val) || 12)));
+    wireInput('nwst-setting-maxSecretsInjected', (val) => setInjectionSetting('maxSecretsInjected', Math.max(1, parseInt(val) || 4)));
+    wireInput('nwst-setting-sidecarCadence', (val) => setSecretsConfigValue('sidecarCadence', Math.max(1, parseInt(val) || 10)));
+    wireInput('nwst-setting-sidecarScanRange', (val) => setSecretsConfigValue('sidecarScanRange', Math.max(1, parseInt(val) || 5)));
+    wireInput('nwst-setting-injectionThreshold', (val) => setSecretsConfigValue('injectionThreshold', Math.max(0, parseInt(val) || 30)));
+    wireInput('nwst-setting-decayThreshold', (val) => setSecretsConfigValue('decayThreshold', Math.max(0, parseInt(val) || 0)));
+    wireInput('nwst-setting-reconcileCadence', (val) => setSecretsConfigValue('reconcileCadence', Math.max(0, parseInt(val) || 0)));
+
+    const savePcBtn = document.getElementById('nwst-secret-pc-save');
+    if (savePcBtn) {
+        savePcBtn.onclick = async () => {
+            await setSecretsMeta(getChatId(), {
+                userCharacterName: (document.getElementById('nwst-secret-pc-name')?.value || '').trim(),
+                userCharacterAliases: (document.getElementById('nwst-secret-pc-aliases')?.value || '').trim()
+            });
+            nwstToast('Secrets PC identity saved.', 'success');
+        };
+    }
+
+    const addAliasBtn = document.getElementById('nwst-alias-add');
+    if (addAliasBtn) {
+        addAliasBtn.onclick = async () => {
+            const canonicalInput = document.getElementById('nwst-alias-canonical');
+            const variantsInput = document.getElementById('nwst-alias-variants');
+            const canonical = (canonicalInput?.value || '').trim();
+            const variantsRaw = (variantsInput?.value || '').trim();
+            if (!canonical) {
+                nwstToast('Enter a canonical name.', 'warning');
+                return;
+            }
+            const variants = variantsRaw ? variantsRaw.split(',').map(v => v.trim()).filter(Boolean) : [];
+            const { addManualAlias } = await import('../data/aliasRegistry.js');
+            await addManualAlias(getChatId(), canonical, variants);
+            if (canonicalInput) canonicalInput.value = '';
+            if (variantsInput) variantsInput.value = '';
+            renderAliasList();
+            nwstToast(`Alias group "${canonical}" added.`, 'success');
+        };
+    }
+
+    const resetWeightsBtn = document.getElementById('nwst-setting-resetWeights');
+    if (resetWeightsBtn) {
+        resetWeightsBtn.onclick = () => {
+            const defaults = {
+                knowerPresent: 30, unawarePresent: 20, bothPresent: 40, coPresenceOnly: 5, sharedThemeMatch: 5,
+                npcCutawayHolder: 35, groupMatch: 25, anchorMatch: 20,
+                revealConditionMatch: 35, pressureMatch: 25, continuityRisk: 45,
+                priorityLow: -15, priorityNormal: 0, priorityHigh: 20, priorityCritical: 50
+            };
+            for (const [k, v] of Object.entries(defaults)) setScoringWeight(k, v);
+            renderScoringWeights();
+    renderAliasList();
+            nwstToast('Scoring weights reset to defaults.', 'success');
+        };
+    }
     wireSelect('nwst-setting-densityMode', (val) => {
         setInjectionSetting('densityMode', val);
         // Rebuild injection immediately so user sees the change take effect
@@ -1389,14 +1692,17 @@ function wireSettingsEvents() {
     const importAllBtn = document.getElementById('nwst-setting-importAll');
     if (importAllBtn) {
         importAllBtn.addEventListener('click', async () => {
-            triggerFileImport((text) => {
+            triggerFileImport(async (text) => {
                 const chatId = getChatId();
-                const success = importAll(chatId, text);
+                const success = await importAll(chatId, text);
                 if (success) {
                     populateSettingsUI();
+                    if (typeof window?.nwstRefreshTabs === 'function') {
+                        window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
+                    }
                     nwstToast('Settings and chat data imported successfully. UI refreshed.', 'success');
                 } else {
-                    nwstToast('Import failed — invalid file format.', 'error');
+                    nwstToast('Import failed — invalid or corrupt file. Check the console for details.', 'error');
                 }
             });
         });
@@ -1407,6 +1713,10 @@ function wireSettingsEvents() {
         exportAllBtn.addEventListener('click', async () => {
             const chatId = getChatId();
             const json = exportAll(chatId);
+            if (!json) {
+                nwstToast('Export failed — check the console for details.', 'error');
+                return;
+            }
             download(json, `nwst-export-${chatId}.json`, 'application/json');
             nwstToast('Settings and chat data exported.', 'info');
         });
@@ -1435,7 +1745,7 @@ function wireSettingsEvents() {
             const preservedSeasonConfig = getSeasonConfig(chatId);
             const preservedCalendarConfig = getCalendarConfig(chatId);
 
-            deleteAllChatData(chatId);
+            await deleteAllChatData(chatId);
 
             // Restore user-authored data
             if (preservedContext) {
@@ -1456,8 +1766,8 @@ function wireSettingsEvents() {
         debugLoggingToggle.addEventListener('change', () => {
             setDebugMode(debugLoggingToggle.checked);
             nwstToast(debugLoggingToggle.checked
-                ? 'F12 console logging enabled. Check the browser console for debug output.'
-                : 'F12 console logging disabled.', 'info');
+                ? 'Debug logging enabled. Open the browser console (F12) to watch NWST work.'
+                : 'Debug logging disabled.', 'info');
         });
     }
 
@@ -1520,6 +1830,87 @@ function wireSettingsEvents() {
             } finally {
                 debugScanWorldState.textContent = '🌍 Scan world state';
                 debugScanWorldState.disabled = false;
+            }
+        });
+    }
+
+    // ── Debug: Secrets Scoring Report ───────────────────────────────
+    const debugSecretsReport = document.getElementById('nwst-debug-secrets-report');
+    if (debugSecretsReport) {
+        debugSecretsReport.addEventListener('click', async () => {
+            try {
+                const { buildSecretsDebugReport } = await import('../llm/secretsDebug.js');
+                const report = buildSecretsDebugReport(getChatId());
+                const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+                await callGenericPopup(
+                    `<pre style="text-align:left;white-space:pre-wrap;font-size:12px;max-height:70vh;overflow:auto">${report.replace(/</g,'&lt;')}</pre>`,
+                    POPUP_TYPE.TEXT, '', { wide: true, large: true }
+                );
+            } catch (err) {
+                nwstToast(`Secrets report failed: ${err.message}`, 'error');
+            }
+        });
+    }
+
+    // ── Debug: Run Secrets Sidecar Now ──────────────────────────────
+    const debugRunSidecar = document.getElementById('nwst-debug-run-sidecar');
+    if (debugRunSidecar) {
+        debugRunSidecar.addEventListener('click', async () => {
+            debugRunSidecar.textContent = '⏳ Analyzing...';
+            debugRunSidecar.disabled = true;
+            try {
+                const { runSecretsSidecar } = await import('../llm/secretsSidecar.js');
+                const result = await runSecretsSidecar();
+                if (result) {
+                    nwstToast('Sidecar analysis complete. View the scoring report to see results.', 'success');
+                } else {
+                    nwstToast('Sidecar did not run — check that a Secrets Sidecar profile is set and secrets exist.', 'warning');
+                }
+            } catch (err) {
+                nwstToast(`Sidecar failed: ${err.message}`, 'error');
+            } finally {
+                debugRunSidecar.textContent = '🔬 Run sidecar now';
+                debugRunSidecar.disabled = false;
+            }
+        });
+    }
+
+    // ── Debug: Consistency Scan on visible messages ─────────────────
+    const debugConsistencyScan = document.getElementById('nwst-debug-consistency-scan');
+    if (debugConsistencyScan) {
+        debugConsistencyScan.addEventListener('click', async () => {
+            debugConsistencyScan.textContent = '⏳ Scanning...';
+            debugConsistencyScan.disabled = true;
+            try {
+                const { runVisibleConsistencyScan } = await import('../llm/narrativeConsistency.js');
+                await runVisibleConsistencyScan();
+            } catch (err) {
+                nwstToast(`Consistency scan failed: ${err.message}`, 'error');
+            } finally {
+                debugConsistencyScan.textContent = '🩺 Consistency scan (visible)';
+                debugConsistencyScan.disabled = false;
+            }
+        });
+    }
+
+    // ── Debug: Generate Missing Anchors (backfill) ──────────────────
+    const debugBackfillAnchors = document.getElementById('nwst-debug-backfill-anchors');
+    if (debugBackfillAnchors) {
+        debugBackfillAnchors.addEventListener('click', async () => {
+            debugBackfillAnchors.textContent = '⏳ Generating...';
+            debugBackfillAnchors.disabled = true;
+            try {
+                const { backfillSecretAnchors } = await import('../llm/secretsAnchorBackfill.js');
+                const r = await backfillSecretAnchors(getChatId());
+                nwstToast(`Anchors generated: ${r.filled} filled, ${r.skipped} already had anchors, ${r.failed} failed.`,
+                    r.failed > 0 ? 'warning' : 'success');
+                // Refresh the notebook so new anchors show in the secret fields
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
+            } catch (err) {
+                nwstToast(`Anchor generation failed: ${err.message}`, 'error');
+            } finally {
+                debugBackfillAnchors.textContent = '🏷️ Generate missing anchors';
+                debugBackfillAnchors.disabled = false;
             }
         });
     }
@@ -1676,17 +2067,18 @@ Respond with ONLY a valid JSON object in the following format, no other text:
   "secrets": [
     {
       "id": "secret-id-here",
-      "injectionPriority": "high|normal|low",
+      "injectionPriority": "critical|high|normal|low",
       "reasoning": "Brief explanation for this assignment"
     }
   ]
 }
 
 Analyze each secret carefully. Consider:
-- Is the secret time-sensitive or about to be revealed? → high
-- Does the secret have active tension (characters who know vs. characters who don't)? → normal
-- Is the secret resolved, background, or no longer relevant to current events? → low
-- WhoKnows and WhoDoesNotKnow lists — secrets with both present are actively relevant`
+- Would omission likely cause a continuity/knowledge-boundary break? → critical
+- Is the secret time-sensitive, hot, or approaching reveal? → high
+- Does the secret have active narrative pressure? → normal
+- Is the secret distant, background, or no longer active? → low
+- WhoKnows and WhoDoesNotKnow lists matter, but prose relevance and cutaways matter too`
             };
 
             const userMessage = {
@@ -1738,7 +2130,7 @@ Analyze each secret carefully. Consider:
                         skipped++;
                         continue;
                     }
-                    const valid = ['high', 'normal', 'low'];
+                    const valid = ['critical', 'high', 'normal', 'low'];
                     if (!valid.includes(entry.injectionPriority)) {
                         skipped++;
                         continue;
@@ -1870,7 +2262,7 @@ function triggerFileImport(callback) {
 
         try {
             const text = await file.text();
-            callback(text);
+            await callback(text);
         } catch (err) {
             console.error('[NWST Settings UI] File read error:', err);
             nwstToast('Failed to read file.', 'error');

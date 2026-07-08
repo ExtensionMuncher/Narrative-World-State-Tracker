@@ -117,6 +117,12 @@ const DEFAULT_CALENDAR_CONFIG = {
 };
 
 const DEFAULT_SNAPSHOTS = {};
+const DEFAULT_ALIAS_REGISTRY = [];
+const DEFAULT_SECRETS_SIDECAR_STATE = null;
+const DEFAULT_SECRETS_META = {
+    userCharacterName: '',
+    userCharacterAliases: ''
+};
 
 const DEFAULTS = {
     worldState:     DEFAULT_WORLD_STATE,
@@ -126,7 +132,10 @@ const DEFAULTS = {
     settingContext: DEFAULT_SETTING_CONTEXT,
     seasonConfig:   DEFAULT_SEASON_CONFIG,
     calendarConfig: DEFAULT_CALENDAR_CONFIG,
-    snapshots:      DEFAULT_SNAPSHOTS
+    snapshots:      DEFAULT_SNAPSHOTS,
+    aliasRegistry:  DEFAULT_ALIAS_REGISTRY,
+    secretsSidecarState: DEFAULT_SECRETS_SIDECAR_STATE,
+    secretsMeta:    DEFAULT_SECRETS_META
 };
 
 // ── Internal helpers ──────────────────────────────────────────────────────
@@ -314,6 +323,20 @@ async function deleteAllChatData(chatId) {
         delete meta[metaKey(dataType)];
     }
 
+    // Also clear standalone NWST metadata keys that aren't part of DEFAULTS.
+    // Without this, clear-all would leave orphaned state — e.g. the notebook
+    // undo history would still reference now-deleted bullets, and pressing Undo
+    // could resurrect cleared data.
+    const STANDALONE_KEYS = [
+        'nwst:notebookHistory',
+        'nwst:pendingEvents',
+        'nwst:scannerState',
+        'nwst:scansSinceReconcile'
+    ];
+    for (const key of STANDALONE_KEYS) {
+        delete meta[key];
+    }
+
     await persistMeta();
 }
 
@@ -440,5 +463,8 @@ export {
     DEFAULT_SEASON_CONFIG,
     DEFAULT_CALENDAR_CONFIG,
     DEFAULT_SNAPSHOTS,
+    DEFAULT_ALIAS_REGISTRY,
+    DEFAULT_SECRETS_SIDECAR_STATE,
+    DEFAULT_SECRETS_META,
     DEFAULTS
 };

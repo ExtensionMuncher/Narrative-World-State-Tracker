@@ -36,7 +36,7 @@ CRITICAL RULE — NO CHARACTERS:
 Do NOT mention any named characters. Do NOT describe character actions, feelings, states, or presence. Do NOT reference what happened in the story. The Current Day block describes the WORLD, not the people in it. Characters are alive and moving — their states change message to message. The Current Day block is static ambient context. Any character reference will contaminate the main AI's generations by anchoring it to a past moment.
 
 WRONG (character contamination):
-"Gojō's cursed energy has leaked into the room, thickening the atmosphere."
+"Dorian's oppressive aura has leaked into the room, thickening the atmosphere."
 "The shrine is quiet — the character is expected to arrive before sundown."
 
 RIGHT (world-only):

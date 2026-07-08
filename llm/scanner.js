@@ -19,10 +19,16 @@ import { getScanFrequency, getScanMinimumMessages, isPaused, isEnabled } from '.
 import { chatHasData } from '../data/storage.js';
 import { getWorldState, getEnabledConditions, getSettingContext, updateConditionContent, getCalendarConfig } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
-import { getNotebook, addCoreBullet, addMysteryBullet, addSecret, getAllSecrets } from '../data/notebook.js';
-import { getAllCommunities, updateCommunitySummary, addCommunity } from '../data/communities.js';
+import { getNotebook, addCoreBullet, upsertCoreBullet, addMysteryBullet, upsertCharacterBullet, replaceMysteryField, replaceMysteryFieldDiff, getCoreField, getMysteryField, addSecret, getAllSecrets, flagSecretForArchive, getSecretStatus, getInjectableSecrets } from '../data/notebook.js';
+import { beginMutationBatch, recordMutation, commitMutationBatch } from '../data/notebookHistory.js';
+import { replaceCoreField as replaceCoreFieldQuiet } from '../data/notebook.js';
+import { getAllCommunities, updateCommunitySummary, updateCommunityMembers, addCommunity } from '../data/communities.js';
 import { resolveProfile } from './connections.js';
 import { runConsistencyCheck } from './narrativeConsistency.js';
+import { runNotebookReconcile } from './notebookReconcile.js';
+import { getReconcileCadence } from '../settings.js';
+import { runSecretsSidecar } from './secretsSidecar.js';
+import { getSidecarCadence, getSecretDecayThreshold } from '../settings.js';
 import { detectNPCEventsFromChat } from './eventGen.js';
 import { dlog } from "../lib/debug.js";
 
@@ -46,6 +52,7 @@ import { dlog } from "../lib/debug.js";
 // always starts from a clean boundary, never from the warmup count.
 
 let messageCountAtLastScan = 0;  // Set after each completed scan
+let messageCountAtLastSidecar = 0;  // Independent cadence for the secrets sidecar
 let warmupMessageCount = 0;      // Counts messages during Phase 1 warmup
 let scanPhase = 'warmup';        // 'warmup' | 'cadence'
 let scanTimer = null;
@@ -91,13 +98,13 @@ WHAT YOU DO:
 1. NOTEBOOK UPDATES — add or update bullets in notebook fields based on what happened:
    - unresolvedDetail: new unresolved threads, unanswered questions, things left dangling
    - promiseThreatDeadline: explicit or implied promises, threats, warnings, or deadlines set in the scene
-   - offscreenPressure: pressures building away from the scene — other characters' plans, external forces
+   - offscreenPressure: pressures building away from the scene, as "Source: pressure" (e.g. "Victor: escalating his monitoring of Mira"). Report each source's CURRENT pressure; replacing a source's prior pressure, not stacking.
    - doNotForget: specific important details that must not be dropped (an object, a name, a revealed fact)
    - establishedFacts: things now confirmed as true in this world — do not add speculation
    - plantedDetails: seeds placed in the scene that haven't paid off yet (a meaningful glance, an unexplained object, a subtle shift)
-   - characterWhereabouts: where named characters are or were last confirmed to be
+   - characterWhereabouts: the CURRENT location of each named character, as "CharacterName: location/activity". Report one entry per character reflecting their LATEST known position. If a character's location changed this scene, report the new one — do not repeat their old position. Format strictly as "Name: where they are now".
    - inconsistenciesFlagged: anything in the recent messages that contradicts established facts
-   - currentToneAtmosphere: the current emotional register and tension level of the story
+   - currentToneAtmosphere: the SINGLE current emotional register and tension level right now. Provide one entry; it replaces the previous tone.
 
 2. WORLD CONDITION UPDATES — update only conditions that meaningfully shifted in the recent messages:
    CRITICAL: World conditions are ATMOSPHERIC NARRATIVES, not factual summaries. They must:
@@ -108,10 +115,10 @@ WHAT YOU DO:
    - Characters and factions MAY be named when their presence shapes the world condition — use names when it adds clarity and grounding. What must NOT appear is: specific character actions that belong in the chat log, personal emotional states, or story events framed as current facts. Describe what the world looks like as a result of forces at work, not what a specific character did or feels right now.
 
    Example of BAD world condition (factual summary):
-   "Sukuna has left for a nearby village. The harem concubines are watching Sachiko."
+   "Kellan has left for a nearby village. The court attendants are watching Mira."
 
    Example of GOOD world condition (atmospheric narrative):
-   "Sukuna's absence has shifted the gravitational center of the fortress. The concubines move more openly now — assessing, circling, recalibrating. Whatever fragile equilibrium his presence imposed has dissolved into something more volatile and less predictable."
+   "Kellan's absence has shifted the gravitational center of the fortress. The attendants move more openly now — assessing, circling, recalibrating. Whatever fragile equilibrium his presence imposed has dissolved into something more volatile and less predictable."
 
    Only update a condition if something in the recent messages genuinely changes it. If a condition is stable, leave it unchanged.
 
@@ -123,8 +130,6 @@ WHAT YOU DO:
    - Describe the internal tensions and pressures within the group, not just the surface events
    - Be dense with insight, not long with description
    - Use bullet points (•) for observations, each a specific concrete observation. Do not pad — output only as many bullets as the community genuinely warrants. An optional 1-2 sentence overview paragraph may precede the bullets.
-
-   CRITICAL — AVOID DUPLICATE COMMUNITIES: Before suggesting a NEW community in communityUpdates, check every existing community name. If an existing community covers the same social group under a different name (e.g., "The Servants" vs "Household Staff"), UPDATE ITS SUMMARY instead of creating a duplicate. Pay attention to member overlap and thematic similarity. Duplicate communities fragment the analysis and must be prevented.
 
    CRITICAL — AVOID DUPLICATE COMMUNITIES: Before suggesting a NEW community in communityUpdates, check every existing community name. If an existing community covers the same social group under a different name (e.g., "The Servants" vs "Household Staff"), UPDATE ITS SUMMARY instead of creating a duplicate. Pay attention to member overlap and thematic similarity. Duplicate communities fragment the analysis and must be prevented.
 
@@ -148,11 +153,19 @@ WHAT YOU DO:
         "normal" — standard secrets with clear dramatic potential (default)
         "low" — minor secrets, background details, or secrets with low immediate impact
 
-      TYPE GUIDE:
-      "npc": A secret kept by an NPC (default)
-      "character": A secret about a character's nature, past, or abilities
+      TYPE GUIDE (choose the most fitting — do NOT default everything to "character"):
+      "character": A secret about a specific character's nature, past, feelings, or abilities
       "user_pc": A secret the {{user}} character (the PC) is keeping, or a secret about them
-      "environmental": A secret about the world or setting
+      "world": A secret about the world, setting, factions, or environment (not tied to one character)
+      "dramatic_irony": Something the audience/reader knows but key characters do not
+      "unconfirmed_suspicion": A suspicion a character holds that is not yet confirmed true
+
+      DETECTING RESOLVED THREADS:
+      - Review the current notebook's unresolvedDetail and promiseThreatDeadline bullets. If the recent messages clearly RESOLVE, pay off, or expire one of them, copy its EXACT text into "resolvedThreads" so it can be removed. Only genuinely closed threads — when in doubt, leave it.
+
+      DETECTING REVEALED SECRETS:
+      - Review the EXISTING secrets list. If the prose clearly shows a previously-hidden secret becoming KNOWN to a character who did not know it (an on-screen reveal, a confession, a discovery), list that secret's EXACT title under "revealedSecrets".
+      - Only flag a genuine reveal — not a passing mention, a near-miss, or a suspicion. The unaware party must actually learn the truth.
 
       RULES for new secrets:
       - Do NOT include the literal label "User" (the real-world person at the keyboard) in whoKnows or whoDoesNotKnow lists — "User" is the OOC author, not a narrative participant
@@ -196,14 +209,25 @@ RESPONSE FORMAT — respond with a JSON object:
   "newSecrets": [
     {
       "title": "Secret title",
-      "type": "npc" | "character" | "user_pc" | "environmental",
+      "type": "character" | "user_pc" | "world" | "dramatic_irony" | "unconfirmed_suspicion",
       "secret": "The hidden knowledge content",
       "whoKnows": ["Character A"],
       "whoDoesNotKnow": ["Character B"],
       "evidenceShown": "optional evidence visible in chat",
-      "pressureRisk": "optional risk level",
+      "pressureRisk": "A concrete 1-2 sentence description of the SPECIFIC consequences if this secret were revealed or acted upon — who would be hurt, what would break, what would escalate. Be specific and narrative, NOT a severity label. Bad: 'moderate'. Good: 'If Mira discovers the surveillance, it would feel like a violation of privacy and could shatter any trust, painting Kellan as a controlling predator.'",
       "revealConditions": "optional conditions for reveal",
-      "injectionPriority": "high" | "normal" | "low"
+      "injectionPriority": "high" | "normal" | "low",
+      "triggerAnchors": ["3-7 distinctive words/short phrases UNIQUE to this secret that signal a scene is about it. Prefer multi-word phrases and the subject's name over generic single words. AVOID broad themes shared with other secrets."]
+    }
+  ],
+  "resolvedThreads": [
+    "EXACT text of an existing bullet from the current notebook's unresolvedDetail or promiseThreatDeadline lists that has now been RESOLVED, paid off, or expired in the recent messages. Copy the bullet text verbatim so it can be matched and removed. Only include genuinely closed threads — not ones still pending."
+  ],
+  "revealedSecrets": [
+    {
+      "title": "EXACT title of an EXISTING secret (from the provided secrets list) that has now been REVEALED on-screen to a character who previously did not know it. Only include a secret here if the prose clearly shows the hidden knowledge becoming known — not merely referenced or suspected.",
+      "revealedTo": "who learned it",
+      "evidence": "brief quote or reference to where in the prose it was revealed"
     }
   ],
   "noChanges": false
@@ -225,9 +249,9 @@ Your summaries have two parts. Both must always be present.
 PART 1 — OVERVIEW PARAGRAPH (2-4 sentences):
 Write with narrative voice and atmosphere. Capture the emotional texture, underlying pressure, and defining dynamic of this group. Name the key players and their roles. Be specific about what makes this group distinctive — not just that tension exists, but what KIND of tension, what SHAPE the dynamic takes, what is at stake. This should read like a perceptive narrator sizing up a room, not a journalist listing facts.
 
-GOOD overview: "A family where the cracks are widening. Yuzu is too observant for her age and suspects Ichigo is hiding serious injuries. Isshin, the boisterous father, has become eerily quiet — he knows more than he lets on. The household is a pressure cooker of unspoken worry, and the lies Ichigo tells will soon break against the walls of a family that loves him."
+GOOD overview: "A family where the cracks are widening. Poppy is too observant for her age and suspects Nathan is hiding serious injuries. Gerald, the boisterous father, has become eerily quiet — he knows more than he lets on. The household is a pressure cooker of unspoken worry, and the lies Nathan tells will soon break against the walls of a family that loves him."
 
-BAD overview: "The Kurosaki family consists of Ichigo, his sisters, and their father. There is tension because Ichigo is keeping secrets." (roster and vague summary — not analysis)
+BAD overview: "The Whitlock family consists of Nathan, his sisters, and their father. There is tension because Nathan is keeping secrets." (roster and vague summary — not analysis)
 
 PART 2 — ANALYTICAL OBSERVATIONS (variable count — determined by the community):
 Each bullet must be a specific, concrete observation tied to an actual moment, detail, pattern, or choice from the chat. These are interpretations — what does a specific thing REVEAL about the dynamic? What is being avoided, performed, or withheld? What does a small choice signal about a larger truth?
@@ -236,9 +260,9 @@ BULLET COUNT IS A TEST OF ANALYTICAL RIGOR. Do not aim for any specific number. 
 
 Self-critique (perform silently before finalizing): read each bullet — is it revealing something non-obvious? Is it tied to a specific detail rather than generic? If any bullet fails, delete it. If pruning leaves 1-2 bullets, that is correct. Do not add filler to reach a count.
 
-GOOD bullet (2 sentences max): "Rukia's shift from cold tactical assessment to visible concern — bringing food, giving space instead of orders — marks a structural change in how she processes Sachiko's role in the network. The operational detachment she uses as a shield is failing against something she cannot categorize as a variable."
+GOOD bullet (2 sentences max): "Elena's shift from cold tactical assessment to visible concern — bringing food, giving space instead of orders — marks a structural change in how she processes Mira's role in the network. The operational detachment she uses as a shield is failing against something she cannot categorize as a variable."
 BAD bullet (too long): same content sprawling across 4 sentences with explanation appended
-BAD bullet (summary): "Rukia brought food to Sachiko" — states what happened, not what it reveals
+BAD bullet (summary): "Elena brought food to Mira" — states what happened, not what it reveals
 BAD bullet (generic): "There is tension between characters" — reveals nothing
 
 BULLET LENGTH LIMIT — STRICTLY ENFORCED:
@@ -338,6 +362,20 @@ async function checkAndScan() {
 
     const currentCount = getCurrentMessageCount();
 
+    // ── SECRETS SIDECAR — independent cadence ────────────────────────────
+    // The sidecar runs on its own interval (default 10 msgs), separate from
+    // the main scanner cadence. It only fires if there are secrets to analyze
+    // (the sidecar itself no-ops cheaply when there are none). Runs in all
+    // phases — secrets matter even early in a chat.
+    const sidecarCadence = getSidecarCadence();
+    if (currentCount - messageCountAtLastSidecar >= sidecarCadence) {
+        messageCountAtLastSidecar = currentCount;
+        // Fire-and-forget — do not block the main scan path on the sidecar
+        runSecretsSidecar().catch(e =>
+            dlog('[NWST Scanner] Secrets sidecar error (non-fatal):', e)
+        );
+    }
+
     // ── PHASE 1: WARMUP ──────────────────────────────────────────────────
     // Count messages silently until the minimum floor is reached.
     // Do not fire any LLM calls during warmup.
@@ -431,6 +469,33 @@ export async function runScan() {
 
         // Run narrative consistency check (secrets monitoring)
         await runConsistencyCheck();
+
+        // ── Auto-reconcile cadence (Tier 3) ────────────────────────────────
+        // Runs the notebook tidy pass every N scans, if enabled (0 = off, manual
+        // only). Counted in chatMetadata so it survives reloads.
+        try {
+            const reconcileCadence = getReconcileCadence();
+            if (reconcileCadence > 0) {
+                const ctx = SillyTavern.getContext();
+                const meta = ctx?.chatMetadata;
+                if (meta) {
+                    const count = (meta['nwst:scansSinceReconcile'] || 0) + 1;
+                    if (count >= reconcileCadence) {
+                        meta['nwst:scansSinceReconcile'] = 0;
+                        if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
+                        await runNotebookReconcile(chatId);
+                        if (typeof window?.nwstRefreshTabs === 'function') {
+                            window.nwstRefreshTabs('notebook');
+                        }
+                    } else {
+                        meta['nwst:scansSinceReconcile'] = count;
+                        if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('[NWST Scanner] Auto-reconcile failed:', e);
+        }
 
         dlog('[NWST Scanner] Scan complete.');
 
@@ -535,6 +600,11 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
             prompt += `--- ${com.name} (${com.members || 'members unknown'}) ---\n`;
             prompt += `${com.summary || '(no summary yet)'}\n\n`;
         }
+    } else {
+        // Without this, a fresh chat gave the model no cue that community
+        // creation was part of its job, so the FIRST community rarely got made.
+        prompt += `=== CURRENT COMMUNITY SUMMARIES ===\n`;
+        prompt += `(none tracked yet — if the recent messages show a distinct social group with recurring dynamics, create it via communityUpdates)\n\n`;
     }
 
     // Active events (for reference only)
@@ -611,6 +681,7 @@ async function applyScanResults(chatId, response, recentMessages) {
     }
 
     let hadUpdates = false;
+    beginMutationBatch('Scan update');  // collect destructive ops for undo/redo
 
     // ── Apply notebook updates ────────────────────────────────────────────
     const nbUpdates = result.notebookUpdates || {};
@@ -622,7 +693,14 @@ async function applyScanResults(chatId, response, recentMessages) {
         if (Array.isArray(bullets) && bullets.length > 0) {
             for (const bullet of bullets) {
                 if (bullet && typeof bullet === 'string' && bullet.trim()) {
-                    await addCoreBullet(chatId, field, bullet.trim());
+                    if (field === 'offscreenPressure') {
+                        // Pressures are source-keyed ("Source: pressure") — replace
+                        // the same source's stale pressure instead of stacking.
+                        const diff = await upsertCoreBullet(chatId, field, bullet.trim());
+                        if (diff && diff.removed.length) recordMutation('core', field, diff.removed, diff.added);
+                    } else {
+                        await addCoreBullet(chatId, field, bullet.trim());
+                    }
                     hadUpdates = true;
                 }
             }
@@ -634,9 +712,40 @@ async function applyScanResults(chatId, response, recentMessages) {
         if (Array.isArray(bullets) && bullets.length > 0) {
             for (const bullet of bullets) {
                 if (bullet && typeof bullet === 'string' && bullet.trim()) {
-                    await addMysteryBullet(chatId, field, bullet.trim());
+                    if (field === 'characterWhereabouts') {
+                        // A character has ONE current location — replace the stale
+                        // entry for that character instead of stacking a new one.
+                        const diff = await upsertCharacterBullet(chatId, field, bullet.trim());
+                        if (diff && diff.removed.length) recordMutation('mystery', field, diff.removed, diff.added);
+                    } else if (field === 'currentToneAtmosphere') {
+                        // There is ONE current tone — replace, don't accumulate a
+                        // history of every tone the story has ever had.
+                        const diff = await replaceMysteryFieldDiff(chatId, field, [bullet.trim()]);
+                        if (diff && (diff.removed.length || diff.added.length)) recordMutation('mystery', field, diff.removed, diff.added);
+                    } else {
+                        await addMysteryBullet(chatId, field, bullet.trim());
+                    }
                     hadUpdates = true;
                 }
+            }
+        }
+    }
+
+    // ── Remove resolved threads (Tier 2) ──────────────────────────────────
+    const resolvedThreads = result.resolvedThreads || [];
+    if (Array.isArray(resolvedThreads) && resolvedThreads.length > 0) {
+        for (const threadField of ['unresolvedDetail', 'promiseThreatDeadline']) {
+            const current = getCoreField(chatId, threadField) || [];
+            if (current.length === 0) continue;
+            // Match resolved bullets (case-insensitive, trimmed) against current
+            const resolvedLower = resolvedThreads.map(t => (t || '').toLowerCase().trim());
+            const removed = current.filter(b => resolvedLower.includes((b || '').toLowerCase().trim()));
+            if (removed.length > 0) {
+                const kept = current.filter(b => !removed.includes(b));
+                await replaceCoreFieldQuiet(chatId, threadField, kept);
+                recordMutation('core', threadField, removed, []);
+                hadUpdates = true;
+                dlog(`[NWST Scanner] Removed ${removed.length} resolved thread(s) from ${threadField}`);
             }
         }
     }
@@ -661,6 +770,13 @@ async function applyScanResults(chatId, response, recentMessages) {
         const existing = existingCommunities.find(c => c.name.toLowerCase() === update.name.toLowerCase());
         if (existing) {
             await updateCommunitySummary(chatId, existing.id, update.summary.trim());
+            // Also apply member changes — previously these were silently dropped,
+            // freezing every community's member list at creation time.
+            if (typeof update.members === 'string' && update.members.trim()
+                && update.members.trim() !== (existing.members || '').trim()) {
+                await updateCommunityMembers(chatId, existing.id, update.members.trim());
+                dlog(`[NWST Scanner] Updated members for community: ${update.name}`);
+            }
         } else {
             // New community detected — create it
             await addCommunity(chatId, {
@@ -729,14 +845,17 @@ async function applyScanResults(chatId, response, recentMessages) {
 
             await addSecret(chatId, {
                 title: secretData.title.trim(),
-                type: secretData.type || 'npc',
+                type: secretData.type || 'character',
                 secret: secretData.secret.trim(),
                 evidenceShown: secretData.evidenceShown || '',
                 pressureRisk: secretData.pressureRisk || '',
                 revealConditions: secretData.revealConditions || '',
                 whoKnows: Array.isArray(secretData.whoKnows) ? secretData.whoKnows : [],
                 whoDoesNotKnow: Array.isArray(secretData.whoDoesNotKnow) ? secretData.whoDoesNotKnow : [],
-                injectionPriority: secretData.injectionPriority || 'normal'
+                injectionPriority: secretData.injectionPriority || 'normal',
+                triggerAnchors: Array.isArray(secretData.triggerAnchors) && secretData.triggerAnchors.length
+                    ? { phrases: secretData.triggerAnchors.filter(a => typeof a === 'string' && a.trim()) }
+                    : undefined
             });
 
             existingTitles.add(titleLower);
@@ -745,6 +864,57 @@ async function applyScanResults(chatId, response, recentMessages) {
         }
     }
 
+    // ── Handle LLM-detected revealed secrets → flag for archive ─────────────
+    const revealedSecrets = result.revealedSecrets || [];
+    let flaggedCount = 0;
+    if (revealedSecrets.length > 0) {
+        const allSecrets = getAllSecrets(chatId);
+        const currentMsgIndex = getCurrentMessageCount();
+        for (const rev of revealedSecrets) {
+            if (!rev || !rev.title) continue;
+            const titleLower = rev.title.toLowerCase().trim();
+            const match = allSecrets.find(s => (s.title || '').toLowerCase().trim() === titleLower);
+            if (match && getSecretStatus(match) === 'active') {
+                await flagSecretForArchive(chatId, match.id, 'revealed', currentMsgIndex);
+                flaggedCount++;
+                dlog(`[NWST Scanner] Secret flagged as revealed: "${match.title}"`);
+            }
+        }
+    }
+
+    // ── Dormancy decay: flag long-dormant secrets for archive review ────────
+    // A secret that hasn't injected in a long time has demonstrated irrelevance.
+    // High/Critical secrets are EXEMPT — the player marked them important.
+    {
+        const decayThreshold = getSecretDecayThreshold();
+        if (decayThreshold > 0) {
+            const currentMsgIndex = getCurrentMessageCount();
+            for (const s of getInjectableSecrets(chatId)) {
+                if (getSecretStatus(s) !== 'active') continue;
+                const pri = (s.injectionPriority || 'normal').toLowerCase();
+                if (pri === 'high' || pri === 'critical') continue; // exempt
+                const lastInj = s.lastInjectionMsgIndex ?? -1;
+                // Never-injected secrets use their creation point if available, else skip
+                if (lastInj < 0) continue;
+                if (currentMsgIndex - lastInj >= decayThreshold) {
+                    await flagSecretForArchive(chatId, s.id, 'dormant', currentMsgIndex);
+                    flaggedCount++;
+                    dlog(`[NWST Scanner] Secret flagged as dormant: "${s.title}"`);
+                }
+            }
+        }
+    }
+
+    // ── Toast the player if anything was flagged for archive review ─────────
+    if (flaggedCount > 0) {
+        hadUpdates = true;
+        nwstToast(
+            `${flaggedCount} secret${flaggedCount > 1 ? 's' : ''} flagged for archive review — open the Notebook to decide.`,
+            'info'
+        );
+    }
+
+    await commitMutationBatch();  // finalize undo/redo entry for this scan
     return hadUpdates;
 }
 

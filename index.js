@@ -118,6 +118,7 @@ const defaultSettings = {
         planningLLM: '',
         dayAdvancementLLM: '',
         narrativeConsistencyLLM: '',
+        secretsSidecarLLM: '',
     },
 
     // No-think soft switch: append "/no_think" to each LLM call to disable
@@ -146,6 +147,10 @@ const defaultSettings = {
     // secret in the Notebook with whoKnows/whoDoesNotKnow tracking.
     autoPromoteEvents: true,
 
+    // Day advancement: ask the Planning LLM whether any active event's premise
+    // has become impossible/moot; flags for player review (never auto-removes)
+    eventValidityReview: true,
+
     // Moon cycle configuration (fantasy worlds can override the 29.53-day cycle)
     moonCycleDays: 29.53,
 
@@ -172,6 +177,42 @@ const defaultSettings = {
         depth: 2,
         depthRole: 'system',        // 'system' | 'user' | 'assistant'
         secretBudgetTokens: 600,    // Max tokens of secret text to inject per generation (relevance budget)
+        maxSecretsInjected: 4,      // Hard count cap — never inject more than this many secrets, even if budget allows
+    },
+
+    // ── Secrets engine (prose-based scoring) ───────────────────────────
+    secrets: {
+        // Sidecar cadence — how often the scene analyzer LLM runs (messages)
+        sidecarCadence: 10,
+
+        // Sidecar scan range — how many recent prose messages the sidecar reads
+        sidecarScanRange: 5,
+
+        // Score threshold a secret must reach to be eligible for injection
+        injectionThreshold: 50,
+        decayThreshold: 250,    // messages since last injection before a non-High/Critical secret is flagged dormant for archive review (0 = disabled)
+        reconcileCadence: 0,    // auto-tidy notebook every N scans (0 = manual only via the Tidy button)
+
+        // Scoring weights — all editable. These determine how strongly each
+        // relevance signal pushes a secret toward injection.
+        weights: {
+            knowerPresent:        30,  // a character who knows the secret is in the scene
+            unawarePresent:       20,  // a character who must NOT know is in the scene
+            bothPresent:          40,  // both a knower and an unaware party present AND the secret's subject is referenced in the scene
+            coPresenceOnly:        5,  // a knower and an unaware party are co-present but the secret's subject is NOT referenced (coincidental co-presence)
+            sharedThemeMatch:      5,  // a shared theme word (appears in 2+ secrets) matched, but no distinctive subject anchor — weak signal
+            npcCutawayHolder:     35,  // NPC cutaway involving the secret's holder/schemer
+            groupMatch:           25,  // a group/faction tied to the secret is present
+            anchorMatch:          20,  // concept/object/location anchor appears in the scene
+            revealConditionMatch: 35,  // a reveal condition is referenced in the prose
+            pressureMatch:        25,  // the secret's pressureRisk is active in the scene
+            continuityRisk:       45,  // omitting this secret risks a continuity break
+            // Priority modifiers (added to score based on the secret's priority)
+            priorityLow:         -15,
+            priorityNormal:        0,
+            priorityHigh:         20,
+            priorityCritical:     50,
+        },
     },
 
     // The ONLY user-editable LLM prompt in the extension
@@ -767,6 +808,29 @@ async function registerSlashCommands() {
                 } catch (err) {
                     console.error('[NWST] /dayrewind failed:', err);
                     nwstToast('Day rewind failed. Check the console.', 'error');
+                }
+                return '';
+            }
+        }));
+
+        // /secretsdebug — show the secrets scoring decision report
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'secretsdebug',
+            helpString: 'Show the NWST secrets scoring report: scene context, per-secret scores, and why each was injected or skipped.',
+            unnamedArgumentList: [],
+            callback: async () => {
+                try {
+                    const { buildSecretsDebugReport } = await import('./llm/secretsDebug.js');
+                    const report = buildSecretsDebugReport(getChatId());
+                    const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+                    // Show in a monospace-friendly popup
+                    await callGenericPopup(
+                        `<pre style="text-align:left;white-space:pre-wrap;font-size:12px;max-height:70vh;overflow:auto">${report.replace(/</g,'&lt;')}</pre>`,
+                        POPUP_TYPE.TEXT, '', { wide: true, large: true }
+                    );
+                } catch (err) {
+                    console.error('[NWST] /secretsdebug failed:', err);
+                    nwstToast('Secrets debug failed. Check the console.', 'error');
                 }
                 return '';
             }

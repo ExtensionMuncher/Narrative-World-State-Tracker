@@ -20,6 +20,7 @@ import { getSettingContext, getCurrentDay, replaceCurrentDay, updateCurrentDay,
          saveSnapshot, getLatestSnapshot, getSnapshots, getWorldState,
          getSeasonConfig, getCalendarConfig } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon, compactEventHorizon } from '../data/events.js';
+import { runEventValidityReview } from './eventValidity.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getPlannerPrompt, getScanFrequency } from '../settings.js';
@@ -927,6 +928,14 @@ export async function advanceToNextDay() {
         // 9. Roll event horizon forward (mark missed, adjust tiers)
         //    This runs AFTER snapshot, so the saved snapshot still has 'pending' events.
         await rollEventHorizonForward(chatId);
+
+        // 9.5 Event validity review — the Planning LLM checks whether the story
+        //     has made any surviving event's premise impossible or moot (e.g. a
+        //     catalyst character permanently removed). Findings only FLAG events
+        //     for the player's Keep / Mark-missed decision in the Events tab —
+        //     nothing is removed automatically. Skips itself when there are no
+        //     active events or the setting is off.
+        await runEventValidityReview(chatId);
 
         // 10. Event Horizon Compaction — resolveDay-tracked events that were
         //     resolved/missed more than `eventCompactionThreshold` story days

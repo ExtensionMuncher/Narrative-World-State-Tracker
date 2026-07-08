@@ -451,11 +451,11 @@ Community summaries are not plot recaps. They are analytical portraits of social
 Events describe what is COMING NEXT in the story, NOT what has already happened.
 
 CRITICAL RULE — DO NOT put past-tense summaries of chat content into events:
-WRONG (past — what already happened): "Satoru presented cinnamon toothpicks to trigger memory"
-RIGHT (future — what happens next): "Satoru may escalate his memory-triggering attempts with more direct methods"
+WRONG (past — what already happened): "Dorian presented old letters to trigger memory"
+RIGHT (future — what happens next): "Dorian may escalate his memory-triggering attempts with more direct methods"
 
-WRONG (past — what already happened): "The cursed energy in the room became disturbed"
-RIGHT (future — what happens next): "The disturbed cursed energy may attract attention or escalate further"
+WRONG (past — what already happened): "The strange energy in the room became disturbed"
+RIGHT (future — what happens next): "The disturbed strange energy may attract attention or escalate further"
 
 Past events belong in the notebook (established facts, planted details). If something already occurred in the chat, do NOT put it in the events array.
 
@@ -1027,7 +1027,7 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `CRITICAL DATE FORMAT RULES — READ BEFORE GENERATING:\n`;
     prompt += `  1. dateDisplay MUST start with the day of the week (e.g. "${calConfig.enabled && calConfig.weekDays.length > 0 ? calConfig.weekDays[0] : 'Monday'}", "${calConfig.enabled && calConfig.weekDays.length > 1 ? calConfig.weekDays[1] : 'Thursday'}", "Kin'yōbi")\n`;
     prompt += `  2. dateDisplay MUST NOT contain a pipe | character — that belongs in dateSub\n`;
-    prompt += `  3. Use dateSub for era/calendar context ONLY (e.g. "Reiwa 6", "Heian Era · 1125 CE")\n`;
+    prompt += `  3. Use dateSub for era/calendar context ONLY (e.g. "Reiwa 6", "Victorian Era · 1888 CE")\n`;
     prompt += `  4. dayCount = day-of-year (1-366). If date is "October 17, 2024", dayCount = 291 (leap year) or 290.\n`;
     prompt += `  5. FAILURE TO FOLLOW THESE RULES WILL CORRUPT THE DATE DISPLAY IN THE UI.\n\n`;
 
@@ -1040,13 +1040,13 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example: "The merchant caravan is expected to arrive next week"\n`;
     prompt += `    * Example: "Bandit raids have been increasing along the eastern road"\n\n`;
     prompt += `  WRONG — DO NOT summarize past chat as events. These are WRONG:\n`;
-    prompt += `    ✗ "Satoru presented cinnamon toothpicks to trigger Sachiko's memory" — this ALREADY HAPPENED in chat\n`;
-    prompt += `    ✗ "The cursed energy in the room became disturbed" — this ALREADY HAPPENED in chat\n`;
-    prompt += `    ✗ "Memory trigger attempt by Satoru" — this ALREADY HAPPENED in chat\n\n`;
+    prompt += `    ✗ "Dorian presented old letters to trigger Mira's memory" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "The strange energy in the room became disturbed" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "Memory trigger attempt by Dorian" — this ALREADY HAPPENED in chat\n\n`;
     prompt += `  RIGHT — Turn past events into future projections. Convert the above to:\n`;
-    prompt += `    ✓ "Satoru may escalate memory-triggering tactics as the memory block resists" — what COMES NEXT\n`;
-    prompt += `    ✓ "The cursed energy disturbance could attract unwanted attention" — what COMES NEXT\n`;
-    prompt += `    ✓ "Sachiko's buried memories may surface under continued pressure" — what COMES NEXT\n\n`;
+    prompt += `    ✓ "Dorian may escalate memory-triggering tactics as the memory block resists" — what COMES NEXT\n`;
+    prompt += `    ✓ "The strange energy disturbance could attract unwanted attention" — what COMES NEXT\n`;
+    prompt += `    ✓ "Mira's buried memories may surface under continued pressure" — what COMES NEXT\n\n`;
     prompt += `  KIND B — World-Level Events (from setting, conditions, season, context):\n`;
     prompt += `    * Events that the WORLD itself is generating — natural, political, societal, seasonal\n`;
     prompt += `    * NOT mentioned in chat, but driven by the setting context and world conditions\n`;
@@ -1075,7 +1075,7 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `{
   "currentDay": {
     "dateDisplay": "MUST start with day-of-week followed by ', Month Date, Year'. No pipe characters. Modern: 'Monday, April 15th, 2024'. Historical: 'Kin'yōbi, Chrysanthemum Month · Sixth Day of the Waxing Moon'.",
-    "dateSub": "Era context only — e.g. 'Reiwa 6', 'Heian Era · 1125 CE', '21st Century'. Leave empty if no applicable era.",
+    "dateSub": "Era context only — e.g. 'Reiwa 6', 'Victorian Era · 1888 CE', '21st Century'. Leave empty if no applicable era.",
     "season": "Current season — evocative, sensory, grounded in the setting. Faction names fine if relevant; individual character actions should not appear.",
     "weatherToday": "Today's weather as a physical experience. Faction names fine if relevant; individual character actions should not appear.",
     "flora": "What is growing or changing in the natural world. Faction names fine if relevant; individual character actions should not appear.",

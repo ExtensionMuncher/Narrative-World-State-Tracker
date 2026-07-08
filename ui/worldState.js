@@ -44,7 +44,7 @@ OUTPUT STRUCTURE — a single paragraph of exactly 2-4 sentences. No more, no le
 Each sentence must operate at the MACRO level — the world's atmosphere, the prevailing mood of a region, the texture of social undercurrents, the weight of unspoken tension across a landscape. Use setting details, weather, architecture, seasonal cues, and communal mood to convey the state of the world.
 
 GOOD (macro, atmospheric): "The political atmosphere of the fortress has curdled into something watchful — not open conflict, but the particular stillness of a room where everyone is waiting for someone else to move first. Edicts are obeyed with theatrical punctuality. Favors are hoarded like coin. The air tastes of held breath."
-BAD (micro, character-level): "Sachiko is navigating a web of political intrigue. Rukia has become more cautious. The servants are gossiping about Kenji Sato's outburst." — Named characters, action summaries, no atmospheric texture.
+BAD (micro, character-level): "Mira is navigating a web of political intrigue. Elena has become more cautious. The servants are gossiping about Victor Hale's outburst." — Named characters, action summaries, no atmospheric texture.
 
 GOOD (macro, atmospheric): "Winter's grip is beginning to loosen, but the thaw has brought mudslides that choke the mountain passes, isolating the fortress further. The roads are treacherous, supply lines strained. There is a tension in the air between the promise of spring and the reality of being cut off."
 BAD (micro, event-level): "The snow is melting. Supplies are running low because of the mudslides. People are worried about being cut off." — Generic, flat, reads like a checklist.
@@ -90,7 +90,7 @@ GOOD bullet (community-level): "The servants operate as an informal intelligence
 BAD bullet (event-level): "Yumi's willingness to offer intelligence on Rin Hino's dawn shrine visits reveals a servant who understands that information is the only currency" — this is about Yumi's individual actions, not the community's dynamic.
 
 GOOD bullet (community-level): "Internally, the household staff is split between those who see their invisibility as protection and those who see it as erasure — a fracture that any outsider with enough perception could exploit."
-BAD bullet (event-level): "Tomoe Minamoto's direct approach to Sachiko signals a fracture in the servant network's usual information channels" — this analyzes a single character's action, not the community.
+BAD bullet (event-level): "Tomas Vane's direct approach to Mira signals a fracture in the servant network's usual information channels" — this analyzes a single character's action, not the community.
 
 Each bullet must answer: what does this reveal about the COMMUNITY as a collective? Not what does it reveal about a specific character or event.
 
@@ -440,7 +440,7 @@ function refreshCommunitiesUI() {
                     <div style="margin-bottom:8px">
                         <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Members (comma-separated character names)</label>
                         <input type="text" class="text_pole nwst-community-members-input" style="width:100%" value="${escapeHTML(com.members)}"
-                            placeholder="e.g. Sukuna, Uraume, Kenjaku">
+                            placeholder="e.g. Kellan, Dorian, Elena">
                     </div>
                     <div style="margin-bottom:8px">
                         <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Summary</label>

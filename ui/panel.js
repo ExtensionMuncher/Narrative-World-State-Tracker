@@ -152,14 +152,43 @@ if (typeof window !== 'undefined') {
      * @param {function} onSave - Callback with saved text when user clicks Save & close
      */
     window.openNWSTPopout = function(title, currentContent, onSave) {
-        const overlay = document.getElementById('nwst-popout-overlay');
+        // Build a self-contained overlay on demand. (Earlier this looked for a
+        // fixed set of element IDs that didn't exist in the DOM, so the popout
+        // buttons silently did nothing.) Reuse one overlay across calls.
+        let overlay = document.getElementById('nwst-popout-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'nwst-popout-overlay';
+            overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.55);display:none;align-items:center;justify-content:center;';
+            overlay.innerHTML = `
+                <div style="background:var(--SmartThemeBlurTintColor,#1e1e1e);border:1px solid var(--SmartThemeBorderColor,#444);border-radius:10px;width:min(600px,92vw);max-height:80vh;display:flex;flex-direction:column;padding:14px;gap:10px">
+                    <div id="nwst-popout-title" style="font-size:14px;font-weight:600"></div>
+                    <textarea id="nwst-popout-textarea" style="flex:1;min-height:240px;resize:vertical;font-size:13px;line-height:1.5;padding:8px;border-radius:6px;border:1px solid var(--SmartThemeBorderColor,#444);background:var(--SmartThemeBotMesBlurTintColor,#2a2a2a);color:inherit"></textarea>
+                    <div style="display:flex;gap:8px;justify-content:flex-end">
+                        <button id="nwst-popout-cancel" class="menu_button" style="font-size:12px">Cancel</button>
+                        <button id="nwst-popout-save" class="menu_button" style="font-size:12px">Save</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+            // Close on backdrop click
+            overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closePopout(); });
+            overlay.querySelector('#nwst-popout-cancel').addEventListener('click', closePopout);
+            overlay.querySelector('#nwst-popout-save').addEventListener('click', async () => {
+                const ta = document.getElementById('nwst-popout-textarea');
+                const cb = overlay._nwstOnSave;
+                const val = ta ? ta.value : '';
+                closePopout();
+                if (typeof cb === 'function') await cb(val);
+            });
+            function closePopout() { overlay.style.display = 'none'; overlay._nwstOnSave = null; }
+            overlay._closePopout = closePopout;
+        }
         const titleEl = document.getElementById('nwst-popout-title');
         const textarea = document.getElementById('nwst-popout-textarea');
-        if (!overlay || !titleEl || !textarea) return;
-        titleEl.textContent = title;
+        titleEl.textContent = title || 'Edit';
         textarea.value = currentContent || '';
         overlay._nwstOnSave = onSave || null;
-        overlay.classList.add('nwst-popout-open');
+        overlay.style.display = 'flex';
         setTimeout(() => textarea.focus(), 50);
     };
 

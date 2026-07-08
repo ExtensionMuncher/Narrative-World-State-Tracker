@@ -166,6 +166,40 @@ export async function deleteCoreBullet(chatId, fieldName, index) {
  * @param {string} fieldName
  * @param {string[]} bullets - New array of bullet strings
  */
+/**
+ * Upsert a source-keyed bullet into a CORE field (e.g. offscreenPressure where
+ * each pressure belongs to a character/source). Bullet form "Source: detail";
+ * an existing bullet with the same source prefix is replaced, not duplicated.
+ * @param {string} chatId
+ * @param {string} fieldName
+ * @param {string} bulletText
+ */
+export async function upsertCoreBullet(chatId, fieldName, bulletText) {
+    const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.core[fieldName])) {
+        console.error(`[NWST Notebook] Unknown core field: ${fieldName}`);
+        return;
+    }
+    const colonIdx = bulletText.indexOf(':');
+    if (colonIdx <= 0) {
+        if (!nb.core[fieldName].includes(bulletText)) {
+            nb.core[fieldName].push(bulletText);
+            await saveNotebook(chatId, nb);
+        }
+        return;
+    }
+    const key = bulletText.slice(0, colonIdx).trim().toLowerCase();
+    const removed = nb.core[fieldName].filter(b => {
+        const ci = (b || '').indexOf(':');
+        if (ci <= 0) return false;
+        return (b.slice(0, ci).trim().toLowerCase()) === key;
+    });
+    nb.core[fieldName] = nb.core[fieldName].filter(b => !removed.includes(b));
+    nb.core[fieldName].push(bulletText);
+    await saveNotebook(chatId, nb);
+    return { removed, added: [bulletText] };
+}
+
 export async function replaceCoreField(chatId, fieldName, bullets) {
     const nb = getNotebook(chatId);
     if (!nb.core[fieldName]) return;
@@ -213,6 +247,44 @@ export async function addMysteryBullet(chatId, fieldName, bulletText) {
 }
 
 /**
+ * Upsert a character-keyed bullet into a mystery field. The bullet is expected
+ * to be in "Name: detail" form. Any existing bullet whose name prefix matches
+ * (case-insensitive) is REPLACED rather than duplicated. Used for
+ * characterWhereabouts so a character has one current location, not a stack of
+ * stale ones.
+ * @param {string} chatId
+ * @param {string} fieldName
+ * @param {string} bulletText - "CharacterName: location/detail"
+ */
+export async function upsertCharacterBullet(chatId, fieldName, bulletText) {
+    const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.mystery[fieldName])) {
+        console.error(`[NWST Notebook] Unknown mystery field: ${fieldName}`);
+        return;
+    }
+    const colonIdx = bulletText.indexOf(':');
+    if (colonIdx <= 0) {
+        // No "Name:" prefix — fall back to plain append, but de-dupe exact matches
+        if (!nb.mystery[fieldName].includes(bulletText)) {
+            nb.mystery[fieldName].push(bulletText);
+            await saveNotebook(chatId, nb);
+        }
+        return;
+    }
+    const name = bulletText.slice(0, colonIdx).trim().toLowerCase();
+    // Capture which bullets we're removing (for undo history)
+    const removed = nb.mystery[fieldName].filter(b => {
+        const ci = (b || '').indexOf(':');
+        if (ci <= 0) return false;
+        return (b.slice(0, ci).trim().toLowerCase()) === name;
+    });
+    nb.mystery[fieldName] = nb.mystery[fieldName].filter(b => !removed.includes(b));
+    nb.mystery[fieldName].push(bulletText);
+    await saveNotebook(chatId, nb);
+    return { removed, added: [bulletText] };
+}
+
+/**
  * Update a specific bullet in a Mystery field by index.
  * @param {string} chatId
  * @param {string} fieldName
@@ -245,6 +317,16 @@ export async function deleteMysteryBullet(chatId, fieldName, index) {
  * @param {string} fieldName
  * @param {string[]} bullets
  */
+export async function replaceMysteryFieldDiff(chatId, fieldName, bullets) {
+    const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.mystery[fieldName])) return { removed: [], added: [] };
+    const removed = nb.mystery[fieldName].filter(b => !bullets.includes(b));
+    const added = bullets.filter(b => !nb.mystery[fieldName].includes(b));
+    nb.mystery[fieldName] = bullets.slice();
+    await saveNotebook(chatId, nb);
+    return { removed, added };
+}
+
 export async function replaceMysteryField(chatId, fieldName, bullets) {
     const nb = getNotebook(chatId);
     if (!nb.mystery[fieldName]) return;
@@ -265,6 +347,68 @@ export function getAllSecrets(chatId) {
     // without a secrets field (e.g., older saved notebook, or LLM didn't include it).
     return (nb && nb.secrets) || [];
 }
+
+/**
+ * Get the lifecycle status of a secret, treating any secret without an explicit
+ * status as 'active' (backward compatible with pre-lifecycle secrets).
+ * @param {object} secret
+ * @returns {'active'|'pending_archive'|'archived'}
+ */
+export function getSecretStatus(secret) {
+    return (secret && secret.status) || 'active';
+}
+
+/**
+ * Get only the secrets that should be scored/injected. Archived secrets are
+ * excluded entirely; active and pending_archive both still inject.
+ * @param {string} chatId
+ * @returns {object[]}
+ */
+export function getInjectableSecrets(chatId) {
+    return getAllSecrets(chatId).filter(s => getSecretStatus(s) !== 'archived');
+}
+
+/**
+ * Get secrets currently awaiting the player's archive decision.
+ * @param {string} chatId
+ * @returns {object[]}
+ */
+export function getPendingArchiveSecrets(chatId) {
+    return getAllSecrets(chatId).filter(s => getSecretStatus(s) === 'pending_archive');
+}
+
+/**
+ * Flag a secret for archive review (sets pending_archive). Does NOT archive it —
+ * the player still decides. No-op if already pending or archived.
+ * @param {string} chatId
+ * @param {string} secretId
+ * @param {'revealed'|'dormant'} reason
+ * @param {number} msgIndex
+ */
+export async function flagSecretForArchive(chatId, secretId, reason, msgIndex) {
+    const secret = getSecretById(chatId, secretId);
+    if (!secret) return;
+    if (getSecretStatus(secret) !== 'active') return; // only flag active secrets
+    await updateSecret(chatId, secretId, {
+        status: 'pending_archive',
+        archiveReason: reason || '',
+        flaggedAtMsgIndex: msgIndex ?? -1
+    });
+}
+
+/**
+ * Resolve a pending_archive secret: 'archive' to archive it, 'keep' to restore active.
+ * @param {string} chatId
+ * @param {string} secretId
+ * @param {'archive'|'keep'} decision
+ */
+export async function resolveArchiveDecision(chatId, secretId, decision) {
+    const updates = decision === 'archive'
+        ? { status: 'archived' }
+        : { status: 'active', archiveReason: '', flaggedAtMsgIndex: -1 };
+    await updateSecret(chatId, secretId, updates);
+}
+
 
 /**
  * Get a single secret by ID.
@@ -297,15 +441,24 @@ export async function addSecret(chatId, secretData) {
         evidenceShown: secretData.evidenceShown || '',
         pressureRisk: secretData.pressureRisk || '',
         revealConditions: secretData.revealConditions || '',
-        // Injection priority:
-        //   'high'   — always inject when a whoKnows character is present
-        //   'normal' — inject only when a whoDoesNotKnow character is ALSO present (active risk)
-        //   'low'    — never inject into main prompt; consistency monitor only
+        // Injection priority modifies the v2 relevance score. It does not decide basic triggering.
         injectionPriority: secretData.injectionPriority || 'normal',
         // Relevance scoring fields (used by getSelectiveSecretInjection):
         //   lastInjectionMsgIndex — message counter from chat.length at time of last injection.
         //   -1 means never injected. Used for cooldown and stale-bonus calculations.
         lastInjectionMsgIndex: secretData.lastInjectionMsgIndex ?? -1,
+        // Optional v2 trigger anchors. Preserve exactly to avoid event-promotion data loss.
+        triggerAnchors: secretData.triggerAnchors || null,
+        // ── Lifecycle status ──────────────────────────────────────────
+        //   'active'          — normal; scored and injected
+        //   'pending_archive' — LLM flagged it as likely revealed/dormant; awaiting
+        //                       player decision. Still injects until resolved.
+        //   'archived'        — player approved; stops injecting entirely.
+        status: secretData.status || 'active',
+        // Why it was flagged for archive (shown in the review UI): 'revealed' | 'dormant' | ''
+        archiveReason: secretData.archiveReason || '',
+        // Message index when flagged, for ordering the review list.
+        flaggedAtMsgIndex: secretData.flaggedAtMsgIndex ?? -1,
         //   relevanceKeywords — comma-separated keywords auto-extracted from title + evidence +
         //   revealConditions on creation. Used for keyword matching against recent chat messages.
         relevanceKeywords: secretData.relevanceKeywords || extractRelevanceKeywords(secretData)
@@ -493,6 +646,6 @@ function extractRelevanceKeywords(secretData) {
  * Delete the entire notebook for a chat.
  * @param {string} chatId
  */
-export function clearNotebook(chatId) {
-    deleteChatData(chatId, 'notebook');
+export async function clearNotebook(chatId) {
+    await deleteChatData(chatId, 'notebook');
 }
