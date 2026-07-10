@@ -17,7 +17,8 @@ import {
     getAllEvents,
     addEvent, updateEvent, deleteEvent, setEventStatus,
     getEventsGroupedByTier,
-    promoteEventToSecret
+    promoteEventToSecret,
+    removeEventWithSummary
 } from '../data/events.js';
 import { getAllSecrets } from '../data/notebook.js';
 import { regenerateAllEvents, regenerateTierEvents } from '../llm/eventGen.js';
@@ -71,6 +72,29 @@ export function refreshEventsUI() {
             validityHtml += `<div style="display:flex;gap:6px;margin-top:4px">`;
             validityHtml += `<button class="menu_button nwst-btn nwst-validity-keep" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✓ Keep event</button>`;
             validityHtml += `<button class="menu_button nwst-btn nwst-validity-miss" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✗ Mark missed</button>`;
+            validityHtml += `</div></div>`;
+        }
+        validityHtml += `</div>`;
+    }
+
+    // ── Promotion review queue — concluded events flagged as holding ──────
+    // concealed knowledge by the day-advance event review. Either choice
+    // removes the concluded event; a summary is kept in the notebook.
+    const promoQueue = getAllEvents(chatId).filter(ev => ev.promotionFlag
+        && (ev.status === 'resolved' || ev.status === 'missed')
+        && !ev.promotedSecretId);
+    if (promoQueue.length > 0) {
+        validityHtml += `<div class="nwst-event-group" style="border:1px solid #6a9fb5;border-radius:8px;padding:8px;margin-bottom:10px">`;
+        validityHtml += `<div class="nwst-lbl" style="margin-bottom:6px">🔒 Promotion review — concluded events holding concealed knowledge</div>`;
+        for (const ev of promoQueue) {
+            const reason = (ev.promotionFlag.reason || '').replace(/</g, '&lt;');
+            validityHtml += `<div style="margin-bottom:8px;padding:6px;background:rgba(106,159,181,0.08);border-radius:6px">`;
+            validityHtml += `<div style="font-weight:600;font-size:13px">${(ev.title || '').replace(/</g, '&lt;')}</div>`;
+            validityHtml += `<div style="font-size:12px;color:#bbb;margin:3px 0">${reason} <span style="color:#888">(flagged ${ev.promotionFlag.flaggedOn || ''})</span></div>`;
+            validityHtml += `<div style="font-size:11px;color:#888;margin:2px 0">Either choice removes this concluded event from the list — a summary is kept in the Notebook's Past Events.</div>`;
+            validityHtml += `<div style="display:flex;gap:6px;margin-top:4px">`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-promo-accept" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">🔒 Promote to secret</button>`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-promo-deny" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✗ Don't promote</button>`;
             validityHtml += `</div></div>`;
         }
         validityHtml += `</div>`;
@@ -314,6 +338,39 @@ function wireEventItemEvents() {
             await updateEvent(chatId, eventId, { validityFlag: null });
             await setEventStatus(chatId, eventId, 'missed');
             nwstToast('Event marked missed — it will compact into the notebook after the usual delay.', 'info');
+            refreshEventsUI();
+        };
+    });
+
+    // ── Promotion review handlers ──────────────────────────────
+    container.querySelectorAll('.nwst-promo-accept').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const eventId = btn.dataset.eventId;
+            const chatId = getChatId();
+            btn.disabled = true;
+            btn.textContent = 'Promoting…';
+            // autoPromoted lets promoteEventToSecret() infer whoKnows /
+            // whoDoesNotKnow via its knowledge-distribution LLM call.
+            const secret = await promoteEventToSecret(chatId, eventId, { autoPromoted: true });
+            if (!secret) {
+                btn.disabled = false;
+                btn.textContent = '🔒 Promote to secret';
+                nwstToast('Promotion failed — event kept in the queue. See console for details.', 'error');
+                return;
+            }
+            await removeEventWithSummary(chatId, eventId);
+            nwstToast('Secret created — event summarized into the notebook and removed.', 'success');
+            refreshEventsUI();
+        };
+    });
+
+    container.querySelectorAll('.nwst-promo-deny').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const eventId = btn.dataset.eventId;
+            await removeEventWithSummary(getChatId(), eventId);
+            nwstToast('Event summarized into the notebook and removed.', 'info');
             refreshEventsUI();
         };
     });

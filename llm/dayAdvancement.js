@@ -1271,8 +1271,10 @@ async function topUpWorldEvents(chatId) {
 }
 
 async function rollEventHorizonForward(chatId) {
-    // Mark immediate past-due events as missed, shift other tiers as needed
-    // This is a structural roll — the Planning LLM may override during next scan
+    // Structural event-horizon roll. Date-parseable events move between tiers on
+    // schedule; undated events are handled by the Planning LLM instead (the
+    // recurring scan's eventUpdates and the day-advance event review), so
+    // nothing here guesses at narrative urgency.
     const events = getAllEvents(chatId);
     const currentDay = getCurrentDay(chatId);
     const dayCount = currentDay.dayCount || 0;
@@ -1280,20 +1282,75 @@ async function rollEventHorizonForward(chatId) {
     const changes = {};
 
     for (const event of events) {
-        if (event.tier === 'immediate' && event.status === 'pending') {
+        if (event.status !== 'pending') continue;
+        // Events awaiting a player decision are left untouched so the roll
+        // cannot preempt a Keep / Mark-missed / Promote choice.
+        if (event.validityFlag || event.promotionFlag) continue;
+
+        if (event.tier === 'immediate') {
             // ★ Check if this event has a future scheduledDate — protect it from rolling
             if (event.scheduledDate && isFutureDated(event.scheduledDate, dayCount, calendarConfig)) {
                 continue; // Event is scheduled for a future day — don't mark as missed
             }
             // Move pending immediate events to missed (they didn't happen today)
             changes[event.id] = 'missed';
+            continue;
         }
-        // Future: The Planning LLM handles more nuanced tier shifting during scan
+
+        // week / month / undetermined — only date-parseable events roll here
+        const range = getScheduledDayRange(event.scheduledDate, calendarConfig);
+        if (!range) continue;
+
+        if (dayCount > range.endDay) {
+            // Past-due while parked in a later tier — the window came and went
+            changes[event.id] = 'missed';
+        } else if (range.startDay - dayCount <= 1) {
+            // Happening today or tomorrow — pull into the immediate tier
+            changes[event.id] = 'immediate';
+        } else if (range.startDay - dayCount <= 7 && event.tier !== 'week') {
+            // Within the coming week — pull month/undetermined events forward
+            changes[event.id] = 'week';
+        }
     }
 
     if (Object.keys(changes).length > 0) {
         await rollEventHorizon(chatId, changes);
+        dlog(`[NWST DayAdvancement] Event horizon roll applied ${Object.keys(changes).length} change(s).`);
     }
+}
+
+/**
+ * Parse a scheduledDate string into story-day numbers where possible.
+ * Handles "Day 12", "Day 10-14" ranges, and literal calendar dates via
+ * computeDayOfYearFromDate(). Returns { startDay, endDay } or null when the
+ * format is unrecognisable — those events are left to the LLM review passes.
+ *
+ * @param {string} scheduledDate
+ * @param {object|null} calendarConfig
+ * @returns {{startDay:number, endDay:number}|null}
+ */
+function getScheduledDayRange(scheduledDate, calendarConfig) {
+    if (!scheduledDate || typeof scheduledDate !== 'string') return null;
+
+    const rangeMatch = scheduledDate.match(/Day\s*(\d+)\s*[-–]\s*(\d+)/i);
+    if (rangeMatch) {
+        return { startDay: parseInt(rangeMatch[1], 10), endDay: parseInt(rangeMatch[2], 10) };
+    }
+
+    const dayMatch = scheduledDate.match(/Day\s*(\d+)/i);
+    if (dayMatch) {
+        const d = parseInt(dayMatch[1], 10);
+        return { startDay: d, endDay: d };
+    }
+
+    if (calendarConfig) {
+        const dayOfYear = computeDayOfYearFromDate(scheduledDate, calendarConfig);
+        if (dayOfYear !== null && dayOfYear > 0) {
+            return { startDay: dayOfYear, endDay: dayOfYear };
+        }
+    }
+
+    return null;
 }
 
 /**

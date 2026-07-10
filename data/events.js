@@ -183,34 +183,11 @@ export async function setEventStatus(chatId, eventId, newStatus) {
     const updated = await updateEvent(chatId, eventId, { status: newStatus, resolveDay });
     if (!updated) return null;
 
-    // Auto-promote to secret if:
-    //   - Status is 'resolved' or 'missed'
-    //   - Event has participants (information asymmetry possible)
-    //   - Event hasn't already been promoted
-    //   - Setting `autoPromoteEvents` is enabled (checked via import)
-    if ((newStatus === 'resolved' || newStatus === 'missed') &&
-        Array.isArray(updated.participants) && updated.participants.length > 0 &&
-        !updated.promotedSecretId) {
-        try {
-            // Dynamic import avoids circular dependency and reads live setting
-            const { getSetting } = await import('../index.js');
-            const autoPromote = getSetting('autoPromoteEvents');
-            if (autoPromote) {
-                // Let promoteEventToSecret() handle the intelligent knowledge
-                // distribution via an LLM call — it analyzes the event and
-                // determines whoKnows/whoDoesNotKnow automatically.
-                const promoResult = await promoteEventToSecret(chatId, eventId, {
-                    autoPromoted: true
-                });
-                if (promoResult) {
-                    dlog(`[NWST Events] Auto-promoted event "${updated.title}" to secret "${promoResult.title}" (${promoResult.type})`);
-                }
-            }
-        } catch (e) {
-            // Auto-promotion is non-fatal — event status change succeeds regardless
-            console.warn('[NWST Events] Auto-promotion failed (non-fatal):', e);
-        }
-    }
+    // NOTE: Promotion to secret is intentionally NOT automatic here. Concluded
+    // events are assessed for concealed knowledge by the Planning LLM during the
+    // day-advance event review (llm/eventValidity.js), which queues candidates
+    // for the player's decision in the Events tab. Manual promotion via the
+    // event card's Promote button remains available.
 
     return updated;
 }
@@ -746,6 +723,44 @@ export function clearAllEvents(chatId) {
 }
 
 /**
+ * Remove a single concluded event from the active list, preserving a concise
+ * summary in the Notebook's doNotForget section (same format as Event Horizon
+ * Compaction). Used by the promotion review queue, where the event leaves the
+ * list whether or not the player promotes it to a secret.
+ * @param {string} chatId
+ * @param {string} eventId
+ * @returns {Promise<boolean>} true if the event was found and removed
+ */
+export async function removeEventWithSummary(chatId, eventId) {
+    const events = getAllEvents(chatId);
+    const event = events.find(e => e.id === eventId);
+    if (!event) return false;
+
+    try {
+        const notebook = getNotebook(chatId);
+        const doNotForget = notebook.core.doNotForget || [];
+        const statusIcon = event.status === 'resolved' ? '✅' : '⏳';
+        const tierTag = event.tier !== 'undetermined' ? ` [${event.tier}]` : '';
+        const dateTag = event.scheduledDate ? ` (${event.scheduledDate})` : '';
+        const resolveTag = typeof event.resolveDay === 'number' ? ` — Resolved Day ${event.resolveDay}` : '';
+        let summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag}${resolveTag}`;
+        if (summary.length > 300) summary = summary.substring(0, 297) + '...';
+        const updatedDoNotForget = [...doNotForget, summary];
+        if (updatedDoNotForget.length > 50) {
+            updatedDoNotForget.splice(0, updatedDoNotForget.length - 50);
+        }
+        notebook.core.doNotForget = updatedDoNotForget;
+        const { saveNotebook } = await import('./notebook.js');
+        await saveNotebook(chatId, notebook);
+    } catch (e) {
+        console.warn('[NWST Events] Failed to write removal summary to notebook (event still removed):', e);
+    }
+
+    await saveAllEvents(chatId, events.filter(e => e.id !== eventId));
+    return true;
+}
+
+/**
  * Get the total count of events for a chat.
  * @param {string} chatId
  * @returns {number}
@@ -801,10 +816,13 @@ export async function compactEventHorizon(chatId, thresholdDays = 3) {
             const hasResolveDay = typeof event.resolveDay === 'number';
             const pastThreshold = hasResolveDay && (dayCount - event.resolveDay >= thresholdDays);
             const alreadyPromoted = event.promotedSecretId != null;
+            // Events awaiting a player decision (promotion review or validity
+            // review) must not be compacted out from under the pending card.
+            const awaitingDecision = event.promotionFlag != null || event.validityFlag != null;
 
             // Skip promoted events — they need to stick around so the
             // promotedSecretId link back to the Notebook secret survives.
-            if (isStale && hasResolveDay && pastThreshold && !alreadyPromoted) {
+            if (isStale && hasResolveDay && pastThreshold && !alreadyPromoted && !awaitingDecision) {
                 compactable.push(event);
             } else {
                 remaining.push(event);

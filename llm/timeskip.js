@@ -74,6 +74,7 @@ Respond with a JSON object:
   "eventUpdates": {
     "resolved": ["event_id_1", ...],
     "missed": ["event_id_2", ...],
+    "tierChanges": { "event_id_3": "immediate" | "week" | "month" | "undetermined" },
     "newEvents": [
       {
         "title": "...",
@@ -477,6 +478,16 @@ async function applyEventUpdates(chatId, updates) {
         mentionedIds.add(id);
         const event = events.find(e => e.id === id);
         if (event) event.status = 'missed';
+    }
+
+    // Apply tier corrections for surviving events. Tier-changed events count
+    // as "mentioned" so the auto-resolve pass below does not close them.
+    const VALID_TIERS = ['immediate', 'week', 'month', 'undetermined'];
+    const tierChanges = (updates.tierChanges && typeof updates.tierChanges === 'object') ? updates.tierChanges : {};
+    for (const [id, tier] of Object.entries(tierChanges)) {
+        mentionedIds.add(id);
+        const event = events.find(e => e.id === id);
+        if (event && VALID_TIERS.includes(tier)) event.tier = tier;
     }
 
     // Auto-resolve any events the LLM did NOT explicitly mention.

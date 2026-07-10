@@ -10,7 +10,10 @@
 //   - Flags NPC detected events (proposed to user, never auto-committed)
 //   - Detects new secrets forming in the narrative (auto-created, with dedup)
 //
-// The scanner does NOT update the Current Day block or auto-commit event changes.
+// The scanner does NOT update the Current Day block. Event maintenance
+// (resolve/miss/tier corrections via eventUpdates) IS applied automatically —
+// conservatively, and never to events awaiting a player decision — feeding the
+// normal missed/resolved → compaction lifecycle, so nothing is deleted outright.
 // =============================================================================
 
 import { generateWithProfile } from './connections.js';
@@ -29,7 +32,6 @@ import { runNotebookReconcile } from './notebookReconcile.js';
 import { getReconcileCadence } from '../settings.js';
 import { runSecretsSidecar } from './secretsSidecar.js';
 import { getSidecarCadence, getSecretDecayThreshold } from '../settings.js';
-import { detectNPCEventsFromChat } from './eventGen.js';
 import { dlog } from "../lib/debug.js";
 
 // ── Scanner state ─────────────────────────────────────────────────────────
@@ -172,6 +174,12 @@ WHAT YOU DO:
       - The named {{user}} character (the PC) IS a legitimate narrative participant and CAN appear in whoKnows/whoDoesNotKnow
       - When a secret involves the {{user}} character, use type "user_pc", NOT "character"
 
+6. EVENT MAINTENANCE — keep the active events list truthful to the story:
+   - RESOLVED: an active event whose projected moment clearly HAPPENED on-screen in the recent messages.
+   - MISSED: an active event whose window clearly passed, or whose premise visibly failed, in the recent messages.
+   - TIER CORRECTIONS: for active events WITHOUT a scheduled date, move them between immediate/week/month when the recent messages make their urgency clear (dated events are moved by the calendar automatically — leave them alone).
+   Reference events by the E# labels shown in the ACTIVE EVENTS list. Be conservative — report only what the messages clearly show. Most scans should leave events untouched; empty arrays are the expected result.
+
 RESPONSE FORMAT — respond with a JSON object:
 {
   "notebookUpdates": {
@@ -220,6 +228,11 @@ RESPONSE FORMAT — respond with a JSON object:
       "triggerAnchors": ["3-7 distinctive words/short phrases UNIQUE to this secret that signal a scene is about it. Prefer multi-word phrases and the subject's name over generic single words. AVOID broad themes shared with other secrets."]
     }
   ],
+  "eventUpdates": {
+    "resolved": ["E1"],
+    "missed": [],
+    "tierChanges": { "E3": "immediate" | "week" | "month" }
+  },
   "resolvedThreads": [
     "EXACT text of an existing bullet from the current notebook's unresolvedDetail or promiseThreatDeadline lists that has now been RESOLVED, paid off, or expired in the recent messages. Copy the bullet text verbatim so it can be matched and removed. Only include genuinely closed threads — not ones still pending."
   ],
@@ -607,13 +620,15 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
         prompt += `(none tracked yet — if the recent messages show a distinct social group with recurring dynamics, create it via communityUpdates)\n\n`;
     }
 
-    // Active events (for reference only)
+    // Active events — listed with stable E# labels so the scan can report
+    // event maintenance (resolved / missed / tier corrections) in eventUpdates.
+    // The applier rebuilds the same list in the same order to map E# → event.
     if (activeEvents.length > 0) {
         prompt += `=== ACTIVE EVENTS ===\n`;
-        for (const ev of activeEvents) {
+        activeEvents.forEach((ev, i) => {
             const dateStr = ev.scheduledDate ? ` [${ev.scheduledDate}]` : '';
-            prompt += `- [${ev.tier}]${dateStr} ${ev.title}\n`;
-        }
+            prompt += `E${i + 1}: [${ev.tier}]${dateStr} (${ev.status}) ${ev.title}\n`;
+        });
         prompt += '\n';
     }
 
@@ -787,6 +802,50 @@ async function applyScanResults(chatId, response, recentMessages) {
         }
         hadUpdates = true;
         dlog(`[NWST Scanner] Updated community: ${update.name}`);
+    }
+
+    // ── Apply event maintenance (resolved / missed / tier corrections) ────
+    // E# labels map to the same getActiveEvents() ordering used when the
+    // prompt was built; nothing between build and apply mutates the events
+    // array, so the mapping is stable. Flagged events awaiting a player
+    // decision are never touched.
+    const evUpdates = result.eventUpdates || null;
+    if (evUpdates && typeof evUpdates === 'object') {
+        try {
+            const { updateEvent: updateEvt, setEventStatus: setEvtStatus } = await import('../data/events.js');
+            // Identical call to the prompt builder's — same list, same order.
+            const activeList = getActiveEvents(chatId);
+            const byRef = new Map();
+            activeList.forEach((ev, i) => byRef.set(`e${i + 1}`, ev));
+            const refToEvent = (ref) => byRef.get(String(ref).trim().toLowerCase()) || null;
+            const VALID_TIERS = ['immediate', 'week', 'month', 'undetermined'];
+
+            for (const ref of (Array.isArray(evUpdates.resolved) ? evUpdates.resolved : [])) {
+                const ev = refToEvent(ref);
+                if (!ev || ev.validityFlag || ev.promotionFlag) continue;
+                await setEvtStatus(chatId, ev.id, 'resolved');
+                dlog(`[NWST Scanner] Event resolved by scan: "${ev.title}"`);
+                hadUpdates = true;
+            }
+            for (const ref of (Array.isArray(evUpdates.missed) ? evUpdates.missed : [])) {
+                const ev = refToEvent(ref);
+                if (!ev || ev.validityFlag || ev.promotionFlag) continue;
+                await setEvtStatus(chatId, ev.id, 'missed');
+                dlog(`[NWST Scanner] Event marked missed by scan: "${ev.title}"`);
+                hadUpdates = true;
+            }
+            const tierChanges = (evUpdates.tierChanges && typeof evUpdates.tierChanges === 'object') ? evUpdates.tierChanges : {};
+            for (const [ref, tier] of Object.entries(tierChanges)) {
+                const ev = refToEvent(ref);
+                if (!ev || ev.validityFlag || ev.promotionFlag) continue;
+                if (!VALID_TIERS.includes(tier) || ev.tier === tier) continue;
+                await updateEvt(chatId, ev.id, { tier });
+                dlog(`[NWST Scanner] Event tier corrected by scan: "${ev.title}" → ${tier}`);
+                hadUpdates = true;
+            }
+        } catch (e) {
+            console.warn('[NWST Scanner] Failed to apply event updates:', e);
+        }
     }
 
     // ── Store detected NPC events for user review ─────────────────────────

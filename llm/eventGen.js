@@ -112,30 +112,6 @@ Generate events per category limits: max 2 WORLD events, max 3 GENERATED NPC eve
 
 REMEMBER: World events should feel like a living world. The characters may or may not engage with them, but they exist regardless. NPC events should feel like natural character behavior, not scripted plot points.`;
 
-const NPC_DETECTION_PROMPT = `You are scanning a roleplay chat for explicit future plans made by or involving characters. Your job is to identify things characters have EXPLICITLY stated will happen — scheduled meetings, promises, arrangements, stated intentions for the near future.
-
-ONLY flag events that are directly stated or clearly implied by a character's words or actions in the chat. Do NOT invent or extrapolate. Do NOT include things that have already happened.
-
-For each detected event, extract:
-- What will happen
-- Who is involved
-- When (if stated)
-- The tier (immediate = next 1-2 days, week = this week, month = this month, undetermined = timing unclear)
-
-Respond with a JSON array:
-[
-  {
-    "title": "Brief label for the planned event",
-    "description": "What was stated or clearly implied, with context",
-    "tier": "immediate" | "week" | "month" | "undetermined",
-    "isNPC": true,
-    "npcOrigin": "detected",
-    "detectedFrom": "brief quote or reference from the chat that confirms this",
-    "scheduledDate": "OPTIONAL — only when a SPECIFIC date was mentioned. Format as stated by the character (e.g. 'Day 3', 'the 15th'). Omit if no date was given — uncertainty is fine."
-  }
-]
-
-Return [] if no explicit future plans are found.`;
 
 // ── Regenerate events for a specific tier ─────────────────────────────────
 
@@ -266,57 +242,6 @@ export async function regenerateAllEvents() {
         total += count;
     }
     return total;
-}
-
-/**
- * Detect NPC events from recent chat — explicit plans, arrangements, promises.
- * Runs as part of the scanner. Returns proposed events for user review.
- *
- * @param {string} chatId
- * @param {object[]} recentMessages
- * @returns {Promise<object[]>} Detected NPC events (proposed, not committed)
- */
-export async function detectNPCEventsFromChat(chatId, recentMessages) {
-    if (!recentMessages || recentMessages.length === 0) return [];
-
-    try {
-        const profile = resolveProfile('planningLLM');
-        if (!profile) return [];
-
-        const chatText = recentMessages.map(msg => {
-            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
-            return `[${sender}]: ${msg.mes}`;
-        }).join('\n');
-
-        const activeEvents = getActiveEvents(chatId);
-        const activeTitles = activeEvents.map(e => e.title.toLowerCase());
-
-        // Also filter against pending events to avoid duplicates with scanner-proposed events
-        const chatMetadata = SillyTavern.getContext().chatMetadata;
-        const pendingEvents = chatMetadata?.['nwst:pendingEvents'] || [];
-        const pendingTitles = pendingEvents.map(e => e.title.toLowerCase());
-
-        const userPrompt = `Recent chat messages to scan for explicit future plans:\n\n${chatText}\n\n` +
-            `Currently active events (do not duplicate):\n${activeTitles.map(t => `- ${t}`).join('\n') || '(none)'}`;
-
-        const messages = [
-            { role: 'system', content: NPC_DETECTION_PROMPT },
-            { role: 'user', content: userPrompt }
-        ];
-
-        const response = await generateWithProfile(profile, messages);
-        const detected = parseEventGenResponse(response);
-
-        // Filter duplicates against active events and pending events
-        return detected.filter(e => {
-            const title = e.title.toLowerCase().trim();
-            return !activeTitles.includes(title) && !pendingTitles.includes(title);
-        });
-
-    } catch (err) {
-        console.error('[NWST EventGen] NPC detection failed:', err);
-        return [];
-    }
 }
 
 // ── Context gathering ─────────────────────────────────────────────────────

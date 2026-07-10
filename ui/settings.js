@@ -447,8 +447,8 @@ export function buildSettingsTab() {
                     <!-- Event→Secret Promotion toggle -->
                     <div class="nwst-setting-row">
                         <div>
-                            <div class="nwst-setting-label">Auto-promote resolved events to secrets</div>
-                            <div class="nwst-setting-sub">When enabled, resolved/missed events with participants are automatically promoted to Notebook secrets with whoKnows/whoDoesNotKnow tracking for narrative consistency enforcement.</div>
+                            <div class="nwst-setting-label">Assess concluded events for secret promotion</div>
+                            <div class="nwst-setting-sub">When enabled, the day-advance event review has the Planning LLM assess concluded (resolved/missed) events for concealed knowledge. Candidates are QUEUED in the Events tab for your Promote / Don't-promote decision — nothing is promoted silently. Either choice removes the concluded event and keeps a summary in the notebook. Manual promotion from event cards is always available regardless of this setting.</div>
                         </div>
                         <label class="nwst-toggle">
                             <input type="checkbox" id="nwst-setting-autoPromoteEvents" checked>
@@ -458,7 +458,7 @@ export function buildSettingsTab() {
                     <div class="nwst-setting-row">
                         <div>
                             <div class="nwst-setting-label">Event validity review on day advance</div>
-                            <div class="nwst-setting-sub">After each day advancement, the Planning LLM checks whether any active event's premise has become impossible or moot (e.g. a key character permanently removed). Suspect events are only FLAGGED for your Keep / Mark-missed decision in the Events tab — never removed automatically. One extra API call per day advance, skipped when there are no active events.</div>
+                            <div class="nwst-setting-sub">After each day advancement, one Planning LLM call reviews events three ways: flags active events whose premise has become impossible or moot (queued for your Keep / Mark-missed decision), places undated events into the right time tier by narrative urgency, and (if the setting above is on) queues concluded events holding concealed knowledge for promotion review. Still one extra API call per day advance, skipped when there is nothing to review.</div>
                         </div>
                         <label class="nwst-toggle">
                             <input type="checkbox" id="nwst-setting-eventValidityReview" checked>

@@ -1,66 +1,102 @@
 /* eslint-disable */
 // =============================================================================
-// NWST Event Validity Review — llm/eventValidity.js
+// NWST Day-Advance Event Review — llm/eventValidity.js
 // =============================================================================
-// Runs on day advancement. Asks the Planning LLM one narrow question about
-// each active event: "has the story made this event's premise impossible or
-// moot?" Findings only FLAG events for the player's decision in the Events tab
-// — nothing is ever removed automatically.
+// Runs on day advancement (after the structural event-horizon roll). One
+// Planning LLM call performs three narrow review jobs:
 //
-// Design rules (from the Taro case that motivated this):
+//   1. VALIDITY — has the story made an active event's premise impossible or
+//      moot? Findings only FLAG events for the player's Keep / Mark-missed
+//      decision in the Events tab — nothing is removed automatically.
+//   2. TIER PLACEMENT — for active events WITHOUT a parseable scheduled date
+//      (which the structural roll cannot move), suggest the tier that matches
+//      the story's current urgency. Applied directly; tiers are low-stakes and
+//      remain editable in the Events tab.
+//   3. PROMOTION CANDIDATES — among concluded (resolved/missed) events, flag
+//      those whose outcome constitutes CONCEALED KNOWLEDGE — information some
+//      characters hold that others don't. Candidates are QUEUED in the Events
+//      tab for the player's Promote / Don't-promote decision; either choice
+//      removes the concluded event and keeps a summary in the notebook.
+//
+// Design rules (motivated by a real invalidation case):
 //   • Temporary setbacks do NOT invalidate. A character being arrested (bail
 //     likely), injured, or out of town does not kill an event built on their
 //     behavior — they have free will and stories bend. Only flag when the
 //     premise is clearly IMPOSSIBLE or MOOT going forward.
-//   • The player decides. A flag renders in the Events tab with the reason and
-//     Keep / Mark missed buttons. "Keep" clears the flag; "Mark missed" uses
-//     the existing missed→compaction lifecycle, so nothing is deleted.
-//   • No work, no call. If there are no active events or the toggle is off,
+//   • The player decides anything destructive. Validity flags and promotion
+//     candidates both render as review cards; only tier placement (freely
+//     reversible) is applied without asking.
+//   • No work, no call. If there is nothing reviewable or the toggle is off,
 //     no API call happens.
 // =============================================================================
 
 import { getChatId, nwstToast } from '../utils.js';
-import { getActiveEvents, updateEvent } from '../data/events.js';
+import { getAllEvents, getActiveEvents, updateEvent } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { getCurrentDay } from '../data/worldState.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { getSetting } from '../index.js';
 import { dlog } from '../lib/debug.js';
 
-const VALIDITY_SYSTEM_PROMPT = `You review a roleplay's upcoming/ongoing events after the story advanced to a new day. Your ONLY job: identify events whose premise has become IMPOSSIBLE or MOOT because of what happened in the story. Return JSON only.
+const REVIEW_SYSTEM_PROMPT = `You review a roleplay's tracked events after the story advanced to a new day. You have exactly three jobs. Return JSON only.
 
+JOB 1 — VALIDITY (active events): identify events whose premise has become IMPOSSIBLE or MOOT because of what happened in the story.
 WHAT COUNTS AS INVALIDATED (flag it):
 - The event depends on a character who is now permanently unavailable (dead, permanently imprisoned with no prospect of release, left the story for good).
 - The event's premise already happened or was definitively prevented (the meeting it predicts occurred; the threat it tracks was neutralized for good).
 - The event is now logically impossible (the location was destroyed, the deadline it references was resolved on-screen).
-
 WHAT DOES NOT COUNT (do NOT flag):
 - Temporary setbacks. A character arrested but likely to make bail, injured, traveling, or lying low can still drive their events. When their return is plausible, the event stands.
 - Uncertainty. If you cannot tell from the story state whether the premise still holds, leave it alone.
 - Tone shifts, delays, or the event merely becoming less likely. Less likely is not moot.
-
 Characters have free will and stories bend around obstacles. Flag ONLY clear structural impossibility. An empty findings array is the expected result most days.
 
-OUTPUT (JSON only, no markdown fences, no commentary):
+JOB 2 — TIER PLACEMENT (only the events listed under UNDATED EVENTS): these have no parseable scheduled date, so the calendar cannot place them. Based on the story's current pressure, suggest the tier that fits: "immediate" (today/tomorrow), "week" (this week), or "month" (further out). Only suggest a change when the story makes the urgency clear — if unsure, leave the event alone. Never suggest "undetermined".
+
+JOB 3 — PROMOTION CANDIDATES (only the events listed under CONCLUDED EVENTS): these are already resolved or missed. Flag the ones whose outcome constitutes CONCEALED KNOWLEDGE — information some characters now hold that others don't: a hidden resolution, a private deal, a covert act, an outcome deliberately kept from someone. Do NOT flag events whose outcome is public or common knowledge among the cast. For each candidate give one sentence naming what is concealed and from whom.
+
+OUTPUT (JSON only, no markdown fences, no commentary — all three arrays required, empty when nothing qualifies):
 {
   "findings": [
     { "eventTitle": "exact event title as given", "reason": "one sentence: what makes this premise impossible or moot now" }
+  ],
+  "tierSuggestions": [
+    { "eventTitle": "exact event title as given", "tier": "immediate" }
+  ],
+  "secretCandidates": [
+    { "eventTitle": "exact event title as given", "reason": "one sentence: what is concealed and from whom" }
   ]
 }`;
 
-function buildValidityPrompt(events, notebook, recentMessages, dayLabel) {
+function describeEvent(ev) {
+    let p = `---\n`;
+    p += `Title: ${ev.title}\n`;
+    if (ev.description) p += `Description: ${ev.description}\n`;
+    if (ev.participants && ev.participants.length) p += `Participants: ${ev.participants.join(', ')}\n`;
+    if (ev.scheduledDate) p += `Scheduled: ${ev.scheduledDate}\n`;
+    p += `Status: ${ev.status} | Tier: ${ev.tier}\n`;
+    return p;
+}
+
+function buildReviewPrompt(active, undated, concluded, notebook, recentMessages, dayLabel) {
     let p = `The story has just advanced to: ${dayLabel || 'a new day'}.\n\n`;
 
-    p += `=== ACTIVE EVENTS TO REVIEW (${events.length}) ===\n`;
-    for (const ev of events) {
-        p += `---\n`;
-        p += `Title: ${ev.title}\n`;
-        if (ev.description) p += `Description: ${ev.description}\n`;
-        if (ev.participants && ev.participants.length) p += `Participants: ${ev.participants.join(', ')}\n`;
-        if (ev.scheduledDate) p += `Scheduled: ${ev.scheduledDate}\n`;
-        p += `Status: ${ev.status} | Tier: ${ev.tier}\n`;
-    }
+    p += `=== ACTIVE EVENTS TO REVIEW FOR VALIDITY (${active.length}) ===\n`;
+    for (const ev of active) p += describeEvent(ev);
     p += '\n';
+
+    if (undated.length > 0) {
+        p += `=== UNDATED EVENTS — SUGGEST TIER PLACEMENT (${undated.length}) ===\n`;
+        p += `(these have no scheduled date; place them by narrative urgency)\n`;
+        for (const ev of undated) p += describeEvent(ev);
+        p += '\n';
+    }
+
+    if (concluded.length > 0) {
+        p += `=== CONCLUDED EVENTS — ASSESS FOR CONCEALED KNOWLEDGE (${concluded.length}) ===\n`;
+        for (const ev of concluded) p += describeEvent(ev);
+        p += '\n';
+    }
 
     const core = notebook?.core || {};
     const mystery = notebook?.mystery || {};
@@ -88,11 +124,11 @@ function buildValidityPrompt(events, notebook, recentMessages, dayLabel) {
         p += '\n';
     }
 
-    p += `Review each event against the story state. Flag ONLY clear structural impossibility. Return the findings JSON.`;
+    p += `Perform all three review jobs against the story state. Return the JSON.`;
     return p;
 }
 
-function parseValidityFindings(response) {
+function parseReviewResponse(response) {
     let s = (response || '').trim();
     const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fence) s = fence[1].trim();
@@ -100,9 +136,13 @@ function parseValidityFindings(response) {
     if (obj) s = obj[0];
     try {
         const parsed = JSON.parse(s);
-        return Array.isArray(parsed.findings) ? parsed.findings : [];
+        return {
+            findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+            tierSuggestions: Array.isArray(parsed.tierSuggestions) ? parsed.tierSuggestions : [],
+            secretCandidates: Array.isArray(parsed.secretCandidates) ? parsed.secretCandidates : []
+        };
     } catch (e) {
-        dlog('[NWST EventValidity] Unparseable response — skipping review this cycle.');
+        dlog('[NWST EventReview] Unparseable response — skipping review this cycle.');
         return null;
     }
 }
@@ -116,11 +156,26 @@ function getRecentVisibleMessages(limit = 10) {
     } catch (e) { return []; }
 }
 
+// Matches dayAdvancement's structural-roll parsing closely enough to decide
+// whether an event's date is machine-placeable: "Day 12", "Day 10-14", or a
+// numbered literal date. Undated (or unparseable) events go to the LLM.
+function hasParseableDate(ev) {
+    const sd = ev.scheduledDate;
+    if (!sd || typeof sd !== 'string') return false;
+    if (/Day\s*\d+/i.test(sd)) return true;
+    if (/\d/.test(sd)) return true; // literal calendar dates carry a day number
+    return false;
+}
+
+const VALID_SUGGESTED_TIERS = ['immediate', 'week', 'month'];
+
 /**
- * Review active events for narrative validity after a day advancement.
- * Flags invalidated events for player review; never removes anything.
+ * Review events after a day advancement: validity flags (queued), tier
+ * placement for undated events (applied), and concealed-knowledge promotion
+ * candidates among concluded events (queued). One Planning LLM call total;
+ * skipped entirely when there is nothing to review.
  * @param {string} chatId
- * @returns {Promise<number>} how many events were flagged
+ * @returns {Promise<number>} how many events were flagged or adjusted
  */
 export async function runEventValidityReview(chatId) {
     if (!chatId) chatId = getChatId();
@@ -134,11 +189,24 @@ export async function runEventValidityReview(chatId) {
         const active = getActiveEvents(chatId).filter(
             ev => ev.status === 'pending' || ev.status === 'inprogress'
         );
-        if (active.length === 0) return 0;
+        // Undated actives are the tier-placement candidates (unflagged only).
+        const undated = active.filter(ev => !hasParseableDate(ev) && !ev.validityFlag && !ev.promotionFlag);
+        // Concluded, unpromoted, undecided events are the promotion candidates.
+        // Gated by the autoPromoteEvents toggle (repurposed from the old silent
+        // auto-promotion path into this queued, player-decided review).
+        const promotionAssessmentOn = getSetting('autoPromoteEvents') !== false;
+        const concluded = promotionAssessmentOn
+            ? getAllEvents(chatId).filter(ev =>
+                (ev.status === 'resolved' || ev.status === 'missed')
+                && !ev.promotedSecretId
+                && !ev.promotionFlag)
+            : [];
+
+        if (active.length === 0 && concluded.length === 0) return 0;
 
         const profile = resolveProfile('planningLLM');
         if (!profile) {
-            dlog('[NWST EventValidity] No Planning LLM profile — skipping review.');
+            dlog('[NWST EventReview] No Planning LLM profile — skipping review.');
             return 0;
         }
 
@@ -148,25 +216,27 @@ export async function runEventValidityReview(chatId) {
         const dayLabel = day?.dateDisplay || `Day ${day?.dayCount ?? '?'}`;
 
         const messages = [
-            { role: 'system', content: VALIDITY_SYSTEM_PROMPT },
-            { role: 'user', content: buildValidityPrompt(active, notebook, recent, dayLabel) }
+            { role: 'system', content: REVIEW_SYSTEM_PROMPT },
+            { role: 'user', content: buildReviewPrompt(active, undated, concluded, notebook, recent, dayLabel) }
         ];
 
-        dlog(`[NWST EventValidity] Reviewing ${active.length} active event(s)...`);
+        dlog(`[NWST EventReview] Reviewing ${active.length} active, ${undated.length} undated, ${concluded.length} concluded event(s)...`);
         const response = await generateWithProfile(profile, messages);
-        const findings = parseValidityFindings(response);
-        if (!findings || findings.length === 0) {
-            dlog('[NWST EventValidity] No invalidated events.');
-            return 0;
-        }
+        const parsed = parseReviewResponse(response);
+        if (!parsed) return 0;
 
+        const byTitle = (list, title) => {
+            const t = String(title || '').toLowerCase().trim();
+            return list.find(e => (e.title || '').toLowerCase().trim() === t) || null;
+        };
+
+        // ── Job 1: validity flags (queued for Keep / Mark missed) ──────────
         let flagged = 0;
-        for (const f of findings) {
+        for (const f of parsed.findings) {
             if (!f || typeof f.eventTitle !== 'string' || !f.reason) continue;
-            const t = f.eventTitle.toLowerCase().trim();
-            const ev = active.find(e => (e.title || '').toLowerCase().trim() === t);
+            const ev = byTitle(active, f.eventTitle);
             if (!ev) {
-                dlog(`[NWST EventValidity] Finding references unknown event "${f.eventTitle}" — skipped.`);
+                dlog(`[NWST EventReview] Validity finding references unknown event "${f.eventTitle}" — skipped.`);
                 continue;
             }
             if (ev.validityFlag) continue; // already awaiting the player's decision
@@ -180,17 +250,49 @@ export async function runEventValidityReview(chatId) {
             flagged++;
         }
 
-        if (flagged > 0) {
-            nwstToast(
-                `Day advance: ${flagged} event(s) may no longer make sense — review them in the Events tab.`,
-                'warning'
-            );
-            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('events');
+        // ── Job 2: tier placement for undated events (applied directly) ────
+        let retiered = 0;
+        for (const t of parsed.tierSuggestions) {
+            if (!t || typeof t.eventTitle !== 'string') continue;
+            if (!VALID_SUGGESTED_TIERS.includes(t.tier)) continue;
+            const ev = byTitle(undated, t.eventTitle);
+            if (!ev || ev.tier === t.tier) continue;
+            await updateEvent(chatId, ev.id, { tier: t.tier });
+            dlog(`[NWST EventReview] Undated event "${ev.title}" placed in tier: ${t.tier}`);
+            retiered++;
         }
-        return flagged;
+
+        // ── Job 3: promotion candidates (queued for Promote / Don't) ───────
+        let queued = 0;
+        for (const c of parsed.secretCandidates) {
+            if (!c || typeof c.eventTitle !== 'string' || !c.reason) continue;
+            const ev = byTitle(concluded, c.eventTitle);
+            if (!ev) {
+                dlog(`[NWST EventReview] Promotion candidate references unknown event "${c.eventTitle}" — skipped.`);
+                continue;
+            }
+            await updateEvent(chatId, ev.id, {
+                promotionFlag: {
+                    reason: String(c.reason).slice(0, 300),
+                    flaggedOn: dayLabel,
+                    ts: Date.now()
+                }
+            });
+            queued++;
+        }
+
+        const total = flagged + retiered + queued;
+        if (flagged > 0 || queued > 0) {
+            const parts = [];
+            if (flagged > 0) parts.push(`${flagged} event(s) may no longer make sense`);
+            if (queued > 0) parts.push(`${queued} concluded event(s) may hold concealed knowledge`);
+            nwstToast(`Day advance: ${parts.join('; ')} — review them in the Events tab.`, 'warning');
+        }
+        if (total > 0 && typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('events');
+        return total;
 
     } catch (err) {
-        console.error('[NWST EventValidity] Review failed:', err);
+        console.error('[NWST EventReview] Review failed:', err);
         return 0;
     }
 }

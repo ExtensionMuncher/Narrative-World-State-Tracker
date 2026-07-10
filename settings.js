@@ -209,19 +209,13 @@ export function setInjectionSetting(key, value) {
 
 // ── Planner prompt ────────────────────────────────────────────────────────
 
-/** Get the planner prompt (the ONLY user-editable LLM prompt). @returns {string} */
+/**
+ * Get the planner prompt. Read-only by design — the planner's job is too
+ * broad for user edits to be safe, so no setter, reset, or UI exists and the
+ * prompt is deliberately excluded from settings export/import.
+ * @returns {string}
+ */
 export function getPlannerPrompt() { return getSetting('plannerPrompt'); }
-
-/** Set the planner prompt. @param {string} prompt */
-export function setPlannerPrompt(prompt) { setSetting('plannerPrompt', prompt); }
-
-/** Reset the planner prompt to its default value. */
-export function resetPlannerPrompt() {
-    setSetting('plannerPrompt', defaultSettings.plannerPrompt);
-}
-
-/** Get the default planner prompt (for comparison / Reset button). @returns {string} */
-export function getDefaultPlannerPrompt() { return defaultSettings.plannerPrompt; }
 
 // ── Import / Export — Global Settings Only ────────────────────────────────
 
@@ -239,7 +233,6 @@ export function exportGlobalSettings() {
         scanFrequency: getScanFrequency(),
         injection: getInjectionSettings(),
         secrets: getSecretsConfig(),
-        plannerPrompt: getPlannerPrompt(),
         noThink: getSetting('noThink'),
         noThinkHard: getSetting('noThinkHard'),
         noThinkProfiles: getSetting('noThinkProfiles'),
@@ -275,7 +268,6 @@ export function importGlobalSettings(jsonString) {
         if (imported.scanFrequency !== undefined) setScanFrequency(imported.scanFrequency);
         if (imported.injection) setSetting('injection', imported.injection);
         if (imported.secrets) setSetting('secrets', imported.secrets);
-        if (imported.plannerPrompt !== undefined) setPlannerPrompt(imported.plannerPrompt);
         if (imported.noThink !== undefined) setSetting('noThink', imported.noThink);
         if (imported.noThinkHard !== undefined) setSetting('noThinkHard', imported.noThinkHard);
         if (imported.noThinkProfiles !== undefined) setSetting('noThinkProfiles', imported.noThinkProfiles);
