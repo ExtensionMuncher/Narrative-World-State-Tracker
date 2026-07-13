@@ -21,6 +21,8 @@ import {
     removeEventWithSummary
 } from '../data/events.js';
 import { getAllSecrets } from '../data/notebook.js';
+import { getCurrentDay } from '../data/worldState.js';
+import { resolveSpecialDayCategory } from '../data/specialDays.js';
 import { regenerateAllEvents, regenerateTierEvents } from '../llm/eventGen.js';
 
 // ── Build the Events tab HTML ─────────────────────────────────────────────
@@ -72,6 +74,34 @@ export function refreshEventsUI() {
             validityHtml += `<div style="display:flex;gap:6px;margin-top:4px">`;
             validityHtml += `<button class="menu_button nwst-btn nwst-validity-keep" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✓ Keep event</button>`;
             validityHtml += `<button class="menu_button nwst-btn nwst-validity-miss" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✗ Mark missed</button>`;
+            validityHtml += `</div></div>`;
+        }
+        validityHtml += `</div>`;
+    }
+
+    // ── Timing proposal queue — undetermined events whose timing the ──────
+    // story has fixed, per the day-advance review. Accept moves the event
+    // out of undetermined (the only automated-adjacent door out of that
+    // tier, and it still requires the player's click); Dismiss leaves it
+    // timeless and rests re-proposals for ~7 story days.
+    const timingQueue = getAllEvents(chatId).filter(ev => ev.timingFlag
+        && ev.tier === 'undetermined'
+        && (ev.status === 'pending' || ev.status === 'inprogress'));
+    if (timingQueue.length > 0) {
+        validityHtml += `<div class="nwst-event-group" style="border:1px solid #b5a76a;border-radius:8px;padding:8px;margin-bottom:10px">`;
+        validityHtml += `<div class="nwst-lbl" style="margin-bottom:6px">⏰ Timing proposals — undetermined events whose timing the story has fixed</div>`;
+        for (const ev of timingQueue) {
+            const f = ev.timingFlag;
+            const reason = (f.reason || '').replace(/</g, '&lt;');
+            const tierLabel = f.tier === 'immediate' ? 'Immediate' : f.tier === 'week' ? 'This week' : 'This month';
+            const placement = f.scheduledDate ? `${tierLabel} · ${String(f.scheduledDate).replace(/</g, '&lt;')}` : tierLabel;
+            validityHtml += `<div style="margin-bottom:8px;padding:6px;background:rgba(181,167,106,0.08);border-radius:6px">`;
+            validityHtml += `<div style="font-weight:600;font-size:13px">${(ev.title || '').replace(/</g, '&lt;')}</div>`;
+            validityHtml += `<div style="font-size:12px;color:#bbb;margin:3px 0">${reason} <span style="color:#888">(flagged ${f.flaggedOn || ''})</span></div>`;
+            validityHtml += `<div style="font-size:12px;margin:2px 0">Proposed placement: <b>${placement}</b></div>`;
+            validityHtml += `<div style="display:flex;gap:6px;margin-top:4px">`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-timing-accept" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">⏰ Accept placement</button>`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-timing-dismiss" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✗ Keep timeless</button>`;
             validityHtml += `</div></div>`;
         }
         validityHtml += `</div>`;
@@ -167,6 +197,7 @@ function buildEventItemHTML(event) {
             ${event.scheduledDate ? `<span class="nwst-event-time" title="Click to edit scheduled time">${escapeHTML(event.scheduledDate)}</span>` : ''}
             <span class="nwst-badge nwst-badge-${event.tier}">${capitalize(event.tier)}</span>
             ${event.isNPC ? '<span class="nwst-badge nwst-badge-npc">NPC</span>' : ''}
+            ${event.origin === 'special_day' ? `<span class="nwst-badge" style="background:rgba(181,167,106,0.25);border:1px solid #b5a76a" title="Player-defined calendar day">${(() => { const c = resolveSpecialDayCategory(event.specialDayCategory); return `${c.chip} ${escapeHTML(c.label)}`; })()}</span>` : ''}
             <span class="nwst-badge nwst-badge-${event.status}">${statusLabel(event.status)}</span>
             ${promotedBadge}
         </div>
@@ -338,6 +369,39 @@ function wireEventItemEvents() {
             await updateEvent(chatId, eventId, { validityFlag: null });
             await setEventStatus(chatId, eventId, 'missed');
             nwstToast('Event marked missed — it will compact into the notebook after the usual delay.', 'info');
+            refreshEventsUI();
+        };
+    });
+
+    // ── Timing proposal handlers ───────────────────────────────
+    container.querySelectorAll('.nwst-timing-accept').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const eventId = btn.dataset.eventId;
+            const chatId = getChatId();
+            const ev = getAllEvents(chatId).find(x => x.id === eventId);
+            if (!ev || !ev.timingFlag) return;
+            const updates = { tier: ev.timingFlag.tier, timingFlag: null };
+            if (ev.timingFlag.scheduledDate) updates.scheduledDate = ev.timingFlag.scheduledDate;
+            // updateEvent stamps tierSetDay automatically on the tier change.
+            await updateEvent(chatId, eventId, updates);
+            nwstToast('Placement accepted — the calendar will move this event like any dated one.', 'success');
+            refreshEventsUI();
+        };
+    });
+
+    container.querySelectorAll('.nwst-timing-dismiss').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const eventId = btn.dataset.eventId;
+            const chatId = getChatId();
+            let dismissedDay = null;
+            try {
+                const d = getCurrentDay(chatId);
+                if (d && typeof d.dayCount === 'number') dismissedDay = d.dayCount;
+            } catch (err) { /* non-fatal */ }
+            await updateEvent(chatId, eventId, { timingFlag: null, timingDismissedDay: dismissedDay });
+            nwstToast('Kept timeless — this proposal will rest for about a week of story days.', 'info');
             refreshEventsUI();
         };
     });

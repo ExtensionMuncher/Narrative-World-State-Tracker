@@ -1056,7 +1056,7 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
     prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 5 WORLD events per tier, max 5 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
     prompt += `  scheduledDate — REQUIRED for seasonal/relative-timing events (spring festival → current season date, "coming weeks" → Day N+14). Omit only for genuinely vague events. Use dayCount above as reference.\n\n`;
-    prompt += `  CRITICAL — SEED GENEROUSLY: This is the INITIAL batch scan. The tracker should start with a robust set of events so the world feels alive. Aim for roughly 12-20 events total across all tiers and categories. Distribute world events across multiple tiers — immediate (happening now/soon), week (this week), month (this month/season), undetermined (someday).\n\n`;
+    prompt += `  CRITICAL — SEED GENEROUSLY: This is the INITIAL batch scan. The tracker should start with a robust set of events so the world feels alive. Aim for roughly 12-20 events total across all tiers and categories. Distribute world events across multiple tiers — immediate (today/tomorrow), week (before the current weekday cycle ends), month (beyond this week), undetermined (someday).\n\n`;
     prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
     prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;
 

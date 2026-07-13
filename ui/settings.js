@@ -32,6 +32,7 @@ import {
 } from '../settings.js';
 
 import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCalendarConfig, saveCalendarConfig, getCurrentDay, updateCurrentDay } from '../data/worldState.js';
+import { SPECIAL_DAY_CATEGORIES } from '../data/specialDays.js';
 import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG } from '../data/storage.js';
@@ -274,10 +275,24 @@ export function buildSettingsTab() {
                         <div id="nwst-calendar-days-list" style="margin-bottom:8px"></div>
                     </div>
 
+                    <!-- Special days editor -->
+                    <div style="margin-top:14px;padding-top:10px;border-top:1px solid #333">
+                        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                            <span style="font-size:12px;color:#666;text-transform:uppercase;letter-spacing:0.5px">Special days</span>
+                        </div>
+                        <div style="font-size:11px;color:#888;margin-bottom:8px;line-height:1.4">
+                            Recurring calendar days — birthdays, holidays, festivals, deadlines, and more. Saved days live as collapsed cards grouped by type; tap a card to open and edit it, and save from inside the card. Each year, when a day's month arrives (or sooner for last-minute additions), it appears in the Events tab as a dated event with its category chip, starting under "This month" and moving forward with the calendar.
+                        </div>
+                        <div id="nwst-special-days-list" style="margin-bottom:8px"></div>
+                        <div class="nwst-btn-row" style="margin-bottom:4px">
+                            <button type="button" class="menu_button nwst-btn" id="nwst-special-day-add" style="font-size:11px;padding:3px 9px">➕ Add special day</button>
+                        </div>
+                    </div>
+
                     <!-- Save button -->
                     <div class="nwst-btn-row">
-                        <button class="menu_button nwst-btn" id="nwst-setting-saveCalendarConfig" style="font-size:11px;padding:3px 9px">Save Calendar Config</button>
-                        <button class="menu_button nwst-btn" id="nwst-setting-restoreDefaultCalendar" style="font-size:11px;padding:3px 9px;margin-left:auto">Restore to Default</button>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-setting-saveCalendarConfig" style="font-size:11px;padding:3px 9px">Save Calendar Config</button>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-setting-restoreDefaultCalendar" style="font-size:11px;padding:3px 9px;margin-left:auto">Restore to Default</button>
                     </div>
 
                     <!-- Hidden template for month entry -->
@@ -842,6 +857,7 @@ function populateCalendarConfigUI() {
 
     renderCalendarMonthsList();
     renderCalendarDaysList();
+    renderSpecialDaysList();
 }
 
 /**
@@ -914,6 +930,235 @@ function validateCalendarTotal() {
 /**
  * Render the days-of-week editor list from the stored config.
  */
+// ── Special Days: card-based editor ─────────────────────────────────────
+// Saved days render as collapsed cards grouped into sections by category
+// (like the Secrets menu). Tapping a card opens its edit form in place, with
+// its own Save/Remove inside (like Events). "Add special day" opens an
+// unsaved draft form; nothing persists until that draft's Save is pressed.
+let specialDayDraft = null;
+const expandedSpecialDayIds = new Set();
+
+function specialDayDateText(sd, cfg) {
+    const names = Array.isArray(cfg.monthNames) ? cfg.monthNames : [];
+    const nameOf = (m) => names[m - 1] || `Month ${m}`;
+    let text = `${nameOf(sd.month)} ${sd.day}`;
+    if (sd.endMonth != null && sd.endDay != null) {
+        text += (sd.endMonth === sd.month) ? `–${sd.endDay}` : ` – ${nameOf(sd.endMonth)} ${sd.endDay}`;
+    }
+    return text;
+}
+
+function specialDayFormHTML(sd, cfg, isDraft) {
+    const esc = (t) => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    const monthNames = Array.isArray(cfg.monthNames) ? cfg.monthNames : [];
+    const monthOptions = (sel) => monthNames.map((n, i) =>
+        `<option value="${i + 1}"${(i + 1) === sel ? ' selected' : ''}>${esc(n)}</option>`).join('');
+    const monthOptionsBlank = (sel) => `<option value=""${sel == null ? ' selected' : ''}>—</option>` + monthOptions(sel);
+    const known = Object.prototype.hasOwnProperty.call(SPECIAL_DAY_CATEGORIES, sd.category) && sd.category !== 'custom';
+    const customText = known ? '' : (sd.category === 'custom' ? '' : (sd.category || ''));
+    const catOptions = () => {
+        const keys = Object.keys(SPECIAL_DAY_CATEGORIES).filter(k => k !== 'custom');
+        return keys.map(k =>
+            `<option value="${k}"${k === sd.category ? ' selected' : ''}>${SPECIAL_DAY_CATEGORIES[k].chip} ${esc(SPECIAL_DAY_CATEGORIES[k].label)}</option>`
+        ).join('') + `<option value="custom"${!known ? ' selected' : ''}>📌 Custom…</option>`;
+    };
+    return `
+        <div class="nwst-sd-form" style="margin-top:6px">
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+                <input type="text" class="nwst-sd-name" value="${esc(sd.name)}" placeholder="Name (e.g. Elena's birthday)" style="flex:1;min-width:100px;font-size:12px;padding:3px 6px">
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <select class="nwst-sd-month" style="font-size:12px">${monthOptions(sd.month || 1)}</select>
+                <input type="number" class="nwst-sd-day" min="1" max="99" value="${parseInt(sd.day, 10) || 1}" style="width:52px;font-size:12px;padding:3px 4px" title="Day of month">
+                <span style="font-size:11px;color:#888">through</span>
+                <select class="nwst-sd-end-month" style="font-size:12px" title="Optional range end — leave as — for a single day">${monthOptionsBlank(sd.endMonth)}</select>
+                <input type="number" class="nwst-sd-end-day" min="1" max="99" value="${sd.endDay != null ? parseInt(sd.endDay, 10) : ''}" style="width:52px;font-size:12px;padding:3px 4px" title="Optional range end day">
+                <select class="nwst-sd-category" style="font-size:12px">${catOptions()}</select>
+                <input type="text" class="nwst-sd-category-custom" value="${esc(customText)}" placeholder="Custom category" style="width:110px;font-size:12px;padding:3px 6px;${known ? 'display:none' : ''}">
+            </div>
+            <textarea class="nwst-sd-desc" placeholder="Optional lore the AI should know about this day (e.g. what it means, how it's observed, who cares about it) — carried into the event each year" style="width:100%;margin-top:4px;font-size:12px;padding:3px 6px;min-height:34px;resize:vertical">${esc(sd.description || '')}</textarea>
+            <div class="nwst-btn-row" style="margin-top:6px;display:flex;gap:6px">
+                <button type="button" class="menu_button nwst-btn nwst-sd-save" style="font-size:11px;padding:3px 10px">💾 Save special day</button>
+                ${isDraft
+                    ? `<button type="button" class="menu_button nwst-btn nwst-sd-cancel" style="font-size:11px;padding:3px 10px">Cancel</button>`
+                    : `<button type="button" class="menu_button nwst-btn nwst-sd-collapse" style="font-size:11px;padding:3px 10px">Collapse</button>
+                       <button type="button" class="menu_button nwst-btn nwst-sd-remove" style="font-size:11px;padding:3px 10px;margin-left:auto" title="Remove this special day">✗ Remove</button>`}
+            </div>
+        </div>`;
+}
+
+/** Read one card's form into a config entry. Returns null (with focus) when the name is missing. */
+function collectSpecialDayFromForm(formEl, existingId) {
+    const name = formEl.querySelector('.nwst-sd-name')?.value?.trim();
+    if (!name) {
+        nwstToast('Give the special day a name before saving.', 'warning');
+        formEl.querySelector('.nwst-sd-name')?.focus();
+        return null;
+    }
+    const month = parseInt(formEl.querySelector('.nwst-sd-month')?.value, 10) || 1;
+    const day = parseInt(formEl.querySelector('.nwst-sd-day')?.value, 10) || 1;
+    const endMonthRaw = formEl.querySelector('.nwst-sd-end-month')?.value;
+    const endDayRaw = formEl.querySelector('.nwst-sd-end-day')?.value;
+    const endMonth = endMonthRaw ? parseInt(endMonthRaw, 10) : null;
+    const endDay = (endMonth != null && endDayRaw) ? parseInt(endDayRaw, 10) : null;
+    let category = formEl.querySelector('.nwst-sd-category')?.value || 'custom';
+    if (category === 'custom') {
+        const text = formEl.querySelector('.nwst-sd-category-custom')?.value?.trim();
+        category = text || 'custom';
+    }
+    const description = formEl.querySelector('.nwst-sd-desc')?.value?.trim() || '';
+    return {
+        id: existingId || ('sd_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)),
+        name, month, day,
+        endMonth: (endMonth != null && endDay != null) ? endMonth : null,
+        endDay: (endMonth != null && endDay != null) ? endDay : null,
+        category, description
+    };
+}
+
+/** Persist one entry (new or edited), then materialize near-term occurrences. */
+async function commitSpecialDay(entry) {
+    const chatId = getChatId();
+    if (!chatId) { nwstToast('No active chat.', 'error'); return false; }
+    const config = getCalendarConfig(chatId);
+    config.specialDays = Array.isArray(config.specialDays) ? config.specialDays : [];
+    const idx = config.specialDays.findIndex(x => x.id === entry.id);
+    if (idx >= 0) config.specialDays[idx] = entry; else config.specialDays.push(entry);
+    await saveCalendarConfig(chatId, config);
+    try {
+        const { materializeSpecialDays } = await import('../data/specialDays.js');
+        const created = await materializeSpecialDays(chatId);
+        if (created > 0) {
+            nwstToast(`Special day saved — ${created} event(s) surfaced in the Events tab.`, 'success');
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('events');
+            return true;
+        }
+    } catch (e) { /* fall through to plain toast */ }
+    nwstToast('Special day saved.', 'success');
+    return true;
+}
+
+function renderSpecialDaysList() {
+    const container = document.getElementById('nwst-special-days-list');
+    if (!container) return;
+    const chatId = getChatId();
+    if (!chatId) { container.innerHTML = ''; return; }
+    const cfg = getCalendarConfig(chatId);
+    const specialDays = Array.isArray(cfg.specialDays) ? cfg.specialDays : [];
+    const esc = (t) => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+    // Group saved days into category sections (known categories in registry
+    // order, then each custom label as its own alphabetical section).
+    const groups = new Map();
+    for (const sd of specialDays) {
+        const known = Object.prototype.hasOwnProperty.call(SPECIAL_DAY_CATEGORIES, sd.category) && sd.category !== 'custom';
+        const key = known ? sd.category : ((typeof sd.category === 'string' && sd.category.trim() && sd.category !== 'custom') ? `~${sd.category.trim()}` : 'custom');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(sd);
+    }
+    const orderedKeys = [
+        ...Object.keys(SPECIAL_DAY_CATEGORIES).filter(k => groups.has(k)),
+        ...[...groups.keys()].filter(k => k.startsWith('~')).sort()
+    ];
+
+    let html = '';
+    if (specialDayDraft) {
+        html += `<div class="nwst-event-group nwst-sd-card" data-sd-draft="1" style="border:1px solid #6a9fb5;border-radius:8px;padding:8px;margin-bottom:8px">`;
+        html += `<div class="nwst-lbl" style="margin-bottom:2px">➕ New special day</div>`;
+        html += specialDayFormHTML(specialDayDraft, cfg, true);
+        html += `</div>`;
+    }
+
+    for (const key of orderedKeys) {
+        const info = key.startsWith('~')
+            ? { label: key.slice(1).slice(0, 40), chip: SPECIAL_DAY_CATEGORIES.custom.chip }
+            : (key === 'custom' ? { label: 'Custom', chip: SPECIAL_DAY_CATEGORIES.custom.chip } : SPECIAL_DAY_CATEGORIES[key]);
+        const entries = groups.get(key);
+        html += `<div class="nwst-event-group" style="border:1px solid #333;border-radius:8px;padding:6px 8px;margin-bottom:8px">`;
+        html += `<div class="nwst-lbl" style="margin-bottom:4px">${info.chip} ${esc(info.label)} <span style="color:#666;font-weight:normal">(${entries.length})</span></div>`;
+        for (const sd of entries.slice().sort((a, b) => (a.month - b.month) || (a.day - b.day))) {
+            const expanded = expandedSpecialDayIds.has(sd.id);
+            html += `<div class="nwst-sd-card" data-sd-id="${esc(sd.id)}" style="border:1px solid #2c2c2c;border-radius:6px;padding:5px 8px;margin-bottom:5px;background:rgba(255,255,255,0.02)">`;
+            html += `<div class="nwst-sd-summary" style="display:flex;align-items:center;gap:8px;cursor:pointer" title="${expanded ? 'Collapse' : 'Open to edit'}">`;
+            html += `<span style="font-weight:600;font-size:13px;flex:1">${esc(sd.name)}</span>`;
+            html += `<span style="font-size:12px;color:#aaa">${esc(specialDayDateText(sd, cfg))}</span>`;
+            html += `<span style="font-size:11px;color:#888">${info.chip} ${esc(info.label)}</span>`;
+            html += `<span style="font-size:11px;color:#666">${expanded ? '▾' : '▸'}</span>`;
+            html += `</div>`;
+            if (expanded) html += specialDayFormHTML(sd, cfg, false);
+            html += `</div>`;
+        }
+        html += `</div>`;
+    }
+
+    if (!html) {
+        html = `<div style="font-size:11px;color:#666;font-style:italic">No special days yet — add birthdays, holidays, deadlines, and other recurring days here.</div>`;
+    }
+    container.innerHTML = html;
+
+    // ── Wiring (per render) ──
+    container.querySelectorAll('.nwst-sd-category').forEach(sel => {
+        sel.addEventListener('change', () => {
+            const custom = sel.closest('.nwst-sd-form').querySelector('.nwst-sd-category-custom');
+            if (custom) custom.style.display = sel.value === 'custom' ? '' : 'none';
+        });
+    });
+    container.querySelectorAll('.nwst-sd-summary').forEach(sum => {
+        sum.addEventListener('click', () => {
+            const id = sum.closest('.nwst-sd-card')?.dataset?.sdId;
+            if (!id) return;
+            if (expandedSpecialDayIds.has(id)) expandedSpecialDayIds.delete(id);
+            else expandedSpecialDayIds.add(id);
+            renderSpecialDaysList();
+        });
+    });
+    container.querySelectorAll('.nwst-sd-save').forEach(btn => {
+        btn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const card = btn.closest('.nwst-sd-card');
+            const form = btn.closest('.nwst-sd-form');
+            const isDraft = card?.dataset?.sdDraft === '1';
+            const entry = collectSpecialDayFromForm(form, isDraft ? null : card?.dataset?.sdId);
+            if (!entry) return;
+            btn.disabled = true;
+            const ok = await commitSpecialDay(entry);
+            if (ok) {
+                if (isDraft) specialDayDraft = null;
+                expandedSpecialDayIds.delete(entry.id);
+                renderSpecialDaysList();
+            } else {
+                btn.disabled = false;
+            }
+        });
+    });
+    container.querySelectorAll('.nwst-sd-cancel, .nwst-sd-collapse').forEach(btn => {
+        btn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const card = btn.closest('.nwst-sd-card');
+            if (card?.dataset?.sdDraft === '1') specialDayDraft = null;
+            else if (card?.dataset?.sdId) expandedSpecialDayIds.delete(card.dataset.sdId);
+            renderSpecialDaysList();
+        });
+    });
+    container.querySelectorAll('.nwst-sd-remove').forEach(btn => {
+        btn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const id = btn.closest('.nwst-sd-card')?.dataset?.sdId;
+            const cid = getChatId();
+            if (!cid || !id) return;
+            const c = getCalendarConfig(cid);
+            c.specialDays = (c.specialDays || []).filter(x => x.id !== id);
+            await saveCalendarConfig(cid, c);
+            expandedSpecialDayIds.delete(id);
+            renderSpecialDaysList();
+            nwstToast('Special day removed. Any already-materialized event for it stays until you delete or resolve it.', 'info');
+        });
+    });
+}
+
 function renderCalendarDaysList() {
     const container = document.getElementById('nwst-calendar-days-list');
     if (!container) return;
@@ -1598,6 +1843,23 @@ function wireSettingsEvents() {
         });
     }
 
+    const addSpecialDayBtn = document.getElementById('nwst-special-day-add');
+    if (addSpecialDayBtn) {
+        addSpecialDayBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!getChatId()) { nwstToast('No active chat.', 'error'); return; }
+            // Open an unsaved draft form — nothing is stored until the
+            // draft's own "Save special day" button commits it.
+            specialDayDraft = specialDayDraft || {
+                id: null, name: '', month: 1, day: 1,
+                endMonth: null, endDay: null, category: 'birthday', description: ''
+            };
+            renderSpecialDaysList();
+            document.querySelector('#nwst-special-days-list .nwst-sd-name')?.focus();
+        });
+    }
+
     const saveCalBtn = document.getElementById('nwst-setting-saveCalendarConfig');
     if (saveCalBtn) {
         saveCalBtn.addEventListener('click', async () => {
@@ -1628,12 +1890,30 @@ function wireSettingsEvents() {
                 }
             });
 
+            // Special days are managed by their own cards (per-card save);
+            // config already carries the stored list, so global save keeps
+            // them intact without reading the editor DOM.
             await saveCalendarConfig(chatId, config);
             // Re-validate and re-populate to ensure consistency
             renderCalendarMonthsList();
             renderCalendarDaysList();
+            renderSpecialDaysList();
             validateCalendarTotal();
-            nwstToast('Calendar configuration saved.', 'success');
+
+            // Surface last-minute special days immediately (in-month / near-term
+            // occurrences materialize now rather than waiting for a day advance).
+            try {
+                const { materializeSpecialDays } = await import('../data/specialDays.js');
+                const created = await materializeSpecialDays(chatId);
+                if (created > 0) {
+                    nwstToast(`Calendar saved — ${created} special day event(s) surfaced in the Events tab.`, 'success');
+                    if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('events');
+                } else {
+                    nwstToast('Calendar configuration saved.', 'success');
+                }
+            } catch (e) {
+                nwstToast('Calendar configuration saved.', 'success');
+            }
         });
     }
 

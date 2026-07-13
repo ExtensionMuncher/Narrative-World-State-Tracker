@@ -65,9 +65,9 @@ WORLD EVENTS — ambient happenings that exist in the world independent of any c
 ---
 
 TIERS:
-  - immediate: happening today or within the next day or two
-  - week: happening within the next week
-  - month: happening within the next month
+  - immediate: happening today or tomorrow
+  - week: happening before the current weekday cycle ends
+  - month: happening beyond this week
 
 PLAUSIBILITY RULES:
   - Cross-reference the notebook's "Established Facts" — do not contradict them

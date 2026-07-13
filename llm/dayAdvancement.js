@@ -929,6 +929,21 @@ export async function advanceToNextDay() {
         //    This runs AFTER snapshot, so the saved snapshot still has 'pending' events.
         await rollEventHorizonForward(chatId);
 
+        // 9.25 Materialize player-defined special days whose occurrence has
+        //      come into range (entered the current calendar month, or is
+        //      near-term). Structural, zero API calls; per-occurrence dedup
+        //      means repeat runs create nothing. New events start in "This
+        //      month" and the ladder walks them forward on later advances.
+        try {
+            const { materializeSpecialDays } = await import('../data/specialDays.js');
+            const createdSpecial = await materializeSpecialDays(chatId);
+            if (createdSpecial > 0) {
+                dlog(`[NWST DayAdvancement] Materialized ${createdSpecial} special day event(s).`);
+            }
+        } catch (sdErr) {
+            console.warn('[NWST DayAdvancement] Special day materialization failed (non-fatal):', sdErr);
+        }
+
         // 9.5 Event validity review — the Planning LLM checks whether the story
         //     has made any surviving event's premise impossible or moot (e.g. a
         //     catalyst character permanently removed). Findings only FLAG events
@@ -1281,36 +1296,59 @@ async function rollEventHorizonForward(chatId) {
     const calendarConfig = getCalendarConfig(chatId); // Needed for literal date parsing
     const changes = {};
 
+    // Anchored week math: weekday #1 is weekDays[0] and the current week ends
+    // on weekday #N (N = weekDays.length, config-driven — not hardcoded to 7).
+    // startWeekday says which weekday story Day 1 fell on (config, default 1),
+    // so the weekday of any day number is pure arithmetic — no boundary
+    // tracking, no drift.
+    const weekLength = (calendarConfig && Array.isArray(calendarConfig.weekDays) && calendarConfig.weekDays.length > 0)
+        ? calendarConfig.weekDays.length : 7;
+    const startWeekday = (calendarConfig && Number.isInteger(calendarConfig.startWeekday) && calendarConfig.startWeekday >= 1)
+        ? ((calendarConfig.startWeekday - 1) % weekLength) + 1 : 1;
+    const weekdayToday = ((dayCount - 1 + (startWeekday - 1)) % weekLength) + 1;
+    const weekEndDay = dayCount + (weekLength - weekdayToday);
+
     for (const event of events) {
         if (event.status !== 'pending') continue;
         // Events awaiting a player decision are left untouched so the roll
-        // cannot preempt a Keep / Mark-missed / Promote choice.
-        if (event.validityFlag || event.promotionFlag) continue;
+        // cannot preempt a Keep / Mark-missed / Promote / Timing choice.
+        if (event.validityFlag || event.promotionFlag || event.timingFlag) continue;
 
-        if (event.tier === 'immediate') {
-            // ★ Check if this event has a future scheduledDate — protect it from rolling
-            if (event.scheduledDate && isFutureDated(event.scheduledDate, dayCount, calendarConfig)) {
-                continue; // Event is scheduled for a future day — don't mark as missed
-            }
-            // Move pending immediate events to missed (they didn't happen today)
-            changes[event.id] = 'missed';
+        const range = getScheduledDayRange(event.scheduledDate, calendarConfig);
+
+        if (!range) {
+            // Undated: only the daily-expiry rule applies — an undated
+            // immediate event that didn't happen today is missed. Undated
+            // week/month events are aged by the LLM review instead.
+            if (event.tier === 'immediate') changes[event.id] = 'missed';
             continue;
         }
 
-        // week / month / undetermined — only date-parseable events roll here
-        const range = getScheduledDayRange(event.scheduledDate, calendarConfig);
-        if (!range) continue;
-
-        if (dayCount > range.endDay) {
-            // Past-due while parked in a later tier — the window came and went
-            changes[event.id] = 'missed';
-        } else if (range.startDay - dayCount <= 1) {
-            // Happening today or tomorrow — pull into the immediate tier
-            changes[event.id] = 'immediate';
-        } else if (range.startDay - dayCount <= 7 && event.tier !== 'week') {
-            // Within the coming week — pull month/undetermined events forward
-            changes[event.id] = 'week';
+        // Undetermined is a protected tier — deliberately timeless. Events
+        // leave it only by the player's hand or by concluding. A dated
+        // undetermined event whose window objectively passed still goes
+        // missed (a status change), but it is never re-tiered.
+        if (event.tier === 'undetermined') {
+            if (dayCount > range.endDay) changes[event.id] = 'missed';
+            continue;
         }
+
+        // Dated: full anchored placement ladder.
+        let target;
+        if (dayCount > range.endDay) {
+            target = 'missed';        // window came and went
+        } else if (range.startDay - dayCount <= 1) {
+            // Today or tomorrow — distance-based on purpose, so a "tomorrow"
+            // event never hides behind a week boundary.
+            target = 'immediate';
+        } else if (range.startDay <= weekEndDay) {
+            target = 'week';          // before this weekday cycle ends
+        } else {
+            target = 'month';         // beyond this week
+        }
+
+        if (target === 'missed') changes[event.id] = 'missed';
+        else if (event.tier !== target) changes[event.id] = target;
     }
 
     if (Object.keys(changes).length > 0) {
@@ -1366,40 +1404,6 @@ function getScheduledDayRange(scheduledDate, calendarConfig) {
  * @param {number} currentDayCount - The current story day number
  * @returns {boolean} true if the event is scheduled for a future day
  */
-function isFutureDated(scheduledDate, currentDayCount, calendarConfig) {
-    // ── Strategy 1: Range format "Day 104-110" ─────────────────────────
-    const rangeMatch = scheduledDate.match(/Day\s*(\d+)\s*–?\s*(\d+)/i);
-    if (rangeMatch) {
-        const rangeEnd = parseInt(rangeMatch[2], 10);
-        // Protect the event as long as the current day is within the range
-        // or hasn't reached it yet. Only mark missed when past the range end.
-        return currentDayCount <= rangeEnd;
-    }
-
-    // ── Strategy 2: Single "Day #" format ──────────────────────────────
-    const dayMatch = scheduledDate.match(/Day\s*(\d+)/i);
-    if (dayMatch) {
-        const eventDay = parseInt(dayMatch[1], 10);
-        // Use >= so the event survives ON its scheduled day (e.g., Day 105
-        // survives when advancing TO Day 105). It only gets rolled when
-        // advancing PAST Day 105 (to Day 106).
-        return eventDay >= currentDayCount;
-    }
-
-    // ── Strategy 3: Literal date format (e.g. "Shigatsu 15th", "April 15") ──
-    // Uses computeDayOfYearFromDate() which handles custom month names,
-    // ordinal suffixes (15th → 15), and calendar config's monthDays array.
-    if (calendarConfig) {
-        const eventDayOfYear = computeDayOfYearFromDate(scheduledDate, calendarConfig);
-        if (eventDayOfYear !== null && eventDayOfYear > 0) {
-            return eventDayOfYear >= currentDayCount;
-        }
-    }
-
-    // For unrecognised formats, fall through to normal rolling
-    return false;
-}
-
 // ── Snapshot ──────────────────────────────────────────────────────────────
 
 async function saveDayBoundarySnapshot(chatId) {

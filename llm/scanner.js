@@ -177,7 +177,7 @@ WHAT YOU DO:
 6. EVENT MAINTENANCE — keep the active events list truthful to the story:
    - RESOLVED: an active event whose projected moment clearly HAPPENED on-screen in the recent messages.
    - MISSED: an active event whose window clearly passed, or whose premise visibly failed, in the recent messages.
-   - TIER CORRECTIONS: for active events WITHOUT a scheduled date, move them between immediate/week/month when the recent messages make their urgency clear (dated events are moved by the calendar automatically — leave them alone).
+   - TIER CORRECTIONS: for active events WITHOUT a scheduled date, move them between immediate/week/month when the recent messages make their urgency clear (dated events are moved by the calendar automatically — leave them alone). Tier meanings: immediate = today/tomorrow, week = before the current weekday cycle ends, month = beyond this week. Events in the "undetermined" tier are deliberately timeless — never move events in or out of it (you may still mark them RESOLVED or MISSED when the messages clearly show it).
    Reference events by the E# labels shown in the ACTIVE EVENTS list. Be conservative — report only what the messages clearly show. Most scans should leave events untouched; empty arrays are the expected result.
 
 RESPONSE FORMAT — respond with a JSON object:
@@ -818,18 +818,20 @@ async function applyScanResults(chatId, response, recentMessages) {
             const byRef = new Map();
             activeList.forEach((ev, i) => byRef.set(`e${i + 1}`, ev));
             const refToEvent = (ref) => byRef.get(String(ref).trim().toLowerCase()) || null;
-            const VALID_TIERS = ['immediate', 'week', 'month', 'undetermined'];
+            // Undetermined is protected: neither a valid source nor target
+            // for automated tier changes (status changes remain allowed).
+            const VALID_TIERS = ['immediate', 'week', 'month'];
 
             for (const ref of (Array.isArray(evUpdates.resolved) ? evUpdates.resolved : [])) {
                 const ev = refToEvent(ref);
-                if (!ev || ev.validityFlag || ev.promotionFlag) continue;
+                if (!ev || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
                 await setEvtStatus(chatId, ev.id, 'resolved');
                 dlog(`[NWST Scanner] Event resolved by scan: "${ev.title}"`);
                 hadUpdates = true;
             }
             for (const ref of (Array.isArray(evUpdates.missed) ? evUpdates.missed : [])) {
                 const ev = refToEvent(ref);
-                if (!ev || ev.validityFlag || ev.promotionFlag) continue;
+                if (!ev || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
                 await setEvtStatus(chatId, ev.id, 'missed');
                 dlog(`[NWST Scanner] Event marked missed by scan: "${ev.title}"`);
                 hadUpdates = true;
@@ -837,7 +839,8 @@ async function applyScanResults(chatId, response, recentMessages) {
             const tierChanges = (evUpdates.tierChanges && typeof evUpdates.tierChanges === 'object') ? evUpdates.tierChanges : {};
             for (const [ref, tier] of Object.entries(tierChanges)) {
                 const ev = refToEvent(ref);
-                if (!ev || ev.validityFlag || ev.promotionFlag) continue;
+                if (!ev || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
+                if (ev.tier === 'undetermined') continue;
                 if (!VALID_TIERS.includes(tier) || ev.tier === tier) continue;
                 await updateEvt(chatId, ev.id, { tier });
                 dlog(`[NWST Scanner] Event tier corrected by scan: "${ev.title}" → ${tier}`);

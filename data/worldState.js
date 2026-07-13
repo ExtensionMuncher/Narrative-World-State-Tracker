@@ -288,10 +288,17 @@ export function getCalendarConfig(chatId) {
                 : [...DEFAULT_CALENDAR_CONFIG.monthDays],
             weekDays: Array.isArray(stored.weekDays) && stored.weekDays.length > 0
                 ? stored.weekDays
-                : [...DEFAULT_CALENDAR_CONFIG.weekDays]
+                : [...DEFAULT_CALENDAR_CONFIG.weekDays],
+            // Which weekday (1-based index into weekDays) story Day 1 fell on.
+            // Defaults to 1 so existing chats keep "Day 1 = first weekday".
+            startWeekday: (Number.isInteger(stored.startWeekday) && stored.startWeekday >= 1)
+                ? stored.startWeekday
+                : 1,
+            // Player-defined recurring calendar days (see data/specialDays.js).
+            specialDays: Array.isArray(stored.specialDays) ? stored.specialDays : []
         };
     }
-    return { ...DEFAULT_CALENDAR_CONFIG, monthNames: [...DEFAULT_CALENDAR_CONFIG.monthNames], monthDays: [...DEFAULT_CALENDAR_CONFIG.monthDays], weekDays: [...DEFAULT_CALENDAR_CONFIG.weekDays] };
+    return { ...DEFAULT_CALENDAR_CONFIG, monthNames: [...DEFAULT_CALENDAR_CONFIG.monthNames], monthDays: [...DEFAULT_CALENDAR_CONFIG.monthDays], weekDays: [...DEFAULT_CALENDAR_CONFIG.weekDays], startWeekday: 1, specialDays: [] };
 }
 
 /**

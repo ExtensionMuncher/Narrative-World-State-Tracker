@@ -12,7 +12,13 @@
 //      (which the structural roll cannot move), suggest the tier that matches
 //      the story's current urgency. Applied directly; tiers are low-stakes and
 //      remain editable in the Events tab.
-//   3. PROMOTION CANDIDATES — among concluded (resolved/missed) events, flag
+//   3. TIMING CRYSTALLIZATION — undetermined events are deliberately timeless
+//      and never auto-re-tiered, but when the story has FIXED one's timing
+//      (a stated date, a countdown, a scheduled confrontation), the review
+//      proposes a placement. Proposals are QUEUED as cards; only the player's
+//      Accept moves the event out of undetermined. Dismissed proposals are
+//      not re-raised for ~7 story days.
+//   4. PROMOTION CANDIDATES — among concluded (resolved/missed) events, flag
 //      those whose outcome constitutes CONCEALED KNOWLEDGE — information some
 //      characters hold that others don't. Candidates are QUEUED in the Events
 //      tab for the player's Promote / Don't-promote decision; either choice
@@ -51,9 +57,12 @@ WHAT DOES NOT COUNT (do NOT flag):
 - Tone shifts, delays, or the event merely becoming less likely. Less likely is not moot.
 Characters have free will and stories bend around obstacles. Flag ONLY clear structural impossibility. An empty findings array is the expected result most days.
 
-JOB 2 — TIER PLACEMENT (only the events listed under UNDATED EVENTS): these have no parseable scheduled date, so the calendar cannot place them. Based on the story's current pressure, suggest the tier that fits: "immediate" (today/tomorrow), "week" (this week), or "month" (further out). Only suggest a change when the story makes the urgency clear — if unsure, leave the event alone. Never suggest "undetermined".
+JOB 2 — TIER PLACEMENT (only the events listed under UNDATED EVENTS): these have no parseable scheduled date, so the calendar cannot place them. Based on the story's current pressure, suggest the tier that fits: "immediate" (happening today or tomorrow), "week" (before the current weekday cycle ends), or "month" (beyond this week). Only suggest a change when the story makes the urgency clear — if unsure, leave the event alone. Events in the "undetermined" tier are deliberately timeless and are not shown to you here — never suggest "undetermined" as a tier, and never expect to move events out of it.
+STALENESS RULE: each event lists how long it has sat in its current tier. An undated event stuck in the "week" tier for more than 7 story days, or in the "month" tier for more than 30, is overdue — adjudicate it: re-tier it to match the story's current pressure, or, if its moment has clearly already passed or can no longer happen, report it under Job 1 findings instead so the player decides. Do not leave a stale event untouched unless the story genuinely gives no signal either way.
 
-JOB 3 — PROMOTION CANDIDATES (only the events listed under CONCLUDED EVENTS): these are already resolved or missed. Flag the ones whose outcome constitutes CONCEALED KNOWLEDGE — information some characters now hold that others don't: a hidden resolution, a private deal, a covert act, an outcome deliberately kept from someone. Do NOT flag events whose outcome is public or common knowledge among the cast. For each candidate give one sentence naming what is concealed and from whom.
+JOB 3 — TIMING CRYSTALLIZATION (only the events listed under UNDETERMINED EVENTS): these are deliberately timeless — do NOT re-tier them yourself and do NOT include them in Job 2. But if the story has now FIXED when one will occur — a stated date, a countdown, a scheduled meeting or confrontation — propose its placement: the tier that fits ("immediate", "week", or "month") and, when computable from the story, the day in "Day N" format (otherwise null). Only propose when the story explicitly establishes timing; vague momentum or rising tension is NOT timing. An empty array is the expected result most days.
+
+JOB 4 — PROMOTION CANDIDATES (only the events listed under CONCLUDED EVENTS): these are already resolved or missed. Flag the ones whose outcome constitutes CONCEALED KNOWLEDGE — information some characters now hold that others don't: a hidden resolution, a private deal, a covert act, an outcome deliberately kept from someone. Do NOT flag events whose outcome is public or common knowledge among the cast. For each candidate give one sentence naming what is concealed and from whom.
 
 OUTPUT (JSON only, no markdown fences, no commentary — all three arrays required, empty when nothing qualifies):
 {
@@ -63,38 +72,52 @@ OUTPUT (JSON only, no markdown fences, no commentary — all three arrays requir
   "tierSuggestions": [
     { "eventTitle": "exact event title as given", "tier": "immediate" }
   ],
+  "timingProposals": [
+    { "eventTitle": "exact event title as given", "tier": "week", "scheduledDate": "Day 14", "reason": "one sentence: what in the story fixed this timing" }
+  ],
   "secretCandidates": [
     { "eventTitle": "exact event title as given", "reason": "one sentence: what is concealed and from whom" }
   ]
 }`;
 
-function describeEvent(ev) {
+function describeEvent(ev, dayCount) {
     let p = `---\n`;
     p += `Title: ${ev.title}\n`;
     if (ev.description) p += `Description: ${ev.description}\n`;
     if (ev.participants && ev.participants.length) p += `Participants: ${ev.participants.join(', ')}\n`;
     if (ev.scheduledDate) p += `Scheduled: ${ev.scheduledDate}\n`;
     p += `Status: ${ev.status} | Tier: ${ev.tier}\n`;
+    // In-tier age gives the reviewer a staleness signal for undated events.
+    if (typeof ev.tierSetDay === 'number' && typeof dayCount === 'number' && dayCount >= ev.tierSetDay) {
+        p += `In current tier since Day ${ev.tierSetDay} (${dayCount - ev.tierSetDay} story day(s))\n`;
+    }
     return p;
 }
 
-function buildReviewPrompt(active, undated, concluded, notebook, recentMessages, dayLabel) {
+function buildReviewPrompt(active, undated, undetermined, concluded, notebook, recentMessages, dayLabel, dayCount) {
     let p = `The story has just advanced to: ${dayLabel || 'a new day'}.\n\n`;
 
     p += `=== ACTIVE EVENTS TO REVIEW FOR VALIDITY (${active.length}) ===\n`;
-    for (const ev of active) p += describeEvent(ev);
+    for (const ev of active) p += describeEvent(ev, dayCount);
     p += '\n';
 
     if (undated.length > 0) {
         p += `=== UNDATED EVENTS — SUGGEST TIER PLACEMENT (${undated.length}) ===\n`;
         p += `(these have no scheduled date; place them by narrative urgency)\n`;
-        for (const ev of undated) p += describeEvent(ev);
+        for (const ev of undated) p += describeEvent(ev, dayCount);
+        p += '\n';
+    }
+
+    if (undetermined.length > 0) {
+        p += `=== UNDETERMINED EVENTS — TIMING CRYSTALLIZATION ONLY (${undetermined.length}) ===\n`;
+        p += `(deliberately timeless; propose a placement ONLY if the story has explicitly fixed when one occurs)\n`;
+        for (const ev of undetermined) p += describeEvent(ev, dayCount);
         p += '\n';
     }
 
     if (concluded.length > 0) {
         p += `=== CONCLUDED EVENTS — ASSESS FOR CONCEALED KNOWLEDGE (${concluded.length}) ===\n`;
-        for (const ev of concluded) p += describeEvent(ev);
+        for (const ev of concluded) p += describeEvent(ev, dayCount);
         p += '\n';
     }
 
@@ -139,6 +162,7 @@ function parseReviewResponse(response) {
         return {
             findings: Array.isArray(parsed.findings) ? parsed.findings : [],
             tierSuggestions: Array.isArray(parsed.tierSuggestions) ? parsed.tierSuggestions : [],
+            timingProposals: Array.isArray(parsed.timingProposals) ? parsed.timingProposals : [],
             secretCandidates: Array.isArray(parsed.secretCandidates) ? parsed.secretCandidates : []
         };
     } catch (e) {
@@ -190,7 +214,16 @@ export async function runEventValidityReview(chatId) {
             ev => ev.status === 'pending' || ev.status === 'inprogress'
         );
         // Undated actives are the tier-placement candidates (unflagged only).
-        const undated = active.filter(ev => !hasParseableDate(ev) && !ev.validityFlag && !ev.promotionFlag);
+        // The undetermined tier is excluded by design: those events are
+        // deliberately timeless and are never re-tiered by automation.
+        const undated = active.filter(ev => !hasParseableDate(ev) && ev.tier !== 'undetermined' && !ev.validityFlag && !ev.promotionFlag && !ev.timingFlag);
+        // Undetermined actives are timing-crystallization candidates — one
+        // pending card per event, and dismissals rest for ~7 story days.
+        const dayCountNow = (() => { const d = getCurrentDay(chatId); return (d && typeof d.dayCount === 'number') ? d.dayCount : null; })();
+        const undeterminedCandidates = active.filter(ev =>
+            ev.tier === 'undetermined'
+            && !ev.validityFlag && !ev.promotionFlag && !ev.timingFlag
+            && !(typeof ev.timingDismissedDay === 'number' && typeof dayCountNow === 'number' && (dayCountNow - ev.timingDismissedDay) < 7));
         // Concluded, unpromoted, undecided events are the promotion candidates.
         // Gated by the autoPromoteEvents toggle (repurposed from the old silent
         // auto-promotion path into this queued, player-decided review).
@@ -217,7 +250,7 @@ export async function runEventValidityReview(chatId) {
 
         const messages = [
             { role: 'system', content: REVIEW_SYSTEM_PROMPT },
-            { role: 'user', content: buildReviewPrompt(active, undated, concluded, notebook, recent, dayLabel) }
+            { role: 'user', content: buildReviewPrompt(active, undated, undeterminedCandidates, concluded, notebook, recent, dayLabel, (typeof day?.dayCount === 'number' ? day.dayCount : null)) }
         ];
 
         dlog(`[NWST EventReview] Reviewing ${active.length} active, ${undated.length} undated, ${concluded.length} concluded event(s)...`);
@@ -262,7 +295,30 @@ export async function runEventValidityReview(chatId) {
             retiered++;
         }
 
-        // ── Job 3: promotion candidates (queued for Promote / Don't) ───────
+        // ── Job 3: timing proposals (queued for Accept / Dismiss) ──────────
+        const VALID_TIMING_TIERS = ['immediate', 'week', 'month'];
+        let timingQueued = 0;
+        for (const t of parsed.timingProposals) {
+            if (!t || typeof t.eventTitle !== 'string' || !t.reason) continue;
+            if (!VALID_TIMING_TIERS.includes(t.tier)) continue;
+            const ev = byTitle(undeterminedCandidates, t.eventTitle);
+            if (!ev) {
+                dlog(`[NWST EventReview] Timing proposal references unknown event "${t.eventTitle}" — skipped.`);
+                continue;
+            }
+            await updateEvent(chatId, ev.id, {
+                timingFlag: {
+                    tier: t.tier,
+                    scheduledDate: (typeof t.scheduledDate === 'string' && t.scheduledDate.trim()) ? t.scheduledDate.trim().slice(0, 60) : null,
+                    reason: String(t.reason).slice(0, 300),
+                    flaggedOn: dayLabel,
+                    ts: Date.now()
+                }
+            });
+            timingQueued++;
+        }
+
+        // ── Job 4: promotion candidates (queued for Promote / Don't) ───────
         let queued = 0;
         for (const c of parsed.secretCandidates) {
             if (!c || typeof c.eventTitle !== 'string' || !c.reason) continue;
@@ -281,10 +337,11 @@ export async function runEventValidityReview(chatId) {
             queued++;
         }
 
-        const total = flagged + retiered + queued;
-        if (flagged > 0 || queued > 0) {
+        const total = flagged + retiered + queued + timingQueued;
+        if (flagged > 0 || queued > 0 || timingQueued > 0) {
             const parts = [];
             if (flagged > 0) parts.push(`${flagged} event(s) may no longer make sense`);
+            if (timingQueued > 0) parts.push(`${timingQueued} undetermined event(s) may have found their timing`);
             if (queued > 0) parts.push(`${queued} concluded event(s) may hold concealed knowledge`);
             nwstToast(`Day advance: ${parts.join('; ')} — review them in the Events tab.`, 'warning');
         }

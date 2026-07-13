@@ -89,6 +89,13 @@ export function getEventById(chatId, eventId) {
  */
 export async function addEvent(chatId, eventData) {
     const events = getAllEvents(chatId);
+    // Stamp the story day the event enters its tier — the day-advance review
+    // uses this to age undated events ("in this tier for N story days").
+    let _createdDayCount = null;
+    try {
+        const _day = getCurrentDay(chatId);
+        if (_day && typeof _day.dayCount === 'number') _createdDayCount = _day.dayCount;
+    } catch (e) { /* non-fatal */ }
     const newEvent = {
         id: eventData.id || generateEventId(),
         title: eventData.title || '',
@@ -103,7 +110,13 @@ export async function addEvent(chatId, eventData) {
         resolveDay: null, // No resolve day for newly created events
         participants: eventData.participants || [],
         promotedSecretId: eventData.promotedSecretId || null,
-        knowledgeSummary: eventData.knowledgeSummary || null
+        knowledgeSummary: eventData.knowledgeSummary || null,
+        tierSetDay: (typeof eventData.tierSetDay === 'number') ? eventData.tierSetDay : _createdDayCount,
+        // Special-day materialization bookkeeping (see data/specialDays.js):
+        // category chip for the UI, source link, and the per-occurrence dedup key.
+        specialDayCategory: eventData.specialDayCategory || null,
+        sourceSpecialDayId: eventData.sourceSpecialDayId || null,
+        occurrenceDay: (typeof eventData.occurrenceDay === 'number') ? eventData.occurrenceDay : null
     };
     events.push(newEvent);
     await saveAllEvents(chatId, events);
@@ -121,6 +134,15 @@ export async function updateEvent(chatId, eventId, updates) {
     const events = getAllEvents(chatId);
     const index = events.findIndex(e => e.id === eventId);
     if (index === -1) return null;
+
+    // Re-stamp the in-tier age whenever the tier actually changes (unless the
+    // caller supplied an explicit stamp).
+    if (updates.tier !== undefined && updates.tier !== events[index].tier && updates.tierSetDay === undefined) {
+        try {
+            const day = getCurrentDay(chatId);
+            updates = { ...updates, tierSetDay: (day && typeof day.dayCount === 'number') ? day.dayCount : null };
+        } catch (e) { /* non-fatal */ }
+    }
 
     events[index] = { ...events[index], ...updates };
     await saveAllEvents(chatId, events);
@@ -699,13 +721,23 @@ export function getEventsGroupedByTier(chatId) {
  */
 export async function rollEventHorizon(chatId, tierChanges) {
     const events = getAllEvents(chatId);
+    let dayCount = null;
+    try {
+        const day = getCurrentDay(chatId);
+        if (day && typeof day.dayCount === 'number') dayCount = day.dayCount;
+    } catch (e) { /* non-fatal */ }
     for (const event of events) {
         if (tierChanges[event.id]) {
             const newTier = tierChanges[event.id];
             if (newTier === 'missed') {
                 event.status = 'missed';
+                // Stamp resolveDay so Event Horizon Compaction can age these
+                // out — previously roll-missed events never carried one and
+                // therefore never compacted.
+                if (typeof event.resolveDay !== 'number') event.resolveDay = dayCount;
             } else {
                 event.tier = newTier;
+                event.tierSetDay = dayCount;
             }
         }
     }
@@ -818,7 +850,7 @@ export async function compactEventHorizon(chatId, thresholdDays = 3) {
             const alreadyPromoted = event.promotedSecretId != null;
             // Events awaiting a player decision (promotion review or validity
             // review) must not be compacted out from under the pending card.
-            const awaitingDecision = event.promotionFlag != null || event.validityFlag != null;
+            const awaitingDecision = event.promotionFlag != null || event.validityFlag != null || event.timingFlag != null;
 
             // Skip promoted events — they need to stick around so the
             // promotedSecretId link back to the Notebook secret survives.
