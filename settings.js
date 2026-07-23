@@ -7,7 +7,7 @@
 //
 // Global settings (stored in extension_settings.nwst):
 //   • enabled, scanPaused, debugMode
-//   • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM)
+//   • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM, secretsSidecarLLM)
 //   • scanFrequency
 //   • injection settings
 //   • plannerPrompt
@@ -57,7 +57,7 @@ export function setDebugMode(value) { setSetting('debugMode', value); }
 
 /**
  * Get all connection profile IDs.
- * @returns {{ planningLLM: string, dayAdvancementLLM: string, narrativeConsistencyLLM: string }}
+ * @returns {{ planningLLM: string, dayAdvancementLLM: string, narrativeConsistencyLLM: string, secretsSidecarLLM: string }}
  */
 export function getConnectionProfiles() {
     return getSetting('connections');
@@ -65,7 +65,7 @@ export function getConnectionProfiles() {
 
 /**
  * Get a specific connection profile ID.
- * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM'
+ * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM' | 'secretsSidecarLLM'
  * @returns {string} The profile ID (empty string if not set)
  */
 export function getConnectionProfile(profileKey) {
@@ -75,7 +75,7 @@ export function getConnectionProfile(profileKey) {
 
 /**
  * Set a specific connection profile ID.
- * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM'
+ * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM' | 'secretsSidecarLLM'
  * @param {string} profileId - The connection profile ID from ST's connection manager
  */
 export function setConnectionProfile(profileKey, profileId) {
@@ -98,10 +98,10 @@ export function getScanMinimumMessages() { return getSetting('scanMinimumMessage
 /** Set the minimum messages floor. @param {number} value */
 export function setScanMinimumMessages(value) { setSetting('scanMinimumMessages', Math.max(1, parseInt(value) || 10)); }
 
-/** Get the maximum number of snapshots to keep per chat. @returns {number} */
+/** Get the snapshot retention target per chat. Protected landmarks are never pruned. @returns {number} */
 export function getMaxSnapshotCount() { return getSetting('maxSnapshotCount') || 30; }
 
-/** Set the maximum snapshot count. @param {number} value */
+/** Set the snapshot retention target. @param {number} value */
 export function setMaxSnapshotCount(value) { setSetting('maxSnapshotCount', Math.max(1, parseInt(value) || 30)); }
 
 // ── Injection settings ────────────────────────────────────────────────────

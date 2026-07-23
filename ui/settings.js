@@ -8,7 +8,7 @@
 //   1. Connection profiles (3 dropdowns from ST's connection manager)
 //   2. Setting context (per-chat world description)
 //   3. Injection settings (toggles + placement + depth/role)
-//   4. Planner prompt (the ONLY user-editable prompt)
+//   4. Per-chat world/calendar configuration and data tools
 //   5. Batch scan button
 //   6. Import/Export data
 // =============================================================================
@@ -31,13 +31,16 @@ import {
     exportAll, importAll
 } from '../settings.js';
 
-import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCalendarConfig, saveCalendarConfig, getCurrentDay, updateCurrentDay } from '../data/worldState.js';
+import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCalendarConfig, saveCalendarConfig, getCurrentDay, updateCurrentDay, getStartDate, saveStartDate, getEraPin, saveEraPin } from '../data/worldState.js';
+import { getMoonConfig, saveMoonConfig, updateMoonConfig, getMoonPhenomenonOverrides, saveMoonPhenomenonOverrides, MOON_OVERRIDE_PHENOMENA } from '../data/moons.js';
+import { parseUserDate, parseDisplayDate, parseCurrentCalendarDate, daysBetweenCalendarDates, computeDeterministicDate, advanceCurrentCalendarDate, extractYearFromText, dateFromDayCount, dayOfYearFor, monthLengthsFor, gregorianWeekdayIndex, ordinalSuffix, formatYear, monthNamesFor, yearLengthFor } from '../lib/calendarMath.js';
 import { SPECIAL_DAY_CATEGORIES } from '../data/specialDays.js';
 import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG } from '../data/storage.js';
 import { runBatchScan } from '../llm/batchScan.js';
 import { getSecretsMeta, setSecretsMeta } from '../data/secretsMeta.js';
+import { rebaseElapsedStoryDays } from '../data/timeMigration.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
 
@@ -150,6 +153,49 @@ export function buildSettingsTab() {
                     <div class="nwst-btn-row">
                         <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
                     </div>
+                    <!-- ── Starting date (deterministic date engine) ── -->
+                    <div style="margin-top:14px;padding-top:12px;border-top:1px solid #333">
+                        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                            <span style="font-size:12px;color:#666;text-transform:uppercase;letter-spacing:0.5px">Starting date</span>
+                        </div>
+                        <div style="font-size:11px;color:#888;margin-bottom:8px;line-height:1.4">
+                            One-time entry, information only — saving it changes nothing in your world state. Warmup uses it as the authoritative starting date (code-built, so weekday and format are exact); if left blank, the warmup scan infers the date from the roleplay text and fills this field. Accepted formats: <b>1/1/26</b>, <b>01/01/2026</b>, <b>January 1st, 2026</b>.
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                            <input type="text" id="nwst-setting-startDate" placeholder="e.g. January 1st, 2026" style="flex:1;min-width:120px">
+                            <button type="button" class="menu_button nwst-btn" id="nwst-setting-setStartDate" style="font-size:11px;padding:3px 9px">Set</button>
+                        </div>
+                        <div id="nwst-startdate-status" style="font-size:11px;color:#888;margin-bottom:10px"></div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                            <div style="font-size:12px;color:#666;white-space:nowrap">Era</div>
+                            <input type="text" id="nwst-setting-eraPin" placeholder="optional — correct or set the era, e.g. Reiwa 8" style="flex:1;min-width:100px">
+                            <button type="button" class="menu_button nwst-btn" id="nwst-setting-saveEraPin" style="font-size:11px;padding:3px 9px">Save</button>
+                        </div>
+                        <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">
+                            Real-world calendars only. If the era was read wrong (or the story never mentioned one), write the correct label here — it takes effect immediately and the LLM maintains it from then on, updating era years at rollovers. Editable anytime; save empty to hand era duty back to the LLM. Custom calendars use the Era name field in Calendar configuration instead.
+                        </div>
+                        <div class="nwst-setting-row" style="margin-bottom:8px">
+                            <div>
+                                <div class="nwst-setting-label">International date format</div>
+                                <div class="nwst-setting-sub">Read slash dates day-first: 10/4/26 means April 10th, 2026</div>
+                            </div>
+                            <label class="nwst-toggle">
+                                <input type="checkbox" id="nwst-setting-dateFormatDMY">
+                                <span class="nwst-slider"></span>
+                            </label>
+                        </div>
+                        <div class="nwst-setting-row">
+                            <div>
+                                <div class="nwst-setting-label">Leap years</div>
+                                <div class="nwst-setting-sub">Adds a leap day (Feb 29th) in real-world leap years. Also applies to custom calendars that mirror the real structure (12 months with a 28-day second month); other shapes never leap.</div>
+                            </div>
+                            <label class="nwst-toggle">
+                                <input type="checkbox" id="nwst-setting-leapYears">
+                                <span class="nwst-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+
                 </div>
             </div>
         </div>
@@ -180,7 +226,7 @@ export function buildSettingsTab() {
                     <!-- Primary moon cycle length (legacy/fallback) -->
                     <div style="font-size:12px;color:#666;margin-bottom:4px">Default cycle length</div>
                     <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
-                        The default lunar cycle length (29.53 days for Earth). Used as fallback when no moons are configured.
+                        The default lunar cycle length for this chat (29.53 days for Earth). Used as fallback when no moons are configured.
                     </div>
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
                         <input type="number" id="nwst-setting-moonCycleDays" value="29.53" min="1" max="999" step="0.01" style="width:80px;text-align:center">
@@ -191,7 +237,7 @@ export function buildSettingsTab() {
                     <div class="nwst-setting-row" style="margin-bottom:10px">
                         <div>
                             <div class="nwst-setting-label">Enable moon phenomena</div>
-                            <div class="nwst-setting-sub">Eclipses, blue moons, super moons, blood moons — rare natural events that appear alongside normal phases</div>
+                            <div class="nwst-setting-sub">Calendar-detected blue moons, eclipse subtypes, orbital appearances, and rare atmospheric moon optics</div>
                         </div>
                         <label class="nwst-toggle">
                             <input type="checkbox" id="nwst-setting-enableMoonPhenomena" checked>
@@ -202,12 +248,25 @@ export function buildSettingsTab() {
                     <!-- Multi-moon list -->
                     <div style="font-size:12px;color:#666;margin-bottom:4px">Configured moons</div>
                     <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
-                        Add multiple moons or remove all for a moonless world. Each moon has its own cycle length. Any enabled moon appears in the forecast strip individually.
+                        Add multiple moons for this chat. Disable moons entirely for a moonless world. Each enabled moon has its own cycle length and forecast strip.
                     </div>
                     <div id="nwst-moons-list" style="margin-bottom:8px"></div>
                     <div class="nwst-btn-row">
                         <button class="menu_button nwst-btn" id="nwst-setting-addMoon" style="font-size:11px;padding:3px 9px">+ Add Moon</button>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-setting-saveMoons" style="font-size:11px;padding:3px 9px">💾 Save Moons</button>
                         <button class="menu_button nwst-btn" id="nwst-setting-restoreDefaultMoons" style="font-size:11px;padding:3px 9px;margin-left:auto">Restore to Default</button>
+                    </div>
+
+                    <div style="border-top:0.5px solid var(--SmartThemeBorderColor,#444);margin:12px 0 10px;padding-top:10px">
+                        <div style="font-size:12px;color:#666;margin-bottom:4px">Phenomenon overrides</div>
+                        <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">
+                            Per-chat calendar ranges layered over the mathematical forecast. Use these for deliberate anomalies such as a three-day Blood Moon. Blue Moon remains calendar-detected and cannot be assigned here.
+                        </div>
+                        <div id="nwst-moon-overrides-list" style="margin-bottom:8px"></div>
+                        <div class="nwst-btn-row">
+                            <button type="button" class="menu_button nwst-btn" id="nwst-setting-addMoonOverride" style="font-size:11px;padding:3px 9px">+ Add Override</button>
+                            <button type="button" class="menu_button nwst-btn" id="nwst-setting-saveMoonOverrides" style="font-size:11px;padding:3px 9px">💾 Save Overrides</button>
+                        </div>
                     </div>
 
                     <!-- Hidden template for moon entry -->
@@ -218,6 +277,29 @@ export function buildSettingsTab() {
                             <input type="number" class="nwst-moon-cycle" value="29.53" min="1" max="999" step="0.01" style="width:60px;text-align:center" title="Cycle length (days)">
                             <span style="font-size:11px;color:#888;white-space:nowrap">days</span>
                             <button class="menu_button nwst-moon-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this moon">✕</button>
+                        </div>
+                    </template>
+
+                    <template id="nwst-moon-override-tpl">
+                        <div class="nwst-moon-override-entry" style="padding:8px;margin-bottom:7px;border-radius:6px;background:var(--dark1,rgba(0,0,0,0.04));border:0.5px solid var(--SmartThemeBorderColor,#444)">
+                            <div style="display:flex;align-items:center;gap:7px;margin-bottom:7px">
+                                <input type="checkbox" class="nwst-moon-override-enabled" checked title="Enable this override">
+                                <select class="nwst-moon-override-moon" style="min-width:110px;flex:0 1 150px"></select>
+                                <select class="nwst-moon-override-type" style="min-width:150px;flex:1"></select>
+                                <button type="button" class="menu_button nwst-moon-override-remove" style="font-size:11px;padding:1px 6px;color:#c33" title="Remove override">✕</button>
+                            </div>
+                            <input type="text" class="nwst-moon-override-custom" placeholder="Custom phenomenon label" style="display:none;width:100%;margin-bottom:7px;box-sizing:border-box">
+                            <div style="display:grid;grid-template-columns:auto repeat(3,minmax(52px,1fr));gap:5px;align-items:center;margin-bottom:5px;font-size:11px">
+                                <span style="color:#888">Start</span>
+                                <input type="number" class="nwst-moon-override-start-year" placeholder="Year">
+                                <input type="number" class="nwst-moon-override-start-month" min="1" placeholder="Month">
+                                <input type="number" class="nwst-moon-override-start-day" min="1" placeholder="Day">
+                                <span style="color:#888">End</span>
+                                <input type="number" class="nwst-moon-override-end-year" placeholder="Year">
+                                <input type="number" class="nwst-moon-override-end-month" min="1" placeholder="Month">
+                                <input type="number" class="nwst-moon-override-end-day" min="1" placeholder="Day">
+                            </div>
+                            <input type="text" class="nwst-moon-override-description" placeholder="Optional tooltip / anomaly description" style="width:100%;box-sizing:border-box">
                         </div>
                     </template>
                 </div>
@@ -273,6 +355,13 @@ export function buildSettingsTab() {
                             Configure custom day names for this world's week. When enabled, the LLM will use these names in date displays.
                         </div>
                         <div id="nwst-calendar-days-list" style="margin-bottom:8px"></div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
+                            <div style="font-size:12px;color:#666;white-space:nowrap">Era name</div>
+                            <input type="text" id="nwst-setting-eraName" placeholder="optional — e.g. Third Age {year}" style="flex:1">
+                        </div>
+                        <div style="font-size:11px;color:#888;margin-top:4px;line-height:1.4">
+                            Shown as the sub-date line when this custom calendar is enabled. Write <b>{year}</b> to insert the computed year (e.g. "Third Age {year}" → "Third Age 313").
+                        </div>
                     </div>
 
                     <!-- Special days editor -->
@@ -352,7 +441,7 @@ export function buildSettingsTab() {
                     <div id="nwst-season-bands-section">
                         <div style="font-size:12px;color:#666;margin-bottom:6px">Season bands</div>
                         <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">
-                            Each band defines a season's name and its day range within the year (0-based). Bands are checked in order — the first matching band is used.
+                            Each band defines a season's name and its day range within the year (1-based). Bands are checked in order — the first matching band is used.
                         </div>
                         <div id="nwst-season-bands-list"></div>
                         <div class="nwst-btn-row" style="margin-top:6px">
@@ -363,8 +452,8 @@ export function buildSettingsTab() {
                     <!-- Editable day count (per-chat) -->
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-top:8px;border-top:1px solid rgba(128,128,128,0.2)">
                         <div style="font-size:12px;color:#666;white-space:nowrap">Current day count</div>
-                        <input type="number" id="nwst-setting-dayCount" value="0" min="0" style="width:70px;text-align:center">
-                        <span style="font-size:11px;color:#888">absolute elapsed days (controls season cycling)</span>
+                        <input type="number" id="nwst-setting-dayCount" value="1" min="1" style="width:70px;text-align:center">
+                        <span style="font-size:11px;color:#888">cyclical calendar day within the current year (controls seasons and annual timing)</span>
                         <button class="menu_button nwst-btn" id="nwst-setting-saveDayCount" style="font-size:11px;padding:2px 7px;margin-left:auto">Update</button>
                     </div>
 
@@ -379,7 +468,7 @@ export function buildSettingsTab() {
                         <div class="nwst-season-band-entry" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:4px;border-radius:4px;background:var(--dark1,rgba(0,0,0,0.04))">
                             <input type="text" class="nwst-season-band-name" value="Spring" placeholder="Name" style="flex:1;min-width:80px">
                             <span style="font-size:11px;color:#888">from day</span>
-                            <input type="number" class="nwst-season-band-start" value="0" min="0" max="9999" style="width:55px;text-align:center">
+                            <input type="number" class="nwst-season-band-start" value="1" min="1" max="9999" style="width:55px;text-align:center">
                             <span style="font-size:11px;color:#888">to day</span>
                             <input type="number" class="nwst-season-band-end" value="91" min="0" max="9999" style="width:55px;text-align:center">
                             <button class="menu_button nwst-season-band-remove" style="font-size:11px;padding:1px 5px;color:#c33" title="Remove this season band">✕</button>
@@ -441,8 +530,8 @@ export function buildSettingsTab() {
                     </div>
                     <div class="nwst-setting-row">
                         <div>
-                            <div class="nwst-setting-label">Max snapshot count</div>
-                            <div class="nwst-setting-sub">Maximum number of day-boundary snapshots stored per chat. Oldest are pruned first when exceeded. Day advancement, batch scan, and time skip snapshots are counted separately.</div>
+                            <div class="nwst-setting-label">Snapshot retention limit</div>
+                            <div class="nwst-setting-sub">Target maximum for stored snapshots per chat. Oldest regular snapshots are pruned first. Batch-scan and pre-time-skip landmark snapshots are protected and are never pruned, so the total can exceed this limit if protected landmarks alone exceed it.</div>
                         </div>
                         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
                             <input type="number" id="nwst-setting-maxSnapshotCount" value="30" min="1" max="200" style="width:52px;text-align:center">
@@ -455,7 +544,7 @@ export function buildSettingsTab() {
                             <div class="nwst-setting-sub">Story days after which a resolved/missed event is compacted into the Notebook's "Past Events" section. 0 = compact immediately on day advancement. Set to a high value to disable.</div>
                         </div>
                         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-                            <input type="number" id="nwst-setting-eventCompactionThreshold" value="3" min="0" max="999" style="width:52px;text-align:center">
+                            <input type="number" id="nwst-setting-eventCompactionThreshold" value="0" min="0" max="999" style="width:52px;text-align:center">
                             <span style="font-size:12px;color:#666">story days</span>
                         </div>
                     </div>
@@ -473,7 +562,7 @@ export function buildSettingsTab() {
                     <div class="nwst-setting-row">
                         <div>
                             <div class="nwst-setting-label">Event validity review on day advance</div>
-                            <div class="nwst-setting-sub">After each day advancement, one Planning LLM call reviews events three ways: flags active events whose premise has become impossible or moot (queued for your Keep / Mark-missed decision), places undated events into the right time tier by narrative urgency, and (if the setting above is on) queues concluded events holding concealed knowledge for promotion review. Still one extra API call per day advance, skipped when there is nothing to review.</div>
+                            <div class="nwst-setting-sub">After each day advancement, one Planning LLM call reviews event validity (queued for Keep / Mark Resolved / Mark Missed), reassesses undated-event urgency, proposes timing when an Undetermined event gains a concrete schedule, and—if enabled above—queues concluded events holding concealed knowledge for promotion review. Still one extra API call per day advance, skipped when there is nothing to review.</div>
                         </div>
                         <label class="nwst-toggle">
                             <input type="checkbox" id="nwst-setting-eventValidityReview" checked>
@@ -607,18 +696,18 @@ export function buildSettingsTab() {
                     </div>
                     <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
                         <input type="text" id="nwst-secret-pc-name" placeholder="User/PC canonical name (e.g. Mira)" style="font-size:12px">
-                        <input type="text" id="nwst-secret-pc-aliases" placeholder="PC aliases, comma-separated (e.g. Mira Halden)" style="font-size:12px">
+                        <input type="text" id="nwst-secret-pc-aliases" placeholder="PC aliases, comma-separated (e.g. Mira Rowan)" style="font-size:12px">
                         <button class="menu_button nwst-btn" id="nwst-secret-pc-save" style="font-size:11px;padding:3px 9px;align-self:flex-start">Save PC identity</button>
                     </div>
 
                     <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin:16px 0 6px">Alias manager</div>
                     <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.4">
-                        Collapse the different ways a character is named in prose down to one canonical name. The engine auto-detects names from your secrets and communities, but you can add aliases it can't infer (e.g. "the Silver Fox" → Kellan). Pretty names show in the UI; matching happens internally.
+                        Collapse the different ways a character is named in prose down to one canonical name. The engine auto-detects names from your secrets and communities, but you can add aliases it can't infer (e.g. "The Silver Fox" → Rowan). Pretty names show in the UI; matching happens internally.
                     </div>
                     <div id="nwst-alias-list" style="margin-bottom:10px"></div>
                     <div style="display:flex;flex-direction:column;gap:6px">
-                        <input type="text" id="nwst-alias-canonical" placeholder="Canonical name (e.g. Kellan)" style="font-size:12px">
-                        <input type="text" id="nwst-alias-variants" placeholder="Aliases, comma-separated (e.g. the Silver Fox, Captain, Kellan Vance)" style="font-size:12px">
+                        <input type="text" id="nwst-alias-canonical" placeholder="Canonical name (e.g. Rowan)" style="font-size:12px">
+                        <input type="text" id="nwst-alias-variants" placeholder="Aliases, comma-separated (e.g. The Silver Fox, Captain, Rowan Vale)" style="font-size:12px">
                         <button class="menu_button nwst-btn" id="nwst-alias-add" style="font-size:11px;padding:3px 9px;align-self:flex-start">+ Add alias group</button>
                     </div>
                 </div>
@@ -674,7 +763,7 @@ export function buildSettingsTab() {
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
                     <label class="nwst-toggle" title="Enable verbose debug logging to the browser console (F12)">
                         <input type="checkbox" id="nwst-debug-logging-toggle" ${isDebugMode() ? 'checked' : ''}>
-                        <span class="nwst-toggle-slider"></span>
+                        <span class="nwst-slider"></span>
                     </label>
                     <span style="font-size:11px;color:var(--SmartThemeBodyColor,#ddd)">Log NWST internal activity (scans, injections, scoring) to the browser console (opened with F12)</span>
                 </div>
@@ -713,6 +802,11 @@ export function buildSettingsTab() {
                         <input type="text" id="nwst-debug-daycount-input" placeholder="M/D (e.g. 1/12 or 5/31)" style="width:140px;font-size:11px;padding:3px 6px">
                         <button class="menu_button nwst-btn" id="nwst-debug-detect-daycount">📅 Set Day</button>
                     </div>
+                </div>
+                <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
+                    <div class="nwst-setting-label" style="margin-bottom:4px">Adopt computed dates</div>
+                    <div class="nwst-setting-sub" style="margin-bottom:8px">For chats that were already running before the date engine existed. Pairs the engine with today's displayed date so that from the next day advancement onward, dates, weekdays, and forecast day labels are code-computed instead of LLM-written. Nothing else changes — events, notebook, moons, and the day counter stay untouched. One-time, confirmed action.</div>
+                    <button type="button" class="menu_button nwst-btn" id="nwst-debug-adopt-dates" title="Pair the deterministic date engine with this chat's current date. Requires a readable calendar date in Current Day (e.g. 'Wednesday, April 20th, 2024'). No LLM call.">🗓️ Adopt computed dates</button>
                 </div>
             </div>
         </div>
@@ -839,6 +933,7 @@ function renderSeasonBandsList() {
 
 // ── Calendar Configuration UI ────────────────────────────────────────────
 
+
 /**
  * Populate the calendar config UI controls from the stored per-chat config.
  */
@@ -855,9 +950,62 @@ function populateCalendarConfigUI() {
         monthCountInput.value = config.months || 12;
     }
 
+    setCheckbox('nwst-setting-leapYears', config.leapYears !== false);
+    setCheckbox('nwst-setting-dateFormatDMY', getSetting('dateFormatDMY') === true);
+
+    const eraInput = document.getElementById('nwst-setting-eraName');
+    if (eraInput) eraInput.value = config.eraName || '';
+
+    populateStartDateUI();
+
     renderCalendarMonthsList();
     renderCalendarDaysList();
     renderSpecialDaysList();
+}
+
+/**
+ * Fill the Starting Date field + status line from the stored anchor.
+ * A confirmed user entry locks the field permanently (one-time entry);
+ * a scan-derived anchor stays editable until the user confirms their own.
+ */
+function populateStartDateUI() {
+    const input = document.getElementById('nwst-setting-startDate');
+    const btn = document.getElementById('nwst-setting-setStartDate');
+    const status = document.getElementById('nwst-startdate-status');
+    if (!input || !btn || !status) return;
+
+    const chatId = getChatId();
+
+    const pinInput = document.getElementById('nwst-setting-eraPin');
+    if (pinInput) pinInput.value = chatId ? getEraPin(chatId) : '';
+    const anchor = chatId ? getStartDate(chatId) : null;
+
+    if (!anchor) {
+        input.value = '';
+        input.disabled = false;
+        btn.disabled = false;
+        const cur = chatId ? getCurrentDay(chatId) : null;
+        const tracking = cur && Number.isInteger(cur.dayCount) && cur.dayCount > 0;
+        status.textContent = tracking
+            ? 'Not set — NWST is already tracking this chat; anything entered now is stored as reference information only.'
+            : 'Not set — the warmup scan will fill this from the roleplay text, or enter it yourself now.';
+        return;
+    }
+
+    const cfg = getCalendarConfig(chatId);
+    const names = monthNamesFor(cfg);
+    const monthName = names[Math.min(anchor.month - 1, names.length - 1)] || `Month ${anchor.month}`;
+    input.value = `${monthName} ${anchor.day}${ordinalSuffix(anchor.day)}, ${formatYear(anchor.year)}`;
+
+    if (anchor.locked) {
+        input.disabled = true;
+        btn.disabled = true;
+        status.textContent = 'Locked — recorded as this chat\u2019s starting date.';
+    } else {
+        input.disabled = false;
+        btn.disabled = false;
+        status.textContent = 'Auto-filled from the warmup scan. You may correct it — confirming your own entry locks it permanently.';
+    }
 }
 
 /**
@@ -930,6 +1078,7 @@ function validateCalendarTotal() {
 /**
  * Render the days-of-week editor list from the stored config.
  */
+
 // ── Special Days: card-based editor ─────────────────────────────────────
 // Saved days render as collapsed cards grouped into sections by category
 // (like the Secrets menu). Tapping a card opens its edit form in place, with
@@ -1299,7 +1448,7 @@ function populateSettingsUI() {
 
     // Event compaction threshold
     const compactInput = document.getElementById('nwst-setting-eventCompactionThreshold');
-    if (compactInput) compactInput.value = getSetting('eventCompactionThreshold') ?? 3;
+    if (compactInput) compactInput.value = getSetting('eventCompactionThreshold') ?? 0;
 
     // Auto-promote events toggle
     setCheckbox('nwst-setting-autoPromoteEvents', getSetting('autoPromoteEvents') !== false);
@@ -1309,12 +1458,14 @@ function populateSettingsUI() {
     const freqInput = document.getElementById('nwst-setting-scanFrequency');
     if (freqInput) freqInput.value = getScanFrequency();
 
-    // Moon cycle
+    // Moon cycle (per-chat)
+    const moonConfig = getMoonConfig(getChatId());
     const moonCycleInput = document.getElementById('nwst-setting-moonCycleDays');
-    if (moonCycleInput) moonCycleInput.value = getSetting('moonCycleDays') || 29.53;
-    setCheckbox('nwst-setting-enableMoons', getSetting('enableMoons') !== false);
-    setCheckbox('nwst-setting-enableMoonPhenomena', getSetting('enableMoonPhenomena') !== false);
+    if (moonCycleInput) moonCycleInput.value = moonConfig.moonCycleDays || 29.53;
+    setCheckbox('nwst-setting-enableMoons', moonConfig.enableMoons !== false);
+    setCheckbox('nwst-setting-enableMoonPhenomena', moonConfig.enableMoonPhenomena !== false);
     renderMoonsList();
+    renderMoonOverridesList();
 
     // Setting context (per-chat — load from storage)
     const chatId = getChatId();
@@ -1389,7 +1540,8 @@ function renderMoonsList() {
     const container = document.getElementById('nwst-moons-list');
     if (!container) return;
 
-    const moons = getSetting('moons') || [];
+    const chatId = getChatId();
+    const moons = getMoonConfig(chatId).moons || [];
     const template = document.getElementById('nwst-moon-entry-tpl');
     if (!template) return;
 
@@ -1408,14 +1560,14 @@ function renderMoonsList() {
         nameInput.value = moon.name || 'The Moon';
         cycleInput.value = moon.cycleDays || 29.53;
 
-        // Wire events
         const updateMoon = async () => {
-            const m = getSetting('moons') || [];
-            if (m[i]) {
-                m[i].enabled = cb.checked;
-                m[i].name = nameInput.value.trim() || 'The Moon';
-                m[i].cycleDays = parseFloat(cycleInput.value) || 29.53;
-                setSetting('moons', m);
+            const cfg = getMoonConfig(chatId);
+            if (cfg.moons[i]) {
+                cfg.moons[i].enabled = cb.checked;
+                cfg.moons[i].name = nameInput.value.trim() || 'The Moon';
+                cfg.moons[i].cycleDays = parseFloat(cycleInput.value) || 29.53;
+                if (i === 0) cfg.moonCycleDays = cfg.moons[i].cycleDays;
+                await saveMoonConfig(chatId, cfg);
             }
         };
         cb.addEventListener('change', updateMoon);
@@ -1423,17 +1575,165 @@ function renderMoonsList() {
         cycleInput.addEventListener('change', updateMoon);
 
         removeBtn.addEventListener('click', async () => {
-            const m = getSetting('moons') || [];
-            if (m.length <= 1) {
-                nwstToast('Cannot remove the last moon. Set its cycle length to 0 or disable moons entirely.', 'warning');
+            const cfg = getMoonConfig(chatId);
+            if (cfg.moons.length <= 1) {
+                nwstToast('Cannot remove the last moon. Disable moons entirely for a moonless world.', 'warning');
                 return;
             }
-            m.splice(i, 1);
-            setSetting('moons', m);
+
+            const removedMoonId = cfg.moons[i]?.id || '';
+            const promotedMoonId = i === 0 ? (cfg.moons[1]?.id || '') : '';
+            cfg.moons.splice(i, 1);
+            cfg.moons[0].id = 'primary';
+            cfg.moonCycleDays = cfg.moons[0].cycleDays || cfg.moonCycleDays;
+            await saveMoonConfig(chatId, cfg);
+
+            // A moon-specific anomaly must never silently become an all-moons
+            // anomaly after its target is removed. Drop overrides belonging to
+            // the deleted moon, and retarget the newly promoted primary moon.
+            const overrides = getMoonPhenomenonOverrides(chatId);
+            const reconciledOverrides = overrides
+                .filter(override => override.moonId !== removedMoonId)
+                .map(override => promotedMoonId && override.moonId === promotedMoonId
+                    ? { ...override, moonId: 'primary' }
+                    : override);
+            if (reconciledOverrides.length !== overrides.length || promotedMoonId) {
+                await saveMoonPhenomenonOverrides(chatId, reconciledOverrides);
+            }
+
             renderMoonsList();
+            renderMoonOverridesList();
+            await refreshMoonStripsAfterConfigChange();
         });
 
         container.appendChild(clone);
+    }
+}
+
+function currentOverrideDate() {
+    const chatId = getChatId();
+    const cal = getCalendarConfig(chatId);
+    const day = getCurrentDay(chatId) || {};
+    const dmy = getSetting('dateFormatDMY') === true;
+    return parseCurrentCalendarDate(day.dateDisplay || '', day.dateSub || '', cal, dmy)
+        || dateFromDayCount(day.dayCount || 1, extractYearFromText(day.dateSub || '') || extractYearFromText(day.dateDisplay || '') || 1, cal);
+}
+
+function readOverrideDate(row, prefix) {
+    const year = parseInt(row.querySelector(`.nwst-moon-override-${prefix}-year`)?.value, 10);
+    const month = parseInt(row.querySelector(`.nwst-moon-override-${prefix}-month`)?.value, 10);
+    const day = parseInt(row.querySelector(`.nwst-moon-override-${prefix}-day`)?.value, 10);
+    if (!Number.isInteger(year) || year === 0 || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+    return { year, month, day };
+}
+
+function validateOverrideDate(date, calendarConfig) {
+    if (!date) return false;
+    const lengths = monthLengthsFor(calendarConfig, date.year);
+    return date.month >= 1 && date.month <= lengths.length && date.day >= 1 && date.day <= lengths[date.month - 1];
+}
+
+function renderMoonOverridesList() {
+    const container = document.getElementById('nwst-moon-overrides-list');
+    if (!container) return;
+    const chatId = getChatId();
+    const overrides = getMoonPhenomenonOverrides(chatId);
+    const moons = getMoonConfig(chatId).moons || [];
+    const template = document.getElementById('nwst-moon-override-tpl');
+    if (!template) return;
+
+    if (overrides.length === 0) {
+        container.innerHTML = '<div style="font-size:11px;color:#999;font-style:italic">No manual moon phenomena overrides.</div>';
+        return;
+    }
+
+    container.innerHTML = '';
+    overrides.forEach((override, index) => {
+        const clone = template.content.cloneNode(true);
+        const row = clone.querySelector('.nwst-moon-override-entry');
+        const enabled = row.querySelector('.nwst-moon-override-enabled');
+        const moonSelect = row.querySelector('.nwst-moon-override-moon');
+        const typeSelect = row.querySelector('.nwst-moon-override-type');
+        const custom = row.querySelector('.nwst-moon-override-custom');
+        const description = row.querySelector('.nwst-moon-override-description');
+        const remove = row.querySelector('.nwst-moon-override-remove');
+
+        enabled.checked = override.enabled !== false;
+        moonSelect.innerHTML = '<option value="all">All moons</option>' + moons.map(m => `<option value="${escapeHtmlLocal(m.id)}">${escapeHtmlLocal(m.name)}</option>`).join('');
+        moonSelect.value = override.moonId || 'all';
+        typeSelect.innerHTML = MOON_OVERRIDE_PHENOMENA.map(item => `<option value="${escapeHtmlLocal(item.value)}">${escapeHtmlLocal(item.label)}</option>`).join('');
+        typeSelect.value = override.phenomenon || '__custom__';
+        custom.value = override.customLabel || '';
+        custom.style.display = typeSelect.value === '__custom__' ? 'block' : 'none';
+        description.value = override.description || '';
+
+        for (const [prefix, date] of [['start', override.startDate], ['end', override.endDate]]) {
+            row.querySelector(`.nwst-moon-override-${prefix}-year`).value = date?.year ?? '';
+            row.querySelector(`.nwst-moon-override-${prefix}-month`).value = date?.month ?? '';
+            row.querySelector(`.nwst-moon-override-${prefix}-day`).value = date?.day ?? '';
+        }
+
+        typeSelect.addEventListener('change', () => {
+            custom.style.display = typeSelect.value === '__custom__' ? 'block' : 'none';
+        });
+        remove.addEventListener('click', async () => {
+            const current = getMoonPhenomenonOverrides(chatId);
+            current.splice(index, 1);
+            await saveMoonPhenomenonOverrides(chatId, current);
+            renderMoonOverridesList();
+            await refreshMoonStripsAfterConfigChange();
+        });
+        container.appendChild(clone);
+    });
+}
+
+async function collectAndSaveMoonOverrides() {
+    const chatId = getChatId();
+    const calendarConfig = getCalendarConfig(chatId);
+    const existing = getMoonPhenomenonOverrides(chatId);
+    const rows = document.querySelectorAll('#nwst-moon-overrides-list .nwst-moon-override-entry');
+    const overrides = [];
+    for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const startDate = readOverrideDate(row, 'start');
+        const endDate = readOverrideDate(row, 'end') || startDate;
+        if (!validateOverrideDate(startDate, calendarConfig) || !validateOverrideDate(endDate, calendarConfig)) {
+            nwstToast(`Moon override ${i + 1} has an invalid calendar date.`, 'error');
+            return false;
+        }
+        const span = daysBetweenCalendarDates(startDate, endDate, calendarConfig);
+        if (!Number.isInteger(span) || span < 0) {
+            nwstToast(`Moon override ${i + 1} ends before it starts.`, 'error');
+            return false;
+        }
+        const phenomenon = row.querySelector('.nwst-moon-override-type').value;
+        const customLabel = row.querySelector('.nwst-moon-override-custom').value.trim();
+        if (phenomenon === '__custom__' && !customLabel) {
+            nwstToast(`Moon override ${i + 1} needs a custom phenomenon label.`, 'error');
+            return false;
+        }
+        overrides.push({
+            id: existing[i]?.id || `moon_override_${Date.now()}_${i}`,
+            enabled: row.querySelector('.nwst-moon-override-enabled').checked,
+            moonId: row.querySelector('.nwst-moon-override-moon').value || 'all',
+            phenomenon,
+            customLabel,
+            description: row.querySelector('.nwst-moon-override-description').value.trim(),
+            startDate,
+            endDate
+        });
+    }
+    await saveMoonPhenomenonOverrides(chatId, overrides);
+    return true;
+}
+
+async function refreshMoonStripsAfterConfigChange() {
+    try {
+        const { regenerateMoonPhasesOnly } = await import('../llm/dayAdvancement.js');
+        await regenerateMoonPhasesOnly();
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+    } catch (e) {
+        console.warn('[NWST Settings UI] Moon strip refresh failed:', e);
     }
 }
 
@@ -1565,47 +1865,126 @@ function wireSettingsEvents() {
         if (num >= 1 && num <= 100) setScanFrequency(num);
     });
 
-    // ── Moon cycle ─────────────────────────────────────────────
-    wireInput('nwst-setting-moonCycleDays', (val) => {
+    // ── Moon cycle (per-chat) ─────────────────────────────────
+    wireInput('nwst-setting-moonCycleDays', async (val) => {
         const num = parseFloat(val);
-        if (num >= 1 && num <= 999) setSetting('moonCycleDays', num);
-    });
-    wireCheckbox('nwst-setting-enableMoons', (checked) => setSetting('enableMoons', checked));
-    wireCheckbox('nwst-setting-enableMoonPhenomena', (checked) => setSetting('enableMoonPhenomena', checked));
-
-    // ── Add Moon button ────────────────────────────────────────
-    const addMoonBtn = document.getElementById('nwst-setting-addMoon');
-    if (addMoonBtn) {
-        addMoonBtn.addEventListener('click', async () => {
-            const moons = getSetting('moons') || [];
-            const newId = 'moon_' + Date.now();
-            moons.push({ id: newId, name: 'New Moon', cycleDays: 29.53, enabled: true });
-            setSetting('moons', moons);
+        if (num >= 1 && num <= 999) {
+            const cfg = getMoonConfig(getChatId());
+            cfg.moonCycleDays = num;
+            if (cfg.moons[0]) cfg.moons[0].cycleDays = num;
+            await saveMoonConfig(getChatId(), cfg);
             renderMoonsList();
+            await refreshMoonStripsAfterConfigChange();
+        }
+    });
+    wireCheckbox('nwst-setting-enableMoons', async (checked) => {
+        await updateMoonConfig(getChatId(), { enableMoons: checked });
+        await refreshMoonStripsAfterConfigChange();
+    });
+    wireCheckbox('nwst-setting-enableMoonPhenomena', async (checked) => {
+        await updateMoonConfig(getChatId(), { enableMoonPhenomena: checked });
+        await refreshMoonStripsAfterConfigChange();
+    });
+
+    const saveMoonsBtn = document.getElementById('nwst-setting-saveMoons');
+    if (saveMoonsBtn) {
+        saveMoonsBtn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const chatId = getChatId();
+            const container = document.getElementById('nwst-moons-list');
+            if (!container) return;
+            const cfg = getMoonConfig(chatId);
+            const existing = cfg.moons || [];
+            const rows = container.querySelectorAll('.nwst-moon-entry');
+            const moons = [];
+            rows.forEach((row, i) => {
+                const name = row.querySelector('.nwst-moon-name')?.value?.trim() || 'The Moon';
+                const cycle = parseFloat(row.querySelector('.nwst-moon-cycle')?.value) || 29.53;
+                const enabled = row.querySelector('.nwst-moon-enabled')?.checked !== false;
+                moons.push({
+                    id: i === 0 ? 'primary' : (existing[i]?.id || `moon_${Date.now()}_${i}`),
+                    name,
+                    cycleDays: cycle > 0 ? cycle : 29.53,
+                    enabled
+                });
+            });
+            cfg.moons = moons;
+            if (moons[0]) cfg.moonCycleDays = moons[0].cycleDays;
+            await saveMoonConfig(chatId, cfg);
+            await refreshMoonStripsAfterConfigChange();
+            nwstToast(`Moon settings saved for this chat (${moons.length} moon${moons.length === 1 ? '' : 's'}).`, 'success');
         });
     }
 
-    // ── Restore moons to default ──────────────────────────────────
+    const addMoonBtn = document.getElementById('nwst-setting-addMoon');
+    if (addMoonBtn) {
+        addMoonBtn.addEventListener('click', async () => {
+            const cfg = getMoonConfig(getChatId());
+            cfg.moons.push({ id: `moon_${Date.now()}`, name: 'New Moon', cycleDays: 29.53, enabled: true });
+            await saveMoonConfig(getChatId(), cfg);
+            renderMoonsList();
+            renderMoonOverridesList();
+        });
+    }
+
     const restoreMoonsBtn = document.getElementById('nwst-setting-restoreDefaultMoons');
     if (restoreMoonsBtn) {
         restoreMoonsBtn.addEventListener('click', async () => {
             const confirmed = await SillyTavern.getContext().callGenericPopup(
-                'This will reset all moon cycle settings to their defaults (enable moons, cycle length, phenomena, and configured moons). Continue?',
+                'This will reset moon cycle settings for the current chat. Manual phenomenon overrides will be preserved. Continue?',
                 SillyTavern.getContext().POPUP_TYPE.CONFIRM,
                 '',
             );
             if (!confirmed) return;
-            setSetting('enableMoons', true);
-            setSetting('moonCycleDays', 29.53);
-            setSetting('enableMoonPhenomena', true);
-            setSetting('moons', [{ id: 'primary', name: 'The Moon', cycleDays: 29.53, enabled: true }]);
-            // Refresh UI
+            await saveMoonConfig(getChatId(), {
+                enableMoons: true,
+                moonCycleDays: 29.53,
+                enableMoonPhenomena: true,
+                moons: [{ id: 'primary', name: 'The Moon', cycleDays: 29.53, enabled: true }]
+            });
             const moonCycleInput = document.getElementById('nwst-setting-moonCycleDays');
             if (moonCycleInput) moonCycleInput.value = 29.53;
             setCheckbox('nwst-setting-enableMoons', true);
             setCheckbox('nwst-setting-enableMoonPhenomena', true);
             renderMoonsList();
-            nwstToast('Moon cycle settings restored to defaults.', 'success');
+            renderMoonOverridesList();
+            await refreshMoonStripsAfterConfigChange();
+            nwstToast('Moon cycle settings restored for this chat.', 'success');
+        });
+    }
+
+    const addOverrideBtn = document.getElementById('nwst-setting-addMoonOverride');
+    if (addOverrideBtn) {
+        addOverrideBtn.addEventListener('click', async () => {
+            const chatId = getChatId();
+            const date = currentOverrideDate();
+            if (!date) {
+                nwstToast('Set or repair the Current Day date before adding a moon override.', 'warning');
+                return;
+            }
+            const overrides = getMoonPhenomenonOverrides(chatId);
+            overrides.push({
+                id: `moon_override_${Date.now()}`,
+                enabled: true,
+                moonId: 'all',
+                phenomenon: '🌕 Blood Moon',
+                customLabel: '',
+                description: '',
+                startDate: { ...date },
+                endDate: { ...date }
+            });
+            await saveMoonPhenomenonOverrides(chatId, overrides);
+            renderMoonOverridesList();
+        });
+    }
+
+    const saveOverridesBtn = document.getElementById('nwst-setting-saveMoonOverrides');
+    if (saveOverridesBtn) {
+        saveOverridesBtn.addEventListener('click', async () => {
+            if (!await collectAndSaveMoonOverrides()) return;
+            await refreshMoonStripsAfterConfigChange();
+            nwstToast('Moon phenomenon overrides saved for this chat.', 'success');
         });
     }
 
@@ -1819,6 +2198,151 @@ function wireSettingsEvents() {
         });
     }
 
+    // ── Starting Date (deterministic date engine) ─────────────────────
+    const saveEraPinBtn = document.getElementById('nwst-setting-saveEraPin');
+    if (saveEraPinBtn) {
+        saveEraPinBtn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const pinInput = document.getElementById('nwst-setting-eraPin');
+            const pin = pinInput?.value?.trim() || '';
+            await saveEraPin(chatId, pin);
+            const cfg = getCalendarConfig(chatId);
+            if (pin && cfg.enabled) {
+                nwstToast('Era saved — note: a custom calendar is enabled, which uses its own Era name field instead.', 'warning');
+                return;
+            }
+            if (pin) {
+                // Information only — applied at the next day advance,
+                // timeskip, or warmup via the player-verified era notice.
+                nwstToast(`Era saved: ${pin} — applies from the next day advance or warmup.`, 'success');
+            } else {
+                nwstToast('Era pin cleared — the LLM manages the era label again.', 'info');
+            }
+        });
+    }
+
+    const dmyToggle = document.getElementById('nwst-setting-dateFormatDMY');
+    if (dmyToggle) {
+        dmyToggle.addEventListener('change', () => {
+            setSetting('dateFormatDMY', dmyToggle.checked);
+        });
+    }
+
+    const leapToggle = document.getElementById('nwst-setting-leapYears');
+    if (leapToggle) {
+        leapToggle.addEventListener('change', async () => {
+            const chatId = getChatId();
+            if (!chatId) return;
+            const config = getCalendarConfig(chatId);
+            config.leapYears = leapToggle.checked;
+            await saveCalendarConfig(chatId, config);
+        });
+    }
+
+    const setStartBtn = document.getElementById('nwst-setting-setStartDate');
+    if (setStartBtn) {
+        setStartBtn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+
+            const existing = getStartDate(chatId);
+            if (existing?.locked) { nwstToast('The starting date is locked for this chat.', 'warning'); return; }
+
+            const input = document.getElementById('nwst-setting-startDate');
+            const text = input?.value?.trim() || '';
+            if (!text) { nwstToast('Enter a date first.', 'warning'); return; }
+
+            const dmy = getSetting('dateFormatDMY') === true;
+            const cfgForParse = getCalendarConfig(chatId);
+            const parsed = cfgForParse.enabled
+                ? (parseDisplayDate(text, cfgForParse) || parseUserDate(text, dmy, cfgForParse))
+                : parseUserDate(text, dmy);
+            if (!parsed) {
+                nwstToast(cfgForParse.enabled
+                    ? 'Couldn\u2019t read that date. Use your configured month names (e.g. "Duskmonth 3rd, 312") or numbers (e.g. 13/5/312).'
+                    : 'Couldn\u2019t read that date. Accepted formats: 1/1/26, 01/01/2026, January 1st, 2026.', 'error');
+                return;
+            }
+
+            // Show the parsed interpretation back to the user — this is what
+            // makes the day/month ambiguity of slash dates safe to accept.
+            const cfg = getCalendarConfig(chatId);
+            const names = monthNamesFor(cfg);
+            const monthName = names[Math.min(parsed.month - 1, names.length - 1)] || `Month ${parsed.month}`;
+            let interpreted = `${monthName} ${parsed.day}${ordinalSuffix(parsed.day)}, ${formatYear(parsed.year)}`;
+            if (!cfg.enabled && Array.isArray(cfg.weekDays) && cfg.weekDays.length === 7) {
+                const wdIdx = gregorianWeekdayIndex(parsed.year, parsed.month, parsed.day);
+                interpreted = `${cfg.weekDays[wdIdx] || ''}, ${interpreted}`;
+            }
+
+            // Starting Date can be entered late. It never rewinds the current
+            // calendar or narrative state; when a Current Day already exists,
+            // elapsedStoryDays is recalculated from Starting Date -> Current Date
+            // and duration markers are rebased so existing event ages stay intact.
+            const cur = getCurrentDay(chatId);
+            const tracking = cur && Number.isInteger(cur.dayCount) && cur.dayCount > 0;
+            let currentDateForRebase = null;
+            let elapsedForRebase = null;
+            if (tracking) {
+                currentDateForRebase = parseCurrentCalendarDate(cur.dateDisplay || '', cur.dateSub || '', cfg, dmy);
+                if (!currentDateForRebase) {
+                    // Last-resort compatibility path for unusual legacy displays:
+                    // if the absolute year is still available, rebuild month/day
+                    // from the already-migrated cyclical dayCount.
+                    const currentYear = extractYearFromText(cur.dateSub || '')
+                        ?? extractYearFromText(cur.dateDisplay || '');
+                    if (Number.isInteger(currentYear)) {
+                        currentDateForRebase = dateFromDayCount(cur.dayCount, currentYear, cfg);
+                    }
+                }
+                if (!currentDateForRebase) {
+                    nwstToast('NWST could not identify the current canonical date, so the Starting Date was not locked. Check the Current Day date/year and try again.', 'error');
+                    return;
+                }
+
+                elapsedForRebase = daysBetweenCalendarDates(parsed, currentDateForRebase, cfg);
+                if (!Number.isInteger(elapsedForRebase)) {
+                    nwstToast('NWST could not calculate elapsed story days from the current calendar. Nothing was changed.', 'error');
+                    return;
+                }
+                if (elapsedForRebase < 0) {
+                    nwstToast('The starting date cannot be later than the current story date. Nothing was changed.', 'error');
+                    return;
+                }
+            }
+            const consequence = tracking
+                ? 'Your current world state and calendar date will not change. NWST will recalculate elapsed story days from this date to the current displayed date and preserve existing event ages.'
+                : 'Warmup will use this as the authoritative starting date instead of inferring one from the roleplay text.';
+
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+            const confirmed = await callGenericPopup(
+                `Set the starting date to:<br><br><b>${interpreted}</b><br><br>${consequence}<br><br>This is a one-time entry — once confirmed it locks permanently. Are you sure this date is correct?`,
+                POPUP_TYPE.CONFIRM,
+                '',
+                { okButton: 'Yes, lock it in', cancelButton: 'Cancel' }
+            );
+            if (!confirmed) return;
+
+            // Preserve legacy anchor metadata for backward compatibility, but
+            // Starting Date now also establishes elapsedStoryDays when Current
+            // Day is already populated.
+            const anchor = { ...parsed, anchorDayCount: existing?.anchorDayCount ?? null, source: 'user', locked: true };
+            await saveStartDate(chatId, anchor);
+
+            if (tracking) {
+                await rebaseElapsedStoryDays(chatId, elapsedForRebase);
+            }
+
+            populateStartDateUI();
+            nwstToast(`Starting date saved: ${interpreted}`, 'success');
+        });
+    }
+
     const monthCountInput = document.getElementById('nwst-setting-monthCount');
     if (monthCountInput) {
         monthCountInput.addEventListener('change', async () => {
@@ -1862,9 +2386,20 @@ function wireSettingsEvents() {
 
     const saveCalBtn = document.getElementById('nwst-setting-saveCalendarConfig');
     if (saveCalBtn) {
-        saveCalBtn.addEventListener('click', async () => {
+        saveCalBtn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
             const chatId = getChatId();
             if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+
+            const unnamedSpecialDay = Array.from(document.querySelectorAll('#nwst-special-days-list .nwst-special-day-entry'))
+                .find(row => !row.querySelector('.nwst-sd-name')?.value?.trim());
+            if (unnamedSpecialDay) {
+                nwstToast('Give each special day a name before saving.', 'warning');
+                unnamedSpecialDay.querySelector('.nwst-sd-name')?.focus();
+                return;
+            }
+
             // Read current values from DOM
             const monthEntries = document.querySelectorAll('#nwst-calendar-months-list .nwst-month-entry');
             const config = getCalendarConfig(chatId);
@@ -1889,6 +2424,10 @@ function wireSettingsEvents() {
                     config.weekDays.push(nameInput.value.trim() || `Day ${config.weekDays.length + 1}`);
                 }
             });
+
+            // Era name for custom calendars (deterministic date engine sub-line)
+            const eraInput = document.getElementById('nwst-setting-eraName');
+            if (eraInput) config.eraName = eraInput.value.trim();
 
             // Special days are managed by their own cards (per-card save);
             // config already carries the stored list, so global save keeps
@@ -1951,8 +2490,18 @@ function wireSettingsEvents() {
             const dayCountInput = document.getElementById('nwst-setting-dayCount');
             if (!dayCountInput) return;
             const newCount = parseInt(dayCountInput.value, 10);
-            if (isNaN(newCount) || newCount < 0) {
-                nwstToast('Day count must be a non-negative integer.', 'warning');
+            if (isNaN(newCount) || newCount < 1) {
+                nwstToast('Day count must be a positive 1-based calendar day.', 'warning');
+                return;
+            }
+            const current = getCurrentDay(chatId);
+            const cfg = getCalendarConfig(chatId);
+            const year = extractYearFromText(current?.dateSub || '')
+                ?? extractYearFromText(current?.dateDisplay || '')
+                ?? 1;
+            const maxDay = yearLengthFor(cfg, year);
+            if (newCount > maxDay) {
+                nwstToast(`Day count must be between 1 and ${maxDay} for the current configured calendar year.`, 'warning');
                 return;
             }
             await updateCurrentDay(chatId, { dayCount: newCount });
@@ -1976,6 +2525,14 @@ function wireSettingsEvents() {
                 const chatId = getChatId();
                 const success = await importAll(chatId, text);
                 if (success) {
+                    // Imported exports may predate cyclical dayCount / elapsed
+                    // duration bookkeeping. Migrate immediately so users do not
+                    // need to reload or switch chats before the imported state is
+                    // safe to use.
+                    const { migrateEventData } = await import('../data/events.js');
+                    await migrateEventData(chatId);
+                    const { migrateTemporalState } = await import('../data/timeMigration.js');
+                    await migrateTemporalState(chatId);
                     populateSettingsUI();
                     if (typeof window?.nwstRefreshTabs === 'function') {
                         window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
@@ -2048,6 +2605,77 @@ function wireSettingsEvents() {
             nwstToast(debugLoggingToggle.checked
                 ? 'Debug logging enabled. Open the browser console (F12) to watch NWST work.'
                 : 'Debug logging disabled.', 'info');
+        });
+    }
+
+    const debugAdoptDates = document.getElementById('nwst-debug-adopt-dates');
+    if (debugAdoptDates) {
+        debugAdoptDates.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+
+            const cur = getCurrentDay(chatId);
+            if (!cur || !Number.isInteger(cur.dayCount) || cur.dayCount <= 0) {
+                nwstToast('NWST has no populated Current Day in this chat — run warmup first.', 'warning');
+                return;
+            }
+
+            const cfg = getCalendarConfig(chatId);
+            const existing = getStartDate(chatId);
+            const dmy = getSetting('dateFormatDMY') === true;
+
+            // Read the CURRENT canonical date through the same custom-calendar
+            // parser used by temporal migration. This supports LLM-written date
+            // lines whose month names come from Calendar Config, including
+            // configured month names that themselves contain commas.
+            let parsed = parseCurrentCalendarDate(cur.dateDisplay || '', cur.dateSub || '', cfg, dmy);
+            let derived = false;
+            if (!parsed) {
+                let year = extractYearFromText(cur.dateSub || '');
+                if (year === null) year = extractYearFromText(cur.dateDisplay || '');
+                if (year === null) {
+                    const { callGenericPopup: popupIn, POPUP_TYPE: PT } = SillyTavern.getContext();
+                    const answer = await popupIn(
+                        'What year is it currently in the story? (Needed once to place the cyclical day count on the calendar. Numbers only — add "BC" for ancient settings, e.g. "44 BC".)',
+                        PT.INPUT, ''
+                    );
+                    if (!answer || typeof answer !== 'string') { nwstToast('Adoption cancelled — no year provided.', 'info'); return; }
+                    const bcIn = /\bBCE?\b/i.test(answer);
+                    const num = parseInt(String(answer).replace(/[^\d]/g, ''), 10);
+                    if (!Number.isInteger(num) || num === 0) { nwstToast('Couldn’t read that year — adoption cancelled.', 'error'); return; }
+                    year = bcIn ? -num : num;
+                }
+                parsed = dateFromDayCount(cur.dayCount, year, cfg);
+                derived = true;
+            }
+
+            // Normalize the date without treating cyclical dayCount as an
+            // absolute timeline. A zero-day calendar advance preserves the
+            // configured weekday already written in a parseable date line.
+            const normalizedFromCurrent = advanceCurrentCalendarDate(cur, 0, cfg, dmy);
+            const normalized = normalizedFromCurrent || computeDeterministicDate(parsed, cur.dayCount, cur.dayCount, cfg);
+
+            const { callGenericPopup, POPUP_TYPE } = SillyTavern.getContext();
+            const confirmed = await callGenericPopup(
+                `Adopt computed dates for this chat?<br><br>Current date line: <b>${cur.dateDisplay}</b><br>Will display as: <b>${normalized.dateDisplay}</b>${derived ? '<br><span style="font-size:11px">(derived from the day counter + your Calendar Config — check it looks right before confirming)</span>' : ''}<br><br>The era sub-line ("${cur.dateSub || 'none'}") is not touched. From the next day advancement onward, dates, weekdays, and forecast day labels are computed from the current canonical date and your Calendar Config (LLM fallback if the displayed date cannot be parsed). The cyclical day counter, elapsed story days, events, notebook, and moons do not change.`,
+                POPUP_TYPE.CONFIRM,
+                '',
+                { okButton: 'Adopt', cancelButton: 'Cancel' }
+            );
+            if (!confirmed) return;
+
+            const record = existing
+                ? { ...existing }
+                : { ...parsed, source: 'scan', locked: false };
+            record.anchorDate = { year: parsed.year, month: parsed.month, day: parsed.day };
+            record.anchorDayCount = cur.dayCount;
+            await saveStartDate(chatId, record);
+            await updateCurrentDay(chatId, { dateDisplay: normalized.dateDisplay });
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+            populateStartDateUI();
+            nwstToast(`Date engine adopted: ${normalized.dateDisplay}`, 'success');
         });
     }
 
@@ -2279,6 +2907,7 @@ function wireSettingsEvents() {
             // Dynamic imports
             const { getAllSecrets, updateSecret } = await import('../data/notebook.js');
             const { resolveProfile, generateWithProfile } = await import('../llm/connections.js');
+            const { LLM_TOKEN_BUDGETS } = await import('../llm/tokenBudgets.js');
             const secrets = getAllSecrets(chatId);
             if (!secrets || secrets.length === 0) {
                 nwstToast('No secrets found to evaluate.', 'warning');
@@ -2367,7 +2996,7 @@ Analyze each secret carefully. Consider:
             };
 
             try {
-                const response = await generateWithProfile(profile, [systemMessage, userMessage], { maxTokens: 4096 });
+                const response = await generateWithProfile(profile, [systemMessage, userMessage], { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
                 if (!response) {
                     nwstToast('AI Auto-Adjust failed — LLM returned empty response.', 'error');
                     return;
@@ -2461,7 +3090,8 @@ Analyze each secret carefully. Consider:
                 return;
             }
 
-            // Parse "M/D" → [month, day]
+            // Parse "M/D" → [configured month index, day]. This debug tool
+            // follows the active Calendar Config rather than assuming 12 months.
             const parts = raw.split('/');
             if (parts.length !== 2) {
                 nwstToast('Invalid format. Use M/D (e.g. 1/12 or 5/31).', 'warning');
@@ -2470,31 +3100,30 @@ Analyze each secret carefully. Consider:
 
             const month = parseInt(parts[0], 10);
             const day = parseInt(parts[1], 10);
+            const calendarConfig = getCalendarConfig(chatId);
+            const currentDay = getCurrentDay(chatId);
+            const parsedCurrent = parseCurrentCalendarDate(
+                currentDay?.dateDisplay || '', currentDay?.dateSub || '', calendarConfig,
+                getSetting('dateFormatDMY') === true
+            );
+            const year = parsedCurrent?.year
+                ?? extractYearFromText(currentDay?.dateSub || '')
+                ?? extractYearFromText(currentDay?.dateDisplay || '')
+                ?? 1;
+            const monthDays = monthLengthsFor(calendarConfig, year);
 
-            if (isNaN(month) || isNaN(day) || month < 1 || month > 12 || day < 1) {
-                nwstToast('Invalid date. Month must be 1–12 and day must be a positive number.', 'warning');
+            if (isNaN(month) || isNaN(day) || month < 1 || month > monthDays.length || day < 1) {
+                nwstToast(`Invalid date. Month must be 1–${monthDays.length} and day must be a positive number.`, 'warning');
                 return;
             }
 
-            // Get calendar config's monthDays (use standard as fallback)
-            const calendarConfig = getCalendarConfig(chatId);
-            const monthDays = calendarConfig?.monthDays || [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-            // Validate day against the selected month's max days
             const maxDay = monthDays[month - 1];
             if (!maxDay || day > maxDay) {
                 nwstToast(`Month ${month} has only ${maxDay || '?'} days. Day ${day} is out of range.`, 'warning');
                 return;
             }
 
-            // Compute day-of-year: sum of preceding months' days + current day
-            let dayOfYear = 0;
-            for (let i = 0; i < month - 1; i++) {
-                dayOfYear += monthDays[i];
-            }
-            dayOfYear += day;
-
-            const currentDay = getCurrentDay(chatId);
+            const dayOfYear = dayOfYearFor({ year, month, day }, calendarConfig);
 
             // Save immediately
             await updateCurrentDay(chatId, { ...currentDay, dayCount: dayOfYear, dayCountAutoSet: true });

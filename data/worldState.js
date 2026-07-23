@@ -132,6 +132,28 @@ export async function replaceMoonPhases(chatId, moonPhases) {
     await saveWorldState(chatId, ws);
 }
 
+/**
+ * Get the extra-moon states (every configured moon beyond the first).
+ * The primary moon keeps the legacy lunarAngle/moonPhases fields untouched.
+ * @param {string} chatId
+ * @returns {Array<{id:string, name:string, cycleDays:number, angle:number, phases:object[]}>}
+ */
+export function getExtraMoons(chatId) {
+    const ws = getWorldState(chatId);
+    return Array.isArray(ws.extraMoons) ? ws.extraMoons : [];
+}
+
+/**
+ * Replace the extra-moon states.
+ * @param {string} chatId
+ * @param {Array} extraMoons
+ */
+export async function saveExtraMoons(chatId, extraMoons) {
+    const ws = getWorldState(chatId);
+    ws.extraMoons = Array.isArray(extraMoons) ? extraMoons : [];
+    await saveWorldState(chatId, ws);
+}
+
 // ── World Conditions ──────────────────────────────────────────────────────
 
 /**
@@ -295,10 +317,15 @@ export function getCalendarConfig(chatId) {
                 ? stored.startWeekday
                 : 1,
             // Player-defined recurring calendar days (see data/specialDays.js).
-            specialDays: Array.isArray(stored.specialDays) ? stored.specialDays : []
+            specialDays: Array.isArray(stored.specialDays) ? stored.specialDays : [],
+            // Optional era label for custom calendars ("Third Age {year}").
+            eraName: typeof stored.eraName === 'string' ? stored.eraName : '',
+            // Gregorian leap-year toggle. Defaults ON so real-world dates stay
+            // true; ignored entirely when a custom calendar is enabled.
+            leapYears: stored.leapYears !== false
         };
     }
-    return { ...DEFAULT_CALENDAR_CONFIG, monthNames: [...DEFAULT_CALENDAR_CONFIG.monthNames], monthDays: [...DEFAULT_CALENDAR_CONFIG.monthDays], weekDays: [...DEFAULT_CALENDAR_CONFIG.weekDays], startWeekday: 1, specialDays: [] };
+    return { ...DEFAULT_CALENDAR_CONFIG, monthNames: [...DEFAULT_CALENDAR_CONFIG.monthNames], monthDays: [...DEFAULT_CALENDAR_CONFIG.monthDays], weekDays: [...DEFAULT_CALENDAR_CONFIG.weekDays], startWeekday: 1, specialDays: [], eraName: '', leapYears: true };
 }
 
 /**
@@ -308,6 +335,68 @@ export function getCalendarConfig(chatId) {
  */
 export async function saveCalendarConfig(chatId, config) {
     await setChatData(chatId, 'calendarConfig', config);
+}
+
+// ── Starting Date / elapsed-story baseline ───────────────────────────────
+
+/**
+ * Get the Starting Date used as elapsedStoryDays = 0 for this chat.
+ * @param {string} chatId
+ * @returns {object|null} { year, month, day, anchorDayCount, source, locked } or null
+ */
+export function getStartDate(chatId) {
+    const stored = getChatData(chatId, 'startDate');
+    if (stored && typeof stored === 'object'
+        && Number.isInteger(stored.year) && stored.year !== 0
+        && Number.isInteger(stored.month) && stored.month >= 1
+        && Number.isInteger(stored.day) && stored.day >= 1) {
+        return {
+            year: stored.year,
+            month: stored.month,
+            day: stored.day,
+            // Legacy compatibility field from the older anchor-driven date engine.
+            anchorDayCount: Number.isInteger(stored.anchorDayCount) ? stored.anchorDayCount : null,
+            source: stored.source === 'user' ? 'user' : 'scan',
+            locked: stored.locked === true,
+            // Legacy compatibility field set by Adopt Computed Dates. The
+            // cyclical calendar no longer advances from this anchor.
+            anchorDate: (stored.anchorDate && typeof stored.anchorDate === 'object'
+                && Number.isInteger(stored.anchorDate.year) && stored.anchorDate.year !== 0
+                && Number.isInteger(stored.anchorDate.month) && stored.anchorDate.month >= 1
+                && Number.isInteger(stored.anchorDate.day) && stored.anchorDate.day >= 1)
+                ? { year: stored.anchorDate.year, month: stored.anchorDate.month, day: stored.anchorDate.day }
+                : null
+        };
+    }
+    return null;
+}
+
+/**
+ * Save the Starting Date / elapsed-story baseline.
+ * @param {string} chatId
+ * @param {object|null} anchor
+ */
+export async function saveStartDate(chatId, anchor) {
+    await setChatData(chatId, 'startDate', anchor);
+}
+
+/**
+ * Get the player-pinned era label (real-world calendars only).
+ * @param {string} chatId
+ * @returns {string} '' when unset
+ */
+export function getEraPin(chatId) {
+    const stored = getChatData(chatId, 'eraPin');
+    return typeof stored === 'string' ? stored.trim() : '';
+}
+
+/**
+ * Save (or clear, with '') the player-pinned era label.
+ * @param {string} chatId
+ * @param {string} pin
+ */
+export async function saveEraPin(chatId, pin) {
+    await setChatData(chatId, 'eraPin', typeof pin === 'string' ? pin.trim() : '');
 }
 
 // ── Snapshots ─────────────────────────────────────────────────────────────
@@ -350,10 +439,10 @@ export async function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsS
     };
 
     // ── Prune oldest snapshots if over the cap ────────────────────────────
-    // Keeps the per-chat file size bounded. Oldest snapshots are pruned first
-    // since they represent the most distant past and are least likely to be needed.
-    // batch_scan and pre_skip snapshots are always preserved — they are landmarks,
-    // not regular cadence snapshots, and are explicitly meaningful to the user.
+    // Keeps regular snapshot history bounded. Oldest pruneable snapshots are removed
+    // first. batch_scan and pre_skip snapshots are protected landmarks and are never
+    // pruned; if protected landmarks alone exceed the configured target, the stored
+    // total can exceed that target.
     const maxCount = getMaxSnapshotCount();
     const allKeys = Object.keys(snapshots);
 

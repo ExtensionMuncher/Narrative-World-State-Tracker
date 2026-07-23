@@ -16,6 +16,7 @@ import {
 } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { getComputedSeason } from './dayAdvancement.js';
 import { dlog } from "../lib/debug.js";
 
@@ -36,7 +37,7 @@ CRITICAL RULE — NO CHARACTERS:
 Do NOT mention any named characters. Do NOT describe character actions, feelings, states, or presence. Do NOT reference what happened in the story. The Current Day block describes the WORLD, not the people in it. Characters are alive and moving — their states change message to message. The Current Day block is static ambient context. Any character reference will contaminate the main AI's generations by anchoring it to a past moment.
 
 WRONG (character contamination):
-"Dorian's oppressive aura has leaked into the room, thickening the atmosphere."
+"A failed ward has left the room charged with an uneasy magical pressure."
 "The shrine is quiet — the character is expected to arrive before sundown."
 
 RIGHT (world-only):
@@ -98,7 +99,7 @@ export async function synthesizeCurrentDay(chatId, profileOverride) {
             { role: 'user', content: userPrompt }
         ];
 
-        const response = await generateWithProfile(profile, messages);
+        const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
         const parsed = parseSynthesisResponse(response);
 
         if (!parsed) throw new Error('Failed to parse Current Day synthesis response.');

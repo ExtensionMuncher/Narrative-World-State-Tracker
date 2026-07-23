@@ -197,7 +197,7 @@ export function scoreSecret(secret, sceneContext, weights, sharedAnchors = new S
     // Set of all character-name tokens in the registry. Anchor and reveal-
     // condition matching must EXCLUDE these, because character presence is
     // already scored separately. Without this, every secret matches on shared
-    // character names ("mira", "kellan") that appear in both the secret's
+    // character names ("mira", "rowan") that appear in both the secret's
     // text and nearly every scene — inflating scores indiscriminately.
     const nameTokens = new Set();
     if (registry.allAliasStrings) {

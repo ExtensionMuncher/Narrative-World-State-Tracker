@@ -1,5 +1,6 @@
 /* eslint-disable */
 import { generateWithProfile } from './connections.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 // =============================================================================
 // NWST Batch Scan — llm/batchScan.js
 // =============================================================================
@@ -21,7 +22,8 @@ import { generateWithProfile } from './connections.js';
 
 import { getChatId, nwstToast } from '../utils.js';
 import { chatHasData } from '../data/storage.js';
-import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig, getSeasonConfig } from '../data/worldState.js';
+import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig, getSeasonConfig, getStartDate, saveStartDate, getEraPin } from '../data/worldState.js';
+import { computeDeterministicDate, dayOfYearFor, parseUserDate, parseCurrentCalendarDate, daysBetweenCalendarDates, startWeekdayForAnchor } from '../lib/calendarMath.js';
 import { getAllEvents } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile } from './connections.js';
@@ -92,7 +94,7 @@ function extractOrdinalValue(text, keyword) {
 /**
  * Build a month-name → index map from both English month names and an optional
  * calendar config. Calendar config month names take priority so custom names
- * (e.g. "Haru" for spring) can be matched.
+ * (e.g. a translated seasonal name) can be matched.
  * Also maps written ordinal month patterns like "eleventh month" → 11.
  * @param {object|null} calendarConfig
  * @returns {object} monthName → index (0=jan) mapping
@@ -111,7 +113,7 @@ function buildMonthMap(calendarConfig) {
                 const raw = customName.toLowerCase().trim();
                 if (raw) {
                     // Map the custom name to its index (0-based)
-                    map[raw] = Math.min(i, 11);
+                    map[raw] = i;
                 }
             }
         });
@@ -145,16 +147,17 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
     const monthMap = buildMonthMap(calendarConfig);
 
     // Get monthDays from calendar config or use defaults
-    const monthDays = (calendarConfig && Array.isArray(calendarConfig.monthDays) && calendarConfig.monthDays.length >= 12)
+    const monthDays = (calendarConfig && Array.isArray(calendarConfig.monthDays) && calendarConfig.monthDays.length > 0)
         ? calendarConfig.monthDays
         : [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    const isCustomCalendar = calendarConfig?.enabled === true;
 
     // Strip numeric ordinal suffixes (st, nd, rd, th) so "15th" becomes "15"
     const cleaned = dateStr.replace(/(\d+)(st|nd|rd|th)/gi, '$1');
 
     // ── Helper: compute day-of-year from monthIndex (0-based) and day (1-based) ──
     function computeFromMonthDay(monthIndex, day) {
-        if (monthIndex === undefined || monthIndex < 0 || monthIndex >= 12) return null;
+        if (monthIndex === undefined || monthIndex < 0 || monthIndex >= monthDays.length) return null;
         if (day < 1 || day > monthDays[monthIndex]) return null;
         let dayOfYear = day;
         for (let i = 0; i < monthIndex; i++) {
@@ -183,14 +186,22 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         const year = parseInt(monthDayYearMatch[3], 10);
         const monthIndex = monthMap[monthName];
         if (monthIndex !== undefined && day >= 1 && year >= 1) {
-            // With a year, use Date object for accurate day-of-year (handles leap years)
-            const date = new Date(year, monthIndex, day);
-            const startOfYear = new Date(year, 0, 0);
-            const diff = date - startOfYear;
-            const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
-            if (dayOfYear >= 1 && dayOfYear <= 366) {
-                dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from date "${dateStr}"`);
-                return dayOfYear;
+            if (isCustomCalendar) {
+                const result = computeFromMonthDay(monthIndex, day);
+                if (result !== null) {
+                    dlog(`[NWST BatchScan] Computed dayCount ${result} from custom date "${dateStr}"`);
+                    return result;
+                }
+            } else {
+                // Gregorian fallback: Date handles leap years.
+                const date = new Date(year, monthIndex, day);
+                const startOfYear = new Date(year, 0, 0);
+                const diff = date - startOfYear;
+                const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+                if (dayOfYear >= 1 && dayOfYear <= 366) {
+                    dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from date "${dateStr}"`);
+                    return dayOfYear;
+                }
             }
         }
     }
@@ -270,7 +281,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         const numMonth = dateStr.match(/\bMonth\s*(\d{1,2})\b/i);
         if (numMonth) {
             const m = parseInt(numMonth[1], 10);
-            if (m >= 1 && m <= 12) {
+            if (m >= 1 && m <= monthDays.length) {
                 monthIndex = m - 1;
                 monthSource = `numeric "Month ${m}"`;
             }
@@ -316,7 +327,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         const candidateMonthIndex = monthMap[monthName];
         if (candidateMonthIndex !== undefined && candidateDay >= 1 && candidateDay <= 31) {
             const year = extractYear(cleaned);
-            if (year) {
+            if (year && !isCustomCalendar) {
                 const date = new Date(year, candidateMonthIndex, candidateDay);
                 const startOfYear = new Date(year, 0, 0);
                 const diff = date - startOfYear;
@@ -326,7 +337,8 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
                     return dayOfYear;
                 }
             }
-            // No year found — use monthDays array
+            // Custom calendars, or dates without an absolute year, use the
+            // configured month lengths directly.
             const result = computeFromMonthDay(candidateMonthIndex, candidateDay);
             if (result !== null) {
                 dlog(`[NWST BatchScan] Computed dayCount ${result} from flexible scan (no year) "${dateStr}"`);
@@ -346,19 +358,27 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
         const month = parseInt(delimMatch[1], 10);
         const day = parseInt(delimMatch[2], 10);
         let year = parseInt(delimMatch[3], 10);
-        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        if (month >= 1 && month <= monthDays.length && day >= 1 && day <= (monthDays[month - 1] || 0)) {
             // Normalize 2-digit years: "24" → 2024, "99" → 1999
             if (year >= 0 && year < 100) {
                 year += year < 50 ? 2000 : 1900;
             }
             if (year >= 1000 && year <= 9999) {
-                const date = new Date(year, month - 1, day);
-                const startOfYear = new Date(year, 0, 0);
-                const diff = date - startOfYear;
-                const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
-                if (dayOfYear >= 1 && dayOfYear <= 366) {
-                    dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from delimited date "${dateStr}"`);
-                    return dayOfYear;
+                if (isCustomCalendar) {
+                    const result = computeFromMonthDay(month - 1, day);
+                    if (result !== null) {
+                        dlog(`[NWST BatchScan] Computed dayCount ${result} from custom delimited date "${dateStr}"`);
+                        return result;
+                    }
+                } else {
+                    const date = new Date(year, month - 1, day);
+                    const startOfYear = new Date(year, 0, 0);
+                    const diff = date - startOfYear;
+                    const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+                    if (dayOfYear >= 1 && dayOfYear <= 366) {
+                        dlog(`[NWST BatchScan] Computed dayCount ${dayOfYear} from delimited date "${dateStr}"`);
+                        return dayOfYear;
+                    }
                 }
             }
         }
@@ -396,6 +416,9 @@ After listing scenes, provide:
 
 === WORLD-LEVEL NOTE ===
 Distinguish between chat-detected events (things characters are actively discussing/planning) and world-level context (seasonal shifts, political undercurrents, environmental changes that could generate events even if no one mentioned them).
+
+=== MOTIVE GROUNDING ===
+When the prose explicitly states WHY a character acted, preserve that motive. Do not reinterpret fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior as confidence, strategy, dominance, bravery, or calculated control unless the text establishes it. Dramatic writing style is not evidence of a different motive.
 
 OUTPUT FORMAT:
 Scenes:
@@ -441,32 +464,63 @@ DO NOT include:
 
 The Current Day fields (season, weatherToday, flora, fauna, spiritualClimate) describe ambient world conditions only — what the world looks like, smells like, feels like at this moment.
 
-=== WORLD CONDITIONS — CHARACTER PROHIBITION ===
-World conditions describe macro-level states — the political atmosphere, social climate, spiritual texture. Characters and factions MAY be named when they define the condition (e.g. 'the syndicate's surveillance network'). What should NOT appear is specific character actions or personal states that belong in the chat log. Write as a perceptive observer describing forces at work, not events that occurred.
+=== WORLD CONDITIONS — MACRO / DURABLE STATE ===
+World conditions describe relatively durable political, social, spiritual/supernatural, and environmental circumstances around the story. Before writing one, mentally remove the protagonist and immediate active cast: the condition must still meaningfully describe an institution, faction, population, district, region, culture, social pattern, spiritual system, or environment.
 
-=== COMMUNITY SUMMARIES — ANALYTICAL DEPTH ===
-Community summaries are not plot recaps. They are analytical portraits of social groupings — the power dynamics, unspoken tensions, what characters are maneuvering around, what is really happening beneath the surface. Write them with insight and specificity. Reference specific moments that reveal something meaningful. Avoid generic observations.
+A named character MAY be identified when they are the clear cause of a genuine macro-level change and naming them prevents ambiguity, but the CHARACTER'S ACTION must not become the condition itself. A character can CAUSE the condition without BEING the condition.
+
+For each World Condition, think in exactly one of two modes:
+- GROUNDED: the analyzed chat/setting actually establishes the macro condition. Every factual claim must come directly from established source material or ONE conservative inference that introduces no new actor, reaction, institution, team, rumor, policy, coordination, awareness, or offscreen development.
+- AMBIENT: when no grounded story-derived macro condition exists, write a restrained low-stakes background condition consistent with Setting Context, calendar/season, and ordinary world life. Ambient conditions must not causally depend on the immediate cast.
+
+Do NOT invent invisible middle steps such as offscreen meetings, rumor circulation, institutional reactions, coordination, policy shifts, resource strain, public awareness, new teams/details, or faction-wide sentiment merely to make a local event sound macro. Preserve information asymmetry; one side knowing about another does not establish mutual awareness, détente, coordination, or reciprocal maneuvering. Do not create a new organization, team, task force, policy, institutional practice, rumor network, public reaction, resource shortage, or formal relationship unless the analyzed material establishes it. Avoid unsupported claims of unprecedented/historic/system-wide change.
+
+The wider world may contain small ambient developments unrelated to the immediate cast when they quietly demonstrate that the world exists beyond the protagonists. Named overarching institutions/factions are allowed, and modest current background developments within them are allowed when setting-consistent. Apply an AMBIENT PROPORTIONALITY TEST: if an invented development would reasonably force the active cast to change immediate plans, demand urgent follow-up, or substantially rewrite the playable world, it is too consequential unless Setting Context/current world state already supports that scale. Do not generate a flood of unrelated developments or casually invent war, coups, states of emergency, sweeping nationwide crackdowns/purges, mass civil disorder, economic collapse, catastrophic disasters, mass-casualty events, widespread infrastructure failure, or supernatural/metaphysical catastrophes. Prefer one coherent background theme rather than a bulletin list.
+
+CATEGORY BOUNDARIES / MACRO THRESHOLDS:
+- POLITICAL: institutions, factions, governance, territory, policy/regulatory pressure, leadership/hierarchy, organizational posture, or institutional/faction relationships. One case, restraining order, target, operative, surveillance post, arrest, or investigation is not macro by itself. AMBIENT Political may introduce modest institutional motion such as routine procedural guidance, staffing/budget pressure, promotion cycles, municipal initiatives, enforcement-priority shifts, or low-key faction/corporate maneuvering when those remain background-scale.
+- SOCIAL: collective behavior, norms, community/public routines, workplaces, commerce, social spaces, population habits, or group-level pressures. Private relationships/isolated interactions are not Social World State. Season/weather may explain behavior but must not dominate Social prose.
+- SPIRITUAL/SUPERNATURAL: durable metaphysical systems/pressures, supernatural factions, ritual cycles, regional phenomena, barriers/realms, or setting-supported spiritual conditions. Do not promote one character's aura/encounter/emotion into world-scale metaphysics, and do not invent supernatural ontology absent setting support.
+- ENVIRONMENTAL: durable climate/seasonal patterns, ecology, landscape, water/air conditions, regional hazards, flora/fauna shifts, or persistent environmental change. A single day's weather belongs in Current Day unless it represents a wider pattern.
+- A GROUNDED FACT is not automatically a GROUNDED WORLD CONDITION. If the material is accurate but remains case-specific, use a restrained AMBIENT condition instead of dressing the case up as macro state.
+
+=== COMMUNITY SUMMARIES — DURABLE COLLECTIVE STATE ===
+Community summaries are not plot recaps. Describe the group's durable structure, relationships, hierarchy, loyalties, fractures, collective pressures, reputation, objectives, and current collective posture. Recent scenes are evidence of those dynamics, not the subject of the summary. Membership/status must reflect the current group when the analyzed history establishes changes.
+
+Explicitly stated motives outrank dramatic stylistic inference. Do NOT turn fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior into confidence, strategy, dominance, bravery, or calculated control unless the prose establishes it. Do not make a character or group more competent, composed, sinister, romantic, strategic, or "badass" than the evidence supports.
+
+=== NOTEBOOK — CURRENT, SELF-CONSISTENT LEDGER ===
+The Notebook must represent the latest coherent state after the entire analyzed history, not preserve every superseded intermediate state.
+- characterWhereabouts: ONE latest-known location/activity per character. Never keep an earlier location alongside a later one for the same person.
+- offscreenPressure: one current pressure per source; discard superseded versions.
+- currentToneAtmosphere: one current tone only.
+- promiseThreatDeadline: active promises/threats/deadlines only; omit fulfilled, expired, or cancelled ones.
+- plantedDetails and unresolvedDetail: omit items that have already paid off or been definitively resolved.
+- inconsistenciesFlagged: include only contradictions that remain unresolved.
+- establishedFacts/doNotForget: preserve durable truth, but do not keep claims that later text explicitly corrected or contradicted.
+
+Across EVERY Notebook field, preserve explicitly stated motives. Dramatic prose style must not override a stated reason for an action.
 
 === EVENTS — FORWARD FACING PROJECTIONS ONLY ===
 Events describe what is COMING NEXT in the story, NOT what has already happened.
 
 CRITICAL RULE — DO NOT put past-tense summaries of chat content into events:
-WRONG (past — what already happened): "Dorian presented old letters to trigger memory"
-RIGHT (future — what happens next): "Dorian may escalate his memory-triggering attempts with more direct methods"
+WRONG (past — what already happened): "Elias presented a keepsake to trigger a memory"
+RIGHT (future — what happens next): "Elias may escalate his memory-triggering attempts with more direct methods"
 
-WRONG (past — what already happened): "The strange energy in the room became disturbed"
-RIGHT (future — what happens next): "The disturbed strange energy may attract attention or escalate further"
+WRONG (past — what already happened): "The protective wards in the room became unstable"
+RIGHT (future — what happens next): "The unstable wards may attract attention or escalate further"
 
 Past events belong in the notebook (established facts, planted details). If something already occurred in the chat, do NOT put it in the events array.
 
 Every event MUST answer the question: "What is coming next because of this?" If the answer is "it already happened," delete that event.
 
 === EVENT SCHEDULED DATES ===
-Use the dayCount you compute below as a temporal reference. An event happening "tomorrow" would be scheduledDate "Day N+1" (relative to dayCount), "next week" = "Day N+7", etc. Calendar dates like "3/15" also accepted.
+Use the cyclical dayCount you compute below as the current position within the configured calendar year. For relative timing, calculate the ACTUAL target "Day #" within that annual cycle and wrap at the configured year length. Never output expressions like "Day N+7". Named/configured calendar dates are also accepted.
 
 CRITICAL RULES:
 - Seasonal events (spring festival, harvest festival, migration, seasonal ritual) ALWAYS get a scheduledDate — approximate relative to the current dayCount (e.g. "Day 14" for something happening in ~2 weeks).
-- Relative timing events ("in the coming weeks", "next month", "a few days from now") — ESTIMATE a dayCount-based date. Rough is fine. "Day N+7" for next week, "Day N+14" for two weeks.
+- Relative timing events ("in the coming weeks", "next month", "a few days from now") — ESTIMATE the actual target cyclical Day number or use the configured month/date. Rough is fine; wrap at the configured year length when crossing New Year.
 - Named/explicit dates from chat — use as-given.
 - Genuinely vague events (background rumors, distant threats, ongoing pressures): set scheduledDate to null (field only — keep the event). Not every event needs a pinned date.
 - scheduledDate appears in the event header in the UI for immediate temporal context.`;
@@ -589,7 +643,7 @@ export async function runBatchScan() {
                 { role: 'user', content: fullUserPrompt }
             ];
 
-            const response = await generateWithProfile(profile, messages);
+            const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
             if (response) {
                 // Accumulate with structured scene headers
                 const sceneCount = detectChunkScenes(chunk).length;
@@ -936,7 +990,7 @@ async function synthesizeBatchResults(chatId, profile, accumulatedContext, allMe
         { role: 'user', content: synthesisPrompt }
     ];
 
-    const response = await generateWithProfile(profile, messages);
+    const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.BULK });
 
     if (!response) {
         nwstToast('Synthesis completed but no structured data was returned. Try running again.', 'warning');
@@ -1027,8 +1081,8 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `CRITICAL DATE FORMAT RULES — READ BEFORE GENERATING:\n`;
     prompt += `  1. dateDisplay MUST start with the day of the week (e.g. "${calConfig.enabled && calConfig.weekDays.length > 0 ? calConfig.weekDays[0] : 'Monday'}", "${calConfig.enabled && calConfig.weekDays.length > 1 ? calConfig.weekDays[1] : 'Thursday'}", "Kin'yōbi")\n`;
     prompt += `  2. dateDisplay MUST NOT contain a pipe | character — that belongs in dateSub\n`;
-    prompt += `  3. Use dateSub for era/calendar context ONLY (e.g. "Reiwa 6", "Victorian Era · 1888 CE")\n`;
-    prompt += `  4. dayCount = day-of-year (1-366). If date is "October 17, 2024", dayCount = 291 (leap year) or 290.\n`;
+    prompt += `  3. Use dateSub for era/calendar context ONLY, in whatever era system fits the setting (e.g. "Reiwa 6", "Tang Dynasty · Kaiyuan 5", "Reign of Augustus · Year 12", "Victorian Era", "1st Century BC")\n`;
+    prompt += `  4. dayCount = the 1-based cyclical day position within the CURRENT configured calendar year. Its maximum is the sum of that year's configured month lengths; it resets to 1 at New Year.\n`;
     prompt += `  5. FAILURE TO FOLLOW THESE RULES WILL CORRUPT THE DATE DISPLAY IN THE UI.\n\n`;
 
     prompt += `CRITICAL — EVENTS MUST BE COMPLETE IN A SINGLE PASS:\n`;
@@ -1040,12 +1094,12 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example: "The merchant caravan is expected to arrive next week"\n`;
     prompt += `    * Example: "Bandit raids have been increasing along the eastern road"\n\n`;
     prompt += `  WRONG — DO NOT summarize past chat as events. These are WRONG:\n`;
-    prompt += `    ✗ "Dorian presented old letters to trigger Mira's memory" — this ALREADY HAPPENED in chat\n`;
-    prompt += `    ✗ "The strange energy in the room became disturbed" — this ALREADY HAPPENED in chat\n`;
-    prompt += `    ✗ "Memory trigger attempt by Dorian" — this ALREADY HAPPENED in chat\n\n`;
+    prompt += `    ✗ "Elias presented a keepsake to trigger Mira's memory" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "The protective wards in the room became unstable" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "Memory trigger attempt by Elias" — this ALREADY HAPPENED in chat\n\n`;
     prompt += `  RIGHT — Turn past events into future projections. Convert the above to:\n`;
-    prompt += `    ✓ "Dorian may escalate memory-triggering tactics as the memory block resists" — what COMES NEXT\n`;
-    prompt += `    ✓ "The strange energy disturbance could attract unwanted attention" — what COMES NEXT\n`;
+    prompt += `    ✓ "Elias may escalate memory-triggering tactics as the memory block resists" — what COMES NEXT\n`;
+    prompt += `    ✓ "The ward disturbance could attract unwanted attention" — what COMES NEXT\n`;
     prompt += `    ✓ "Mira's buried memories may surface under continued pressure" — what COMES NEXT\n\n`;
     prompt += `  KIND B — World-Level Events (from setting, conditions, season, context):\n`;
     prompt += `    * Events that the WORLD itself is generating — natural, political, societal, seasonal\n`;
@@ -1055,8 +1109,8 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `    * Example (environmental): "The river's rise threatens low-lying farmlands as spring melt accelerates"\n`;
     prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
     prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 5 WORLD events per tier, max 5 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
-    prompt += `  scheduledDate — REQUIRED for seasonal/relative-timing events (spring festival → current season date, "coming weeks" → Day N+14). Omit only for genuinely vague events. Use dayCount above as reference.\n\n`;
-    prompt += `  CRITICAL — SEED GENEROUSLY: This is the INITIAL batch scan. The tracker should start with a robust set of events so the world feels alive. Aim for roughly 12-20 events total across all tiers and categories. Distribute world events across multiple tiers — immediate (today/tomorrow), week (before the current weekday cycle ends), month (beyond this week), undetermined (someday).\n\n`;
+    prompt += `  scheduledDate — REQUIRED for seasonal/relative-timing events. Use a configured month/date when known, or calculate the actual target cyclical "Day #" from dayCount. Never emit arithmetic placeholders such as "Day N+14". Omit only for genuinely vague events.\n\n`;
+    prompt += `  CRITICAL — SEED GENEROUSLY: This is the INITIAL batch scan. The tracker should start with a robust set of events so the world feels alive. Aim for roughly 12-20 events total across all tiers and categories. Distribute world events across multiple tiers — immediate (today/tomorrow), week (before the current weekday cycle ends), month (later in the current calendar month), undetermined (someday).\n\n`;
     prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
     prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;
 
@@ -1075,13 +1129,13 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     prompt += `{
   "currentDay": {
     "dateDisplay": "MUST start with day-of-week followed by ', Month Date, Year'. No pipe characters. Modern: 'Monday, April 15th, 2024'. Historical: 'Kin'yōbi, Chrysanthemum Month · Sixth Day of the Waxing Moon'.",
-    "dateSub": "Era context only — e.g. 'Reiwa 6', 'Victorian Era · 1888 CE', '21st Century'. Leave empty if no applicable era.",
+    "dateSub": "Era context only, matching the setting's culture and period — e.g. 'Reiwa 6', 'Imperial Era · 1125 CE', 'Tang Dynasty · Kaiyuan 5', 'Victorian Era', '21st Century', '1st Century BC'. Leave empty if no applicable era.",
     "season": "Current season — evocative, sensory, grounded in the setting. Faction names fine if relevant; individual character actions should not appear.",
     "weatherToday": "Today's weather as a physical experience. Faction names fine if relevant; individual character actions should not appear.",
     "flora": "What is growing or changing in the natural world. Faction names fine if relevant; individual character actions should not appear.",
     "fauna": "Animal activity and presence. Faction names fine if relevant; individual character actions should not appear.",
     "spiritualClimate": "Metaphysical atmosphere if applicable. Faction names fine if relevant; individual character actions should not appear. Omit if no spiritual elements.",
-    "dayCount": "DAYS SINCE STORY START (integer). CRITICAL: If a concrete date is present (e.g. 'April 15th, 2024'), compute the day-of-year. Example: April 15 in a leap year = Jan(31) + Feb(29) + Mar(31) + Apr(15) = day 106. If no date exists, estimate from story progression or default to 1."
+    "dayCount": "CYCLICAL DAY POSITION WITHIN THE CURRENT CALENDAR YEAR (integer, 1-based). Compute it from the configured month lengths and current date. It resets to 1 at New Year; it is NOT days since story start. If no date exists, default to 1."
   },
   "events": [
     {
@@ -1089,16 +1143,16 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
       "description": "What is PROJECTED to happen NEXT. Future tense. NEVER a past-tense recap of chat content.",
       "tier": "immediate|week|month|undetermined",
       "isNPC": "true if NPC-driven (character struggles, relationships, backstory, decisions — NPC name appears in title/description), false if world/player-facing (factions, festivals, environment, rumors)",
-      "scheduledDate": "REQUIRED when timing is clear — reference the dayCount above. Format: relative 'Day N+1' (story days) or absolute 'Month/Date' (calendar). OMIT for vague/uncertain timing — not all events need a pinned date.",
+      "scheduledDate": "REQUIRED when timing is clear. Use the configured month/date or calculate the actual target cyclical 'Day #' from dayCount, wrapping at the configured year length. NEVER output arithmetic placeholders like 'Day N+1'. OMIT for vague/uncertain timing.",
       "participants": ["CharacterName1", "CharacterName2"],
       "participants_instructions": "List ALL characters involved in this event. Use the character names EXACTLY as they appear in chat. If a character is mentioned in relation to this event, include them. NPC events MUST include the NPC character. Use empty array [] only for world events with no direct character involvement (e.g. weather, natural disaster, festival with unspecified participants)."
     }
   ],
   "conditions": {
-    "political": "Atmospheric narrative of the political climate. Characters and factions may be named when they shape the condition. Describe macro mood, tensions, movements — not specific character actions or personal states.",
-    "social": "Atmospheric narrative of the social climate. Characters may be named when relevant. Describe dynamics, hierarchies, undercurrents — not what specific characters did or felt.",
-    "spiritual": "Metaphysical texture and atmosphere. Describe what the spiritually sensitive would perceive. Characters may be named if their presence defines the spiritual climate.",
-    "environmental": "Physical world state — landscape, season, climate conditions. Focus on the world itself rather than character actions within it."
+    "political": "Durable macro political/institutional/faction state. Do not summarize one case, target, operative, restraining order, arrest, or investigation unless it establishes a wider institutional/faction change.",
+    "social": "Durable collective social behavior/norms/community/public routines/workplaces/commerce/social-space patterns. Season/weather may explain behavior but must not dominate; do not summarize private relationships.",
+    "spiritual": "Durable setting-supported metaphysical/supernatural system, pressure, faction, ritual cycle, or regional phenomenon. Do not inflate one character's aura/encounter/emotion into world-scale metaphysics.",
+    "environmental": "Durable physical-world pattern/state — climate/seasonal trend, ecology, landscape, water/air, regional hazard, flora/fauna. Do not duplicate one day's weather from Current Day."
   },
   "notebook": {
     "core": {
@@ -1136,6 +1190,10 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     }
   ]
 }
+
+SECRET KNOWLEDGE INTEGRITY:
+- Never place the same character in both whoKnows and whoDoesNotKnow.
+- Knowledge lists must reflect what the analyzed chat already establishes. A character who personally investigated, witnessed, or discovered evidence and understood a secret's core fact belongs in whoKnows even if a finer detail remains only inferred. If needed, represent only that finer uncertain detail as an unconfirmed_suspicion; do not mark the investigator unaware of the core fact they already discovered.
 
 Respond with valid JSON ONLY. No markdown fences. No explanation outside the JSON.`;
 
@@ -1220,7 +1278,16 @@ async function applyBatchResults(chatId, result) {
         // dateDisplay (even with day-of-week prefix like "Thursday, October 17th, 2024").
         // When a parseable date exists, the computed day-of-year is ALWAYS more
         // reliable than whatever the LLM guessed. Override unconditionally.
-        const computedDayCount = computeDayOfYearFromDate(result.currentDay.dateDisplay);
+        const calCfgForCurrentDate = getCalendarConfig(chatId);
+        const parsedCurrentDate = parseCurrentCalendarDate(
+            result.currentDay.dateDisplay || '',
+            result.currentDay.dateSub || '',
+            calCfgForCurrentDate,
+            false
+        );
+        const computedDayCount = parsedCurrentDate
+            ? dayOfYearFor(parsedCurrentDate, calCfgForCurrentDate)
+            : computeDayOfYearFromDate(result.currentDay.dateDisplay, calCfgForCurrentDate);
         if (computedDayCount && computedDayCount > 0) {
             const oldVal = result.currentDay.dayCount;
             result.currentDay.dayCount = computedDayCount;
@@ -1297,8 +1364,79 @@ async function applyBatchResults(chatId, result) {
         // computed season OVERRIDES whatever the LLM wrote for the season field
         // (after basic normalization). The LLM writes evocative prose *about*
         // that season — the engine is the authority. This ensures custom season
-        // names (e.g. "Haru 春") appear in the Current Day display instead of
+        // names (e.g. "Springtide") appear in the Current Day display instead of
         // the LLM's default English name (e.g. "Spring").
+        // ── Starting Date + elapsed story duration ────────────────────
+        // Starting Date is the story-duration baseline, not the calendar clock.
+        // If the scan already produced a parseable current date, keep it. If no
+        // current date can be parsed and the player supplied a Starting Date,
+        // use that Starting Date as the initial current date. elapsedStoryDays
+        // begins at 0 on the Starting Date and is derived from configured
+        // calendar arithmetic when the current date is later.
+        {
+            const { saveCalendarConfig } = await import('../data/worldState.js');
+            const calCfg = getCalendarConfig(chatId);
+            const userAnchor = getStartDate(chatId);
+            let currentParsed = parseCurrentCalendarDate(
+                result.currentDay.dateDisplay || '',
+                result.currentDay.dateSub || '',
+                calCfg,
+                false
+            );
+
+            if (userAnchor && userAnchor.source === 'user') {
+                if (!currentParsed) {
+                    try {
+                        const anchorDayCount = dayOfYearFor(userAnchor, calCfg);
+                        const det = computeDeterministicDate(userAnchor, anchorDayCount, anchorDayCount, calCfg);
+                        result.currentDay.dayCount = anchorDayCount;
+                        result.currentDay.dateDisplay = det.dateDisplay;
+                        const codeEraWins = calCfg.enabled && (calCfg.eraName || '').trim();
+                        const llmEra = (typeof result.currentDay.dateSub === 'string') ? result.currentDay.dateSub.trim() : '';
+                        result.currentDay.dateSub = codeEraWins ? (det.eraSub || '') : (llmEra || det.eraSub || '');
+                        currentParsed = { year: userAnchor.year, month: userAnchor.month, day: userAnchor.day };
+                    } catch (err) {
+                        console.warn('[NWST BatchScan] Could not initialize Current Day from Starting Date:', err);
+                    }
+                }
+
+                if (!calCfg.enabled && Array.isArray(calCfg.weekDays) && calCfg.weekDays.length === 7) {
+                    const anchorDayCount = dayOfYearFor(userAnchor, calCfg);
+                    calCfg.startWeekday = startWeekdayForAnchor(userAnchor, anchorDayCount, 7);
+                    await saveCalendarConfig(chatId, calCfg);
+                }
+
+                if (currentParsed) {
+                    result.currentDay.dayCount = dayOfYearFor(currentParsed, calCfg);
+                    const elapsed = daysBetweenCalendarDates(userAnchor, currentParsed, calCfg);
+                    result.currentDay.elapsedStoryDays = Number.isInteger(elapsed) && elapsed >= 0 ? elapsed : 0;
+                } else {
+                    result.currentDay.elapsedStoryDays = 0;
+                }
+            } else {
+                result.currentDay.elapsedStoryDays = 0;
+
+                // Preserve the existing Gregorian convenience: if no Starting
+                // Date exists, the scanned current date may seed one as a
+                // correctable baseline. This does not drive the calendar.
+                if (!userAnchor && !calCfg.enabled && currentParsed) {
+                    const anchorDayCount = dayOfYearFor(currentParsed, calCfg);
+                    await saveStartDate(chatId, { ...currentParsed, anchorDayCount, source: 'scan', locked: false });
+                    dlog(`[NWST BatchScan] Starting Date backfilled from scan: ${currentParsed.year}-${currentParsed.month}-${currentParsed.day} (elapsed story days 0)`);
+                }
+            }
+        }
+
+        // Player-pinned era (real-world calendars): the pin was set before
+        // warmup, so it beats whatever the scan concluded.
+        {
+            const calCfgPin = getCalendarConfig(chatId);
+            if (!calCfgPin.enabled) {
+                const pin = getEraPin(chatId);
+                if (pin) result.currentDay.dateSub = pin;
+            }
+        }
+
         if (result.currentDay.dayCount > 0) {
             const seasonConfig = getSeasonConfig(chatId);
             const computedSeason = computeSeason(result.currentDay.dayCount, seasonConfig);
@@ -1407,9 +1545,14 @@ async function applyBatchResults(chatId, result) {
             dlog(`[NWST BatchScan] Normalized ${normalized} string fields to arrays in notebook`);
         }
 
-        const { saveNotebook } = await import('../data/notebook.js');
-        dlog(`[NWST BatchScan] DIAG: About to saveNotebook — result.notebook has secrets? ${'secrets' in result.notebook}, core keys: ${Object.keys(result.notebook.core || {}).join(', ')}`);
-        await saveNotebook(chatId, result.notebook);
+        const { getNotebook, saveNotebook } = await import('../data/notebook.js');
+        const existingNotebook = getNotebook(chatId);
+        const notebookToSave = {
+            ...result.notebook,
+            secrets: existingNotebook.secrets || []
+        };
+        dlog(`[NWST BatchScan] DIAG: About to saveNotebook — preserving ${notebookToSave.secrets.length} existing secret(s), core keys: ${Object.keys(notebookToSave.core || {}).join(', ')}`);
+        await saveNotebook(chatId, notebookToSave);
         // Verify after save
         try {
             const afterOverwrite = getNotebook(chatId);
@@ -1543,7 +1686,7 @@ export async function reviewEventParticipants(chatId) {
         try {
             const { generateWithProfile } = await import('./connections.js');
             const response = await generateWithProfile(profile, [systemMessage, userMessage], {
-                maxTokens: 500
+                maxTokens: LLM_TOKEN_BUDGETS.SMALL
             });
 
             if (!response) continue;

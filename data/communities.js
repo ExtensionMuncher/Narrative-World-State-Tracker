@@ -94,20 +94,18 @@ function jaccardSimilarity(a, b) {
 }
 
 /**
- * Find existing communities that are similar to a proposed new community,
- * to prevent duplicate/similar entries. Checks multiple signals:
+ * Find an existing community that is genuinely near-duplicate. Community
+ * membership overlap alone is NOT enough: the same characters can belong to
+ * multiple distinct factions, teams, households, or subgroups.
  *
- * 1. Exact/case-insensitive name match → instant match (return immediately)
- * 2. Substring name containment → score 0.75
- * 3. Significant word overlap in name (Jaccard >0.3) → score 0.6-0.8
- * 4. Significant member overlap (Jaccard >=0.4) → score 0.5-0.8
+ * Match rules:
+ * 1. Exact case-insensitive name match -> match.
+ * 2. Same normalized name tokens in a different order -> match.
+ * 3. Very high name-word similarity (>= 0.8) PLUS strong member overlap
+ *    (>= 0.6) -> match.
  *
- * Returns the best match if total similarity score >= 0.5, otherwise null.
- *
- * @param {object[]} existingCommunities - Array of community objects from getAllCommunities()
- * @param {string} name - Proposed community name
- * @param {string} [members] - Proposed comma-separated member list
- * @returns {object|null} The most similar existing community, or null
+ * Substring containment and member overlap by themselves are deliberately not
+ * merge signals; they caused parent groups and subgroups to collapse together.
  */
 export function findSimilarCommunity(existingCommunities, name, members) {
     if (!Array.isArray(existingCommunities) || existingCommunities.length === 0) return null;
@@ -115,50 +113,44 @@ export function findSimilarCommunity(existingCommunities, name, members) {
 
     const proposedName = normalize(name || '');
     const proposedMembers = parseMembers(members);
-
-    let bestMatch = null;
-    let bestScore = 0;
+    const proposedWords = new Set(proposedName.split(/[^\p{L}\p{N}]+/u).filter(Boolean));
 
     for (const com of existingCommunities) {
-        let score = 0;
-        const existingName = normalize(com.name);
+        const existingName = normalize(com.name || '');
+        if (proposedName && existingName === proposedName) return com;
 
-        // 1. Exact case-insensitive name match → instant return
-        if (proposedName && existingName === proposedName) {
-            return com;
-        }
+        const existingWords = new Set(existingName.split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+        const sameNameTokens = proposedWords.size > 0
+            && proposedWords.size === existingWords.size
+            && [...proposedWords].every(word => existingWords.has(word));
+        if (sameNameTokens) return com;
 
-        // 2. Substring containment — one name is contained within the other
-        if (proposedName && existingName) {
-            if (existingName.includes(proposedName) || proposedName.includes(existingName)) {
-                score = Math.max(score, 0.75);
-            }
-
-            // 3. Significant word overlap (e.g., "Whitlock Family" ↔ "Whitlock Household")
-            const proposedWords = new Set(proposedName.split(/\s+/));
-            const existingWords = new Set(existingName.split(/\s+/));
-            const wordOverlap = jaccardSimilarity(proposedWords, existingWords);
-            if (wordOverlap > 0.3) {
-                score = Math.max(score, 0.6 + wordOverlap * 0.2);
-            }
-        }
-
-        // 4. Member overlap check
+        const nameOverlap = jaccardSimilarity(proposedWords, existingWords);
         const existingMembers = parseMembers(com.members);
-        if (proposedMembers.size > 0 && existingMembers.size > 0) {
-            const overlap = jaccardSimilarity(proposedMembers, existingMembers);
-            if (overlap >= 0.4) {
-                score = Math.max(score, 0.5 + overlap * 0.3);
-            }
-        }
+        const memberOverlap = (proposedMembers.size > 0 && existingMembers.size > 0)
+            ? jaccardSimilarity(proposedMembers, existingMembers)
+            : 0;
 
-        if (score > bestScore) {
-            bestScore = score;
-            bestMatch = com;
-        }
+        if (nameOverlap >= 0.8 && memberOverlap >= 0.6) return com;
     }
 
-    return bestScore >= 0.5 ? bestMatch : null;
+    return null;
+}
+
+function mergeMemberDisplayStrings(existing, incoming) {
+    const merged = [];
+    const seen = new Set();
+    for (const source of [existing, incoming]) {
+        for (const raw of String(source || '').split(',')) {
+            const display = raw.trim();
+            if (!display) continue;
+            const key = normalize(display);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(display);
+        }
+    }
+    return merged.join(', ');
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -220,15 +212,8 @@ export async function addCommunity(chatId, communityData) {
             updates.summary = communityData.summary.trim();
         }
         if (communityData.members && communityData.members.trim()) {
-            // Merge member lists — combine existing + new, deduplicate
-            const existingMembers = new Set(
-                (similar.members || '').split(',').map(m => normalize(m)).filter(m => m)
-            );
-            const newMembers = communityData.members.split(',').map(m => normalize(m)).filter(m => m);
-            for (const m of newMembers) {
-                existingMembers.add(m);
-            }
-            updates.members = [...existingMembers].join(', ');
+            // Merge member lists without lowercasing the saved display names.
+            updates.members = mergeMemberDisplayStrings(similar.members, communityData.members);
         }
         if (Object.keys(updates).length > 0) {
             await updateCommunity(chatId, similar.id, updates);
@@ -314,20 +299,3 @@ export async function updateCommunityMembers(chatId, communityId, members) {
 
 // ── Bulk operations ───────────────────────────────────────────────────────
 
-/**
- * Delete all communities for a chat.
- * @param {string} chatId
- */
-export async function clearAllCommunities(chatId) {
-    deleteChatData(chatId, 'communities');
-}
-
-/**
- * Get the count of communities for a chat.
- * @param {string} chatId
- * @returns {number}
- */
-export function getCommunityCount(chatId) {
-    const communities = getAllCommunities(chatId);
-    return communities.length;
-}

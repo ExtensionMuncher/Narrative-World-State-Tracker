@@ -18,6 +18,7 @@
 import { getChatId, nwstToast } from '../index.js';
 import {
     getConditions,
+    getCurrentDay,
     updateConditionContent,
     toggleConditionEnabled,
     getSettingContext
@@ -29,43 +30,53 @@ import {
 } from '../data/communities.js';
 import { isInjectWorldConditions } from '../settings.js';
 import { resolveProfile, generateWithProfile } from '../llm/connections.js';
+import { LLM_TOKEN_BUDGETS } from '../llm/tokenBudgets.js';
+import { buildWorldEvidenceSources, formatWorldEvidenceSources, collectRecentCastNames, validateWorldConditionPayload } from '../llm/worldConditionEvidence.js';
 
 // ── Dedicated system prompt for single-condition regeneration ──────────────
 // This is a focused, lighter version of the scanner's condition prompt.
 // It asks the LLM to regenerate a single world condition's atmospheric narrative
 // based on recent chat messages and current world context.
 
-const CONDITION_REGEN_SYSTEM_PROMPT = `You are a narrative world state analyst for an ongoing roleplay. Your task is to regenerate the content for ONE specific world condition — a macro-level atmospheric description of a particular aspect of the world. Your focus is the WORLD'S STATE, not what characters are doing within it.
+const CONDITION_REGEN_SYSTEM_PROMPT = `You regenerate ONE persistent World Condition for an ongoing roleplay.
 
-A world condition is an ATMOSPHERIC NARRATIVE — it describes the current mood, subtext, and implications of a particular aspect of the world (political, social, spiritual, or environmental). It is NOT a factual summary, character action list, or plot synopsis.
+MANUAL REGENERATION IS AMBIENT-ONLY.
+Do NOT mine the recent plot for a Grounded political/social/spiritual/environmental development. The purpose of this button is to rebuild a clean WORLD-SCALE background condition when the saved condition is stale, contaminated, or unsatisfactory.
 
-OUTPUT STRUCTURE — a single paragraph of exactly 2-4 sentences. No more, no less.
+Write a relatively durable 2-4 sentence condition that can remain useful across many messages or several in-world days. Draw only from the supplied Setting Context and current date/season/environmental frame plus restrained, low-stakes setting-consistent background life.
 
-Each sentence must operate at the MACRO level — the world's atmosphere, the prevailing mood of a region, the texture of social undercurrents, the weight of unspoken tension across a landscape. Use setting details, weather, architecture, seasonal cues, and communal mood to convey the state of the world.
+GLOBAL RULES:
+- Do NOT name or causally reference the protagonist or immediate/recent cast.
+- Do NOT summarize recent scenes, cases, conversations, visits, paperwork, surveillance targets, arrests, or relationships.
+- Quiet background activity is allowed and encouraged when it plausibly makes the setting feel inhabited. Ambient may introduce modest current developments involving real or setting-supported institutions/factions — for example routine administrative guidance, procedural updates, staffing/budget pressure, promotion cycles, municipal initiatives, enforcement-priority shifts, or low-key corporate/faction maneuvering.
+- AMBIENT PROPORTIONALITY TEST: an invented background development must remain something the active cast could plausibly never notice. If the development would reasonably force characters to change immediate plans, demand urgent follow-up, or substantially rewrite the playable world, it is too consequential for Ambient unless the supplied Setting Context/Current Day already supports that scale.
+- Do NOT casually invent plot-forcing upheavals such as war, coups, states of emergency, martial law, government collapse, sweeping nationwide crackdowns/purges, mass civil disorder, economic collapse, catastrophic disasters, mass-casualty events, widespread infrastructure failure, or supernatural/metaphysical catastrophes.
+- Prefer one coherent background theme with at most 1-2 closely related developments rather than a bulletin list of unrelated news.
+- Keep the condition subordinate to the active story: it should remind the main model that a wider world exists, not compete with the plot.
 
-GOOD (macro, atmospheric): "The political atmosphere of the fortress has curdled into something watchful — not open conflict, but the particular stillness of a room where everyone is waiting for someone else to move first. Edicts are obeyed with theatrical punctuality. Favors are hoarded like coin. The air tastes of held breath."
-BAD (micro, character-level): "Mira is navigating a web of political intrigue. Elena has become more cautious. The servants are gossiping about Victor Hale's outburst." — Named characters, action summaries, no atmospheric texture.
+CATEGORY BOUNDARIES:
+- POLITICAL: ordinary wider power structures, institutions, factions, governance, territorial influence, regulatory climate, leadership/hierarchy, or institutional background. Named overarching institutions are allowed, and modest background developments within them are allowed when they remain low-stakes and non-plot-forcing.
+- SOCIAL: collective behavior, cultural/social norms, community patterns, public routines, workplaces, commerce, social spaces, population habits, and reputation patterns. Weather/season may explain behavior but PEOPLE and SOCIAL SYSTEMS must remain the subject; do not turn Social into Environmental II.
+- SPIRITUAL/SUPERNATURAL: durable metaphysical rules/pressures, supernatural factions, ritual cycles, regional spiritual phenomena, barriers/realms, sacred/profane conditions, or other setting-supported supernatural systems. Do not invent supernatural ontology if the supplied world frame does not support one.
+- ENVIRONMENTAL: durable physical-world background such as seasonal transition, climate pattern, ecology, landscape, water/air conditions, regional hazards, flora/fauna, or persistent environmental tendencies. Today's isolated weather belongs in Current Day, not here.
 
-GOOD (macro, atmospheric): "Winter's grip is beginning to loosen, but the thaw has brought mudslides that choke the mountain passes, isolating the fortress further. The roads are treacherous, supply lines strained. There is a tension in the air between the promise of spring and the reality of being cut off."
-BAD (micro, event-level): "The snow is melting. Supplies are running low because of the mudslides. People are worried about being cut off." — Generic, flat, reads like a checklist.
+OUTPUT — valid JSON only:
+{
+  "mode": "ambient",
+  "scope": "category-appropriate macro scope",
+  "evidenceRefs": [],
+  "change": "concise description of the ambient category focus",
+  "content": "one coherent 2-4 sentence World Condition paragraph"
+}
 
-CRITICAL RULES:
-- NO named characters whatsoever — world conditions describe the macro state of the world, not individuals
-- NO event summaries or plot recaps — describe atmosphere and implications, not what happened
-- NO generic or vague language — "there is tension" means nothing. What KIND of tension? What SHAPE does it take? What does it FEEL like?
-- Be specific and evocative — use sensory detail (weather, light, sound, physical space, communal mood)
-- EXACTLY 2-4 sentences — count your periods (. ! ?) to verify before outputting
-
-SENTENCE COUNT — SELF-CHECK: Count the sentence-terminating punctuation marks (. ! ?) in your output. If the count is not between 2 and 4 (inclusive), your output is invalid. Rewrite.
-
-Respond with ONLY the condition content text — a single paragraph of 2-4 sentences. No JSON, no markdown fences, no labels, no extra commentary. Just the atmospheric narrative.`;
+Always return mode "ambient" and an empty evidenceRefs array.`;
 
 // ── Dedicated system prompt for single-community summary regeneration ──────
 // Focuses the LLM on producing a rich, analytical summary for one community.
 
 const COMMUNITY_REGEN_SYSTEM_PROMPT = `You are a community analyst for a narrative roleplay. Your task is to regenerate the summary for ONE specific community — a social group, faction, or collective within the story. Your focus is the COMMUNITY as an entity: its internal structure, shared identity, collective pressures, and its role in the larger social landscape.
 
-Your summaries have two parts: an overview paragraph and bullet observations. Both must always be present.
+Your summary begins with an overview paragraph and may include analytical bullet observations when the community genuinely warrants them. Do not invent bullets just to satisfy a format.
 
 PART 1 — OVERVIEW PARAGRAPH (2-3 sentences):
 Write with narrative voice and atmosphere. Capture what this community IS as a social entity — its nature, its position in the power structure, the shared condition that binds its members, and the tensions that operate at the GROUP level. Do NOT name specific characters in the paragraph itself. Do NOT reference specific chat events. The paragraph should describe the community's permanent or semi-permanent character, not what happened in the last scene.
@@ -90,9 +101,14 @@ GOOD bullet (community-level): "The servants operate as an informal intelligence
 BAD bullet (event-level): "Yumi's willingness to offer intelligence on Rin Hino's dawn shrine visits reveals a servant who understands that information is the only currency" — this is about Yumi's individual actions, not the community's dynamic.
 
 GOOD bullet (community-level): "Internally, the household staff is split between those who see their invisibility as protection and those who see it as erasure — a fracture that any outsider with enough perception could exploit."
-BAD bullet (event-level): "Tomas Vane's direct approach to Mira signals a fracture in the servant network's usual information channels" — this analyzes a single character's action, not the community.
+BAD bullet (event-level): "Captain Vale's direct approach to Mira signals a fracture in the household staff's usual information channels" — this analyzes a single character's action, not the community.
 
 Each bullet must answer: what does this reveal about the COMMUNITY as a collective? Not what does it reveal about a specific character or event.
+
+MOTIVE / DURABILITY GROUNDING:
+- Recent scenes are evidence for the community's durable or semi-durable collective state; do not narrate their chronology.
+- Explicitly stated motives outrank dramatic stylistic inference. Do NOT turn fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior into confidence, strategy, dominance, bravery, or calculated control unless the prose establishes it.
+- Do not make a person or group more competent, composed, sinister, romantic, strategic, or "badass" than the evidence supports.
 
 CRITICAL RULES:
 - Bullets must describe the COMMUNITY (its nature, structure, internal dynamics, collective behavior)
@@ -316,33 +332,29 @@ async function regenCondition(condKey, condLabel) {
         return;
     }
 
-    // Gather context
-    const conditions = getConditions(chatId);
-    const currentContent = conditions[condKey]?.content || '';
+    // Gather only the broad world frame for manual regeneration. Recent chat is
+    // retained locally only so the validator can reject accidental cast leakage;
+    // it is deliberately NOT shown to the regeneration model.
     const settingContext = getSettingContext(chatId);
+    const currentDay = getCurrentDay(chatId);
     const recentMessages = getRecentChatMessages(10);
+    const communities = getAllCommunities(chatId);
+    const evidenceSources = buildWorldEvidenceSources([], currentDay, settingContext);
+    const recentCastNames = collectRecentCastNames(recentMessages, communities);
 
-    // Build user prompt
-    let userPrompt = `Regenerate the "${condLabel}" world condition.\n\n`;
-    userPrompt += `=== CONDITION TO REGENERATE ===\n`;
+    let userPrompt = `=== WORLD FRAME ===\n`;
+    userPrompt += `${formatWorldEvidenceSources(evidenceSources)}\n`;
+    userPrompt += `=== CONDITION TO REBUILD ===\n`;
     userPrompt += `Key: ${condKey}\n`;
     userPrompt += `Label: ${condLabel}\n`;
-    userPrompt += `Current content: ${currentContent || '(empty)'}\n\n`;
-
-    if (settingContext) {
-        userPrompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
-    }
-
-    if (recentMessages.length > 0) {
-        userPrompt += `=== RECENT CHAT MESSAGES ===\n`;
-        for (const msg of recentMessages) {
-            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
-            userPrompt += `[${sender}]: ${msg.mes}\n`;
-        }
-        userPrompt += '\n';
-    }
-
-    userPrompt += `Write a compelling atmospheric narrative for the "${condLabel}" condition informed by the recent events below (but never naming characters or referencing those events directly). Remember: no named characters, just the macro state of the world.`;
+    const allowedScopeHints = {
+        political: 'institution | faction | district | regional | population',
+        social: 'population | community | district | cultural | regional',
+        spiritual: 'spiritual | faction | regional | environmental',
+        environmental: 'environmental | district | regional'
+    };
+    userPrompt += `Allowed scope values: ${allowedScopeHints[condKey] || 'category-appropriate macro scope'}\n`;
+    userPrompt += `Rebuild this as AMBIENT world-scale background. Do not use or reconstruct the recent plot. Return JSON only.`;
 
     // Show loading state
     const row = document.getElementById(`nwst-cond-${condKey}`);
@@ -354,16 +366,33 @@ async function regenCondition(condKey, condLabel) {
             { role: 'user', content: userPrompt }
         ];
 
-        const response = await generateWithProfile(profile, messages);
+        const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
         if (!response || !response.trim()) {
             nwstToast('LLM returned empty response for condition regen.', 'error');
             return;
         }
 
-        const newContent = response.trim();
+        let parsed;
+        try {
+            const cleaned = response.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+            parsed = JSON.parse(cleaned);
+        } catch (parseErr) {
+            console.error(`[NWST] Condition regen returned invalid JSON for ${condKey}:`, response, parseErr);
+            nwstToast('Condition regen returned an invalid structured response; existing condition was preserved.', 'error');
+            return;
+        }
+
+        const newContent = typeof parsed?.content === 'string' ? parsed.content.trim() : '';
+        const validation = validateWorldConditionPayload(parsed, evidenceSources, recentCastNames, condKey);
+        if (!validation.ok || !newContent) {
+            console.warn(`[NWST] Rejected regenerated ${condKey} condition: ${validation.reason || 'empty content'}`);
+            nwstToast('Condition regen failed grounding check; existing condition was preserved.', 'warning');
+            return;
+        }
+
         await updateConditionContent(chatId, condKey, newContent);
         refreshConditionsUI();
-        nwstToast(`${condLabel} condition regenerated.`, 'success');
+        nwstToast(`${condLabel} condition regenerated (${validation.mode}).`, 'success');
 
     } catch (err) {
         console.error(`[NWST] Condition regen failed for ${condKey}:`, err);
@@ -440,7 +469,7 @@ function refreshCommunitiesUI() {
                     <div style="margin-bottom:8px">
                         <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Members (comma-separated character names)</label>
                         <input type="text" class="text_pole nwst-community-members-input" style="width:100%" value="${escapeHTML(com.members)}"
-                            placeholder="e.g. Kellan, Dorian, Elena">
+                            placeholder="e.g. Mira, Rowan, Elias">
                     </div>
                     <div style="margin-bottom:8px">
                         <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Summary</label>
@@ -576,19 +605,15 @@ async function regenCommunitySummary(communityId) {
     const settingContext = getSettingContext(chatId);
     const recentMessages = getRecentChatMessages(10);
 
-    // Build user prompt
-    let userPrompt = `Regenerate the community summary for "${community.name}".\n\n`;
+    // Build user prompt — durable group state first, recent messages as evidence only.
+    let userPrompt = `=== SETTING / WORLD FRAME ===\n${settingContext || '(no explicit setting context provided)'}\n\n`;
     userPrompt += `=== COMMUNITY ===\n`;
     userPrompt += `Name: ${community.name}\n`;
     userPrompt += `Members: ${community.members || 'none listed'}\n`;
     userPrompt += `Current summary: ${community.summary || '(empty)'}\n\n`;
 
-    if (settingContext) {
-        userPrompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
-    }
-
     if (recentMessages.length > 0) {
-        userPrompt += `=== RECENT CHAT MESSAGES ===\n`;
+        userPrompt += `=== RECENT CHAT — EVIDENCE ONLY ===\n`;
         for (const msg of recentMessages) {
             const sender = msg.name || (msg.is_user ? 'User' : 'Character');
             userPrompt += `[${sender}]: ${msg.mes}\n`;
@@ -596,7 +621,7 @@ async function regenCommunitySummary(communityId) {
         userPrompt += '\n';
     }
 
-    userPrompt += `Write a rich, analytical summary for "${community.name}" as a collective entity. Describe its nature, internal structure, shared pressures, and position in the social landscape. The chat messages below are evidence to inform your analysis — do NOT make the events themselves the subject of the bullets. Surface subtext, power dynamics, and internal tensions at the GROUP level. Use bullet points (•) for observations, with each bullet being a specific, concrete observation. Do not pad — output only as many bullets as the community genuinely warrants. An optional 1-2 sentence overview paragraph may precede the bullets.`;
+    userPrompt += `Regenerate a durable analytical summary for "${community.name}" as a collective entity. Describe its structure, relationships, hierarchy, loyalties, fractures, shared pressures, reputation, objectives, and current collective posture. Absorb qualifying recent developments into those durable dynamics instead of retelling the scene.`;
 
     // Show loading
     const entry = document.querySelector(`.nwst-community-entry[data-community-id="${communityId}"]`);
@@ -608,7 +633,7 @@ async function regenCommunitySummary(communityId) {
             { role: 'user', content: userPrompt }
         ];
 
-        const response = await generateWithProfile(profile, messages);
+        const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
         if (!response || !response.trim()) {
             nwstToast('LLM returned empty response for community regen.', 'error');
             return;

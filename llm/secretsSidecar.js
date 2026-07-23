@@ -21,10 +21,10 @@
 //
 // WHAT IT RETURNS (cached in chatMetadata, consumed by the scoring engine):
 //   {
-//     charactersPresent: ["kellan", "dorian"],   // canonical IDs, pronouns resolved
+//     charactersPresent: ["rowan", "elias"],   // canonical IDs, pronouns resolved
 //     sceneType: "npc_cutaway",                   // player_present|npc_cutaway|surveillance|faction|mixed
-//     activePressures: ["dorian_surveillance"],   // free-text pressure tags
-//     sceneSummary: "Dorian and Marcus observe...", // one-line Qvink-style
+//     activePressures: ["elias_surveillance"],   // free-text pressure tags
+//     sceneSummary: "Elias and Noah observe...", // one-line Qvink-style
 //     analyzedAtMessageIndex: 142                  // for staleness tracking
 //   }
 //
@@ -33,6 +33,7 @@
 
 import { getChatId, nwstToast } from '../utils.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { isEnabled, isPaused, getSidecarScanRange } from '../settings.js';
 import { getAllSecrets } from '../data/notebook.js';
 import { buildAliasRegistry } from '../data/aliasRegistry.js';
@@ -63,7 +64,7 @@ RULES FOR charactersPresent (read carefully — this is the most error-prone fie
 - Use canonical IDs from the roster exactly. If someone acts but isn't in the roster, omit them.
 - Resolve pronouns: if "he"/"she"/"they" clearly refers to a rostered character acting across several lines, include that character.
 - DO NOT include a character who is only:
-  * mentioned in passing ("she thought about Kellan") — that is a thought, not presence
+  * mentioned in passing ("she thought about Rowan") — that is a thought, not presence
   * named inside an in-world document the characters are reading (a surveillance report, an order record, a text message, a file, an email, a database result, a printout) — being NAMED IN DATA is not being PRESENT
   * referenced as absent, remembered, or discussed but not there
 - Organizations, teams, and groups (e.g. a syndicate, a "surveillance team", a "staff") are NOT characters — do not put them in charactersPresent. They belong in sceneType reasoning only.
@@ -242,7 +243,7 @@ export async function runSecretsSidecar() {
         ];
 
         dlog(`[NWST SecretsSidecar] Running scene analysis on last ${recentMessages.length}/${scanRange} prose messages...`);
-        const response = await generateWithProfile(profile, messages);
+        const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
         if (!response) return null;
 
         const analysis = parseSidecarResponse(response, registry);

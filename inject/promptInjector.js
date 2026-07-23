@@ -48,9 +48,10 @@ import {
     getInjectionPlacement, getInjectionDepth, getInjectionDepthRole,
     isEnabled, isPaused, getDensityMode
 } from '../settings.js';
-import { getChatId, getSetting } from '../index.js';
+import { getChatId } from '../index.js';
 import { buildSecretsInjection } from '../llm/secretsInjection.js';
-import { getLunarAngle, getDegreesPerDay, getMoonPhenomena, computeSeason } from '../llm/dayAdvancement.js';
+import { getLunarAngle, computeSeason, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
+import { getMoonConfig } from '../data/moons.js';
 import { dlog } from "../lib/debug.js";
 
 // ── Role string → numeric mapper ──────────────────────────────────────────
@@ -255,17 +256,14 @@ function buildWeatherBlock(forecast, moonPhases, chatId, currentDay, mode) {
         if (moonPhases && moonPhases.length > 0) {
             if (block) block += '\n';
             block += '## Moon Phases:\n';
-            const lunarAngle = getLunarAngle(chatId);
-            const cycleDays  = getSetting('moonCycleDays') || 29.53;
-            const degPerDay  = 360 / cycleDays;
-            const phenOptions = {
-                season:      currentDay?.season || '',
-                weatherToday: currentDay?.weatherToday || ''
-            };
+            const moonConfig = getMoonConfig(chatId);
             for (let i = 0; i < moonPhases.length; i++) {
-                const moon     = moonPhases[i];
-                const dayAngle = (lunarAngle + i * degPerDay) % 360;
-                const phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenOptions);
+                const moon = moonPhases[i];
+                const phenomena = moonConfig.enableMoonPhenomena === false
+                    ? []
+                    : normalizeMoonPhenomena(moon.phenomena || [], {
+                        allowStandaloneBloodMoon: Array.isArray(moon.manualPhenomena) && moon.manualPhenomena.includes('🌕 Blood Moon')
+                    });
                 let line = `  ${moon.label}: ${moon.phaseName} ${moon.icon}`;
                 if (phenomena.length > 0) {
                     line += `\n         ⚡ ${phenomena.join(' | ')}`;

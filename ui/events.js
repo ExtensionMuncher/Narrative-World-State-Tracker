@@ -5,7 +5,7 @@
 // Builds and manages the Events tab pane. Matches nwst-mockup.html exactly.
 //
 // Layout:
-//   • + Add event / ↺ Regenerate all buttons
+//   • + Add event / Generate Events buttons
 //   • Info text explaining detection vs generation
 //   • Four tier groups: Immediate, This Week, This Month, Undetermined
 //   • Each event: colored dot, title, tier badge, status badge, NPC badge
@@ -34,7 +34,7 @@ export function buildEventsTab() {
     pane.innerHTML = `
         <div class="nwst-btn-row" style="margin-bottom:14px">
             <button class="menu_button nwst-btn" id="nwst-events-add">+ Add event</button>
-            <button class="menu_button nwst-btn-regen" id="nwst-events-regenAll">↺ Regenerate all</button>
+            <button class="menu_button nwst-btn-regen" id="nwst-events-regenAll">✦ Generate Events</button>
         </div>
         <div style="font-size:11px;color:#999;margin-bottom:12px;line-height:1.5">
             Event statuses are updated by the scanner when it detects changes in the chat, or manually by you.
@@ -73,6 +73,7 @@ export function refreshEventsUI() {
             validityHtml += `<div style="font-size:12px;color:#bbb;margin:3px 0">${reason} <span style="color:#888">(flagged ${ev.validityFlag.flaggedOn || ''})</span></div>`;
             validityHtml += `<div style="display:flex;gap:6px;margin-top:4px">`;
             validityHtml += `<button class="menu_button nwst-btn nwst-validity-keep" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✓ Keep event</button>`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-validity-resolve" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✓ Mark resolved</button>`;
             validityHtml += `<button class="menu_button nwst-btn nwst-validity-miss" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✗ Mark missed</button>`;
             validityHtml += `</div></div>`;
         }
@@ -93,7 +94,7 @@ export function refreshEventsUI() {
         for (const ev of timingQueue) {
             const f = ev.timingFlag;
             const reason = (f.reason || '').replace(/</g, '&lt;');
-            const tierLabel = f.tier === 'immediate' ? 'Immediate' : f.tier === 'week' ? 'This week' : 'This month';
+            const tierLabel = f.tier === 'immediate' ? 'Immediate' : f.tier === 'week' ? 'This week' : f.tier === 'future' ? 'Future scheduled' : 'This month';
             const placement = f.scheduledDate ? `${tierLabel} · ${String(f.scheduledDate).replace(/</g, '&lt;')}` : tierLabel;
             validityHtml += `<div style="margin-bottom:8px;padding:6px;background:rgba(181,167,106,0.08);border-radius:6px">`;
             validityHtml += `<div style="font-weight:600;font-size:13px">${(ev.title || '').replace(/</g, '&lt;')}</div>`;
@@ -146,9 +147,9 @@ export function refreshEventsUI() {
         html += `<div class="nwst-event-group-hdr">`;
         html += `<div class="nwst-lbl" style="margin-bottom:0">${tier.label}</div>`;
         if (!tier.noRegen) {
-            html += `<button class="menu_button nwst-btn-regen nwst-events-tier-regen" style="font-size:11px;padding:3px 9px" data-tier="${tier.key}">↺ Regen</button>`;
+            html += `<button class="menu_button nwst-btn-regen nwst-events-tier-regen" style="font-size:11px;padding:3px 9px" data-tier="${tier.key}">✦ Generate</button>`;
         } else {
-            html += `<div style="font-size:11px;color:#999">Not regenerated — timing is intentional</div>`;
+            html += `<div style="font-size:11px;color:#999">Not generated — timing is intentional</div>`;
         }
         html += `</div>`;
 
@@ -341,7 +342,7 @@ function wireEventItemEvents() {
         };
     }
 
-    // ── Regenerate All button ─────────────────────────────────
+    // ── Generate Events button ────────────────────────────────
     const regenAllBtn = document.getElementById('nwst-events-regenAll');
     if (regenAllBtn) {
         regenAllBtn.onclick = async () => {
@@ -357,6 +358,18 @@ function wireEventItemEvents() {
             const eventId = btn.dataset.eventId;
             await updateEvent(getChatId(), eventId, { validityFlag: null });
             nwstToast('Event kept — flag cleared.', 'success');
+            refreshEventsUI();
+        };
+    });
+
+    container.querySelectorAll('.nwst-validity-resolve').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const eventId = btn.dataset.eventId;
+            const chatId = getChatId();
+            await updateEvent(chatId, eventId, { validityFlag: null });
+            await setEventStatus(chatId, eventId, 'resolved');
+            nwstToast('Event marked resolved — it will compact into the notebook after the usual delay.', 'success');
             refreshEventsUI();
         };
     });
@@ -395,12 +408,12 @@ function wireEventItemEvents() {
             e.stopPropagation();
             const eventId = btn.dataset.eventId;
             const chatId = getChatId();
-            let dismissedDay = null;
+            let dismissedElapsedDay = 0;
             try {
                 const d = getCurrentDay(chatId);
-                if (d && typeof d.dayCount === 'number') dismissedDay = d.dayCount;
+                if (d && Number.isInteger(d.elapsedStoryDays)) dismissedElapsedDay = d.elapsedStoryDays;
             } catch (err) { /* non-fatal */ }
-            await updateEvent(chatId, eventId, { timingFlag: null, timingDismissedDay: dismissedDay });
+            await updateEvent(chatId, eventId, { timingFlag: null, timingDismissedElapsedDay: dismissedElapsedDay });
             nwstToast('Kept timeless — this proposal will rest for about a week of story days.', 'info');
             refreshEventsUI();
         };
@@ -683,7 +696,8 @@ function wireEventItemEvents() {
             });
 
             if (secretData) {
-                nwstToast(`Event promoted to secret "${secretData.title}".`, 'success');
+                await removeEventWithSummary(chatId, eventId);
+                nwstToast(`Event promoted to secret "${secretData.title}" and moved to Past Events.`, 'success');
                 refreshEventsUI();
                 // Refresh the notebook tab too so the new secret appears
                 if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');

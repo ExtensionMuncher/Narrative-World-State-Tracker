@@ -33,23 +33,6 @@ const warnedRoles = new Set();
 // ── Connection profile availability ──────────────────────────────────────
 
 /**
- * Check whether ST's connection-manager extension is active and has profiles.
- * @returns {boolean}
- */
-export function areConnectionProfilesAvailable() {
-    try {
-        const ctx = SillyTavern.getContext();
-        if (!ctx?.extensionSettings) return false;
-        const disabled = ctx.extensionSettings.disabledExtensions || [];
-        if (disabled.includes('connection-manager')) return false;
-        return !!(ctx.extensionSettings.connectionManager?.profiles?.length);
-    } catch (e) {
-        console.warn('[NWST Connections] Could not check connection profiles:', e);
-        return false;
-    }
-}
-
-/**
  * Get all available connection profiles from ST.
  * @returns {object[]} Array of profile objects { id, name, api, mode, ... }
  */
@@ -71,29 +54,6 @@ export function getProfileById(profileId) {
     if (!profileId) return null;
     const profiles = getAllProfiles();
     return profiles.find(p => p.id === profileId || p.name === profileId) || null;
-}
-
-/**
- * Get the ID of the current chat's active connection profile.
- * This is the profile ST is using for normal chat messages.
- * @returns {string|null}
- */
-export function getCurrentChatProfileId() {
-    try {
-        return SillyTavern.getContext().extensionSettings?.connectionManager?.selectedProfile || null;
-    } catch (e) {
-        return null;
-    }
-}
-
-/**
- * Check if a profile ID is still valid (not deleted since it was saved).
- * @param {string} profileId
- * @returns {boolean}
- */
-export function isProfileValid(profileId) {
-    if (!profileId) return false;
-    return !!getProfileById(profileId);
 }
 
 // ── Profile resolution ────────────────────────────────────────────────────

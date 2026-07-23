@@ -10,14 +10,16 @@
 //   id: string,
 //   title: string,
 //   description: string,
-//   tier: "immediate" | "week" | "month" | "undetermined",
+//   tier: "immediate" | "week" | "month" | "undetermined" | "future", // "future" is internal/invisible
 //   status: "pending" | "inprogress" | "resolved" | "missed",
 //   isNPC: boolean,
 //   npcOrigin: "detected" | "generated" | null,  // null when isNPC is false
 //   origin: "detected" | "generated",              // applies to all events
 //   timestamp: number,                             // auto-set on creation
 //   scheduledDate: string | null,                  // free-form narrative time, e.g. "Day 3", "March 15"
-//   resolveDay: number | null,                     // story dayCount when status changed to 'resolved'/'missed'; null for active events
+//   scheduledElapsedStart/End: number | null,       // elapsed-story-day occurrence window for one-time scheduling
+//   resolveElapsedDay: number | null,              // elapsedStoryDays when status changed to resolved/missed
+//   tierSetElapsedDay: number | null,              // elapsedStoryDays when the event entered its current tier
 //   participants: string[],                        // character names involved in the event (auto-populated or manually set)
 //   promotedSecretId: string | null,               // if this event was promoted to a secret, the secret's ID
 //   knowledgeSummary: string | null                // free-form description of information asymmetry (who knows what about this event's resolution)
@@ -30,7 +32,8 @@ import {
     deleteChatData
 } from './storage.js';
 
-import { getCurrentDay } from './worldState.js';
+import { getCurrentDay, getCalendarConfig } from './worldState.js';
+import { extractYearFromText, dateFromDayCount, resolveScheduledElapsedWindow, parseCurrentCalendarDate, monthLengthsFor, weekdayIndexFromDisplay } from '../lib/calendarMath.js';
 import { getNotebook, addCoreBullet, saveNotebook } from './notebook.js';
 import { dlog } from "../lib/debug.js";
 
@@ -47,6 +50,81 @@ function generateEventId() {
     }
     // Fallback: timestamp + random suffix
     return `evt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+
+function computeScheduledElapsedWindow(chatId, scheduledDate) {
+    if (!scheduledDate) return { start: null, end: null };
+    try {
+        const day = getCurrentDay(chatId);
+        const cfg = getCalendarConfig(chatId);
+        const currentDayCount = Number.isInteger(day?.dayCount) && day.dayCount > 0 ? day.dayCount : 1;
+        const currentElapsed = Number.isInteger(day?.elapsedStoryDays) && day.elapsedStoryDays >= 0 ? day.elapsedStoryDays : 0;
+        const year = extractYearFromText(day?.dateSub || '') ?? extractYearFromText(day?.dateDisplay || '') ?? 1;
+        const currentDate = dateFromDayCount(currentDayCount, year, cfg);
+        const resolved = resolveScheduledElapsedWindow(
+            scheduledDate,
+            currentDate,
+            currentDayCount,
+            currentElapsed,
+            cfg
+        );
+        return resolved ? { start: resolved.start, end: resolved.end } : { start: null, end: null };
+    } catch (e) {
+        return { start: null, end: null };
+    }
+}
+
+
+function getTimingContext(chatId) {
+    try {
+        const day = getCurrentDay(chatId);
+        const cfg = getCalendarConfig(chatId);
+        const currentDayCount = Number.isInteger(day?.dayCount) && day.dayCount > 0 ? day.dayCount : 1;
+        const currentElapsed = Number.isInteger(day?.elapsedStoryDays) && day.elapsedStoryDays >= 0 ? day.elapsedStoryDays : 0;
+        const parsedDate = parseCurrentCalendarDate(day?.dateDisplay || '', day?.dateSub || '', cfg, false);
+        const year = parsedDate?.year ?? extractYearFromText(day?.dateSub || '') ?? extractYearFromText(day?.dateDisplay || '') ?? 1;
+        const currentDate = parsedDate || dateFromDayCount(currentDayCount, year, cfg);
+        const weekLength = Array.isArray(cfg?.weekDays) && cfg.weekDays.length > 0 ? cfg.weekDays.length : 7;
+        const weekdayIndex = weekdayIndexFromDisplay(day?.dateDisplay || '', cfg);
+        const daysUntilWeekEnd = Number.isInteger(weekdayIndex) ? (weekLength - 1 - weekdayIndex) : (weekLength - 1);
+        const monthLengths = monthLengthsFor(cfg, currentDate.year);
+        const monthLength = monthLengths[currentDate.month - 1] || 0;
+        const daysUntilMonthEnd = Math.max(0, monthLength - currentDate.day);
+        return { day, cfg, currentDate, currentDayCount, currentElapsed, daysUntilWeekEnd, daysUntilMonthEnd };
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Structurally place a concretely scheduled event into the visible horizon.
+ * "future" is an internal queue for dated events beyond the current calendar
+ * month; it is intentionally excluded from normal UI and prompt injection.
+ * Tighter horizons win across boundaries: today/tomorrow, then current week,
+ * then current calendar month, then future.
+ */
+export function classifyScheduledEventTier(chatId, scheduledElapsedStart, scheduledElapsedEnd = scheduledElapsedStart) {
+    if (typeof scheduledElapsedStart !== 'number') return null;
+    const ctx = getTimingContext(chatId);
+    if (!ctx) return null;
+    const end = typeof scheduledElapsedEnd === 'number' ? scheduledElapsedEnd : scheduledElapsedStart;
+    if (ctx.currentElapsed > end) return 'missed';
+    const daysUntilStart = scheduledElapsedStart - ctx.currentElapsed;
+    if (daysUntilStart <= 1) return 'immediate';
+    if (daysUntilStart <= ctx.daysUntilWeekEnd) return 'week';
+    if (daysUntilStart <= ctx.daysUntilMonthEnd) return 'month';
+    return 'future';
+}
+
+/** Resolve a free-form scheduledDate and return its structural horizon. */
+export function getStructuralTierForScheduledDate(chatId, scheduledDate) {
+    const window = computeScheduledElapsedWindow(chatId, scheduledDate);
+    return {
+        tier: classifyScheduledEventTier(chatId, window.start, window.end),
+        start: window.start,
+        end: window.end
+    };
 }
 
 // ── Core CRUD ─────────────────────────────────────────────────────────────
@@ -92,31 +170,40 @@ export async function addEvent(chatId, eventData) {
     // Stamp the story day the event enters its tier — the day-advance review
     // uses this to age undated events ("in this tier for N story days").
     let _createdDayCount = null;
+    let _createdElapsedDay = 0;
     try {
         const _day = getCurrentDay(chatId);
         if (_day && typeof _day.dayCount === 'number') _createdDayCount = _day.dayCount;
+        if (_day && Number.isInteger(_day.elapsedStoryDays) && _day.elapsedStoryDays >= 0) _createdElapsedDay = _day.elapsedStoryDays;
     } catch (e) { /* non-fatal */ }
+    const _scheduleWindow = computeScheduledElapsedWindow(chatId, eventData.scheduledDate || null);
+    const _scheduledTier = classifyScheduledEventTier(chatId, _scheduleWindow.start, _scheduleWindow.end);
     const newEvent = {
         id: eventData.id || generateEventId(),
         title: eventData.title || '',
         description: eventData.description || '',
-        tier: eventData.tier || 'undetermined',
+        tier: (_scheduledTier && _scheduledTier !== 'missed') ? _scheduledTier : (eventData.tier || 'undetermined'),
         status: eventData.status || 'pending',
         isNPC: eventData.isNPC || false,
         npcOrigin: eventData.isNPC ? (eventData.npcOrigin || 'detected') : null,
         origin: eventData.origin || 'detected',
         timestamp: eventData.timestamp || Date.now(),
         scheduledDate: eventData.scheduledDate || null,
-        resolveDay: null, // No resolve day for newly created events
+        scheduledElapsedStart: (typeof eventData.scheduledElapsedStart === 'number') ? eventData.scheduledElapsedStart : _scheduleWindow.start,
+        scheduledElapsedEnd: (typeof eventData.scheduledElapsedEnd === 'number') ? eventData.scheduledElapsedEnd : _scheduleWindow.end,
+        resolveDay: null, // Legacy compatibility field
+        resolveElapsedDay: null,
         participants: eventData.participants || [],
         promotedSecretId: eventData.promotedSecretId || null,
         knowledgeSummary: eventData.knowledgeSummary || null,
-        tierSetDay: (typeof eventData.tierSetDay === 'number') ? eventData.tierSetDay : _createdDayCount,
+        tierSetDay: (typeof eventData.tierSetDay === 'number') ? eventData.tierSetDay : _createdDayCount, // legacy compatibility
+        tierSetElapsedDay: (typeof eventData.tierSetElapsedDay === 'number') ? eventData.tierSetElapsedDay : _createdElapsedDay,
         // Special-day materialization bookkeeping (see data/specialDays.js):
         // category chip for the UI, source link, and the per-occurrence dedup key.
         specialDayCategory: eventData.specialDayCategory || null,
         sourceSpecialDayId: eventData.sourceSpecialDayId || null,
-        occurrenceDay: (typeof eventData.occurrenceDay === 'number') ? eventData.occurrenceDay : null
+        occurrenceDay: (typeof eventData.occurrenceDay === 'number') ? eventData.occurrenceDay : null,
+        occurrenceKey: eventData.occurrenceKey || null
     };
     events.push(newEvent);
     await saveAllEvents(chatId, events);
@@ -137,11 +224,33 @@ export async function updateEvent(chatId, eventId, updates) {
 
     // Re-stamp the in-tier age whenever the tier actually changes (unless the
     // caller supplied an explicit stamp).
-    if (updates.tier !== undefined && updates.tier !== events[index].tier && updates.tierSetDay === undefined) {
+    if (updates.tier !== undefined && updates.tier !== events[index].tier && updates.tierSetElapsedDay === undefined) {
         try {
             const day = getCurrentDay(chatId);
-            updates = { ...updates, tierSetDay: (day && typeof day.dayCount === 'number') ? day.dayCount : null };
+            updates = {
+                ...updates,
+                tierSetDay: (day && typeof day.dayCount === 'number') ? day.dayCount : null,
+                tierSetElapsedDay: (day && Number.isInteger(day.elapsedStoryDays)) ? day.elapsedStoryDays : 0
+            };
         } catch (e) { /* non-fatal */ }
+    }
+
+    // A changed schedule is resolved immediately against the current cyclical
+    // calendar position, then stored as a one-time elapsed occurrence window.
+    if (updates.scheduledDate !== undefined && updates.scheduledDate !== events[index].scheduledDate) {
+        const window = computeScheduledElapsedWindow(chatId, updates.scheduledDate);
+        updates = { ...updates, scheduledElapsedStart: window.start, scheduledElapsedEnd: window.end };
+    }
+
+    // Concrete dates outrank LLM/manual horizon guesses. Any parseable dated
+    // event is structurally placed into Immediate / This Week / This Month, or
+    // the internal Future Scheduled queue. Undated events keep their supplied
+    // tier and remain eligible for narrative re-tiering.
+    const finalStart = updates.scheduledElapsedStart !== undefined ? updates.scheduledElapsedStart : events[index].scheduledElapsedStart;
+    const finalEnd = updates.scheduledElapsedEnd !== undefined ? updates.scheduledElapsedEnd : events[index].scheduledElapsedEnd;
+    const scheduledTier = classifyScheduledEventTier(chatId, finalStart, finalEnd);
+    if (scheduledTier && scheduledTier !== 'missed') {
+        updates = { ...updates, tier: scheduledTier };
     }
 
     events[index] = { ...events[index], ...updates };
@@ -169,8 +278,9 @@ export async function deleteEvent(chatId, eventId) {
 
 /**
  * Change an event's status.
- * When setting to 'resolved' or 'missed', also records the current story day
- * as the resolveDay — used by Event Horizon Compaction to determine staleness.
+ * When setting to 'resolved' or 'missed', also records elapsedStoryDays in
+ * resolveElapsedDay for Event Horizon Compaction. resolveDay remains only as
+ * a legacy compatibility field.
  *
  * When a resolved/missed event has participants with known information asymmetry
  * AND the autoPromoteEvents setting is enabled, the event is automatically
@@ -191,10 +301,12 @@ export async function setEventStatus(chatId, eventId, newStatus) {
     // When resolving or missing an event, record the current story day
     // so Event Horizon Compaction can determine when it's old enough to compact.
     let resolveDay = null;
+    let resolveElapsedDay = null;
     if (newStatus === 'resolved' || newStatus === 'missed') {
         try {
             const currentDay = getCurrentDay(chatId);
             resolveDay = currentDay?.dayCount || null;
+            resolveElapsedDay = Number.isInteger(currentDay?.elapsedStoryDays) ? currentDay.elapsedStoryDays : 0;
         } catch (e) {
             // Non-fatal — resolveDay stays null for legacy compatibility
             console.warn('[NWST Events] Could not read current day for resolveDay:', e);
@@ -202,7 +314,7 @@ export async function setEventStatus(chatId, eventId, newStatus) {
     }
 
     // Update the event status
-    const updated = await updateEvent(chatId, eventId, { status: newStatus, resolveDay });
+    const updated = await updateEvent(chatId, eventId, { status: newStatus, resolveDay, resolveElapsedDay });
     if (!updated) return null;
 
     // NOTE: Promotion to secret is intentionally NOT automatic here. Concluded
@@ -212,26 +324,6 @@ export async function setEventStatus(chatId, eventId, newStatus) {
     // event card's Promote button remains available.
 
     return updated;
-}
-
-/**
- * Mark an event as resolved.
- * @param {string} chatId
- * @param {string} eventId
- * @returns {object|null}
- */
-export async function resolveEvent(chatId, eventId) {
-    return setEventStatus(chatId, eventId, 'resolved');
-}
-
-/**
- * Mark an event as missed (past due, never addressed).
- * @param {string} chatId
- * @param {string} eventId
- * @returns {object|null}
- */
-export async function missEvent(chatId, eventId) {
-    return setEventStatus(chatId, eventId, 'missed');
 }
 
 // ── Event→Secret Promotion ────────────────────────────────────────────────
@@ -429,29 +521,6 @@ export async function promoteEventToSecret(chatId, eventId, options = {}) {
     }
 }
 
-/**
- * Get the secret that an event was promoted to, if any.
- * @param {string} chatId
- * @param {string} eventId
- * @returns {Promise<object|null>} The secret object, or null if not promoted or not found
- */
-export async function getPromotedSecret(chatId, eventId) {
-    const event = getEventById(chatId, eventId);
-    if (!event || !event.promotedSecretId) return null;
-    const { getSecretById } = await import('./notebook.js');
-    return getSecretById(chatId, event.promotedSecretId);
-}
-
-/**
- * Get all events that have been promoted to secrets.
- * @param {string} chatId
- * @returns {object[]} Events with a non-null promotedSecretId
- */
-export function getPromotedEvents(chatId) {
-    const events = getAllEvents(chatId);
-    return events.filter(e => e.promotedSecretId != null);
-}
-
 // ── Intelligent knowledge distribution (LLM-powered) ──────────────────────
 
 /**
@@ -466,7 +535,7 @@ export function getPromotedEvents(chatId) {
 async function inferKnowledgeDistribution(event) {
     try {
         const { resolveProfile, generateWithProfile } = await import('../llm/connections.js');
-        const { getSecretBudgetTokens } = await import('../settings.js');
+        const { LLM_TOKEN_BUDGETS } = await import('../llm/tokenBudgets.js');
 
         const profile = resolveProfile('planningLLM');
         if (!profile) {
@@ -474,7 +543,6 @@ async function inferKnowledgeDistribution(event) {
             return null;
         }
 
-        const budgetTokens = getSecretBudgetTokens();
 
         const systemMessage = {
             role: 'system',
@@ -513,7 +581,7 @@ async function inferKnowledgeDistribution(event) {
         };
 
         const response = await generateWithProfile(profile, [systemMessage, userMessage], {
-            maxTokens: Math.min(budgetTokens, 600)
+            maxTokens: LLM_TOKEN_BUDGETS.SMALL
         });
 
         if (!response) {
@@ -568,7 +636,9 @@ async function inferKnowledgeDistribution(event) {
  *   - participants: string[]     (default: [])
  *   - promotedSecretId: string|null (default: null)
  *   - knowledgeSummary: string|null (default: null)
- *   - resolveDay: number|null    (default: null)
+ *   - resolveDay: number|null    (legacy compatibility)
+ *   - resolveElapsedDay: number|null (duration bookkeeping)
+ *   - tierSetElapsedDay: number|null (duration bookkeeping)
  *
  * @param {string} chatId
  * @returns {number} Number of events that were modified
@@ -597,6 +667,30 @@ export async function migrateEventData(chatId) {
             event.resolveDay = null;
             changed = true;
         }
+        if (event.resolveElapsedDay === undefined) {
+            event.resolveElapsedDay = null;
+            changed = true;
+        }
+        if (event.tierSetElapsedDay === undefined) {
+            event.tierSetElapsedDay = null;
+            changed = true;
+        }
+        if (event.timingDismissedElapsedDay === undefined) {
+            event.timingDismissedElapsedDay = null;
+            changed = true;
+        }
+        if (event.scheduledElapsedStart === undefined) {
+            event.scheduledElapsedStart = null;
+            changed = true;
+        }
+        if (event.scheduledElapsedEnd === undefined) {
+            event.scheduledElapsedEnd = null;
+            changed = true;
+        }
+        if (event.occurrenceKey === undefined) {
+            event.occurrenceKey = null;
+            changed = true;
+        }
 
         if (changed) migrated++;
     }
@@ -613,45 +707,7 @@ export async function migrateEventData(chatId) {
 
 // ── Tier management ───────────────────────────────────────────────────────
 
-/**
- * Change an event's tier.
- * @param {string} chatId
- * @param {string} eventId
- * @param {string} newTier - 'immediate' | 'week' | 'month' | 'undetermined'
- * @returns {object|null}
- */
-export async function setEventTier(chatId, eventId, newTier) {
-    const validTiers = ['immediate', 'week', 'month', 'undetermined'];
-    if (!validTiers.includes(newTier)) {
-        console.error(`[NWST Events] Invalid tier: ${newTier}`);
-        return null;
-    }
-    return updateEvent(chatId, eventId, { tier: newTier });
-}
-
 // ── Queries (filtered views used by UI and prompt injection) ──────────────
-
-/**
- * Get events filtered by tier.
- * @param {string} chatId
- * @param {string} tier - 'immediate' | 'week' | 'month' | 'undetermined'
- * @returns {object[]} Events in that tier
- */
-export function getEventsByTier(chatId, tier) {
-    const events = getAllEvents(chatId);
-    return events.filter(e => e.tier === tier);
-}
-
-/**
- * Get events filtered by status.
- * @param {string} chatId
- * @param {string} status - 'pending' | 'inprogress' | 'resolved' | 'missed'
- * @returns {object[]}
- */
-export function getEventsByStatus(chatId, status) {
-    const events = getAllEvents(chatId);
-    return events.filter(e => e.status === status);
-}
 
 /**
  * Get only ACTIVE events (pending or in-progress).
@@ -661,28 +717,19 @@ export function getEventsByStatus(chatId, status) {
  */
 export function getActiveEvents(chatId) {
     const events = getAllEvents(chatId);
+    return events.filter(e =>
+        (e.status === 'pending' || e.status === 'inprogress') && e.tier !== 'future'
+    );
+}
+
+/**
+ * Get all non-concluded events, including internally queued Future Scheduled
+ * events. Used by scanner/planning dedup so hidden future commitments are not
+ * rediscovered every cadence.
+ */
+export function getTrackedEvents(chatId) {
+    const events = getAllEvents(chatId);
     return events.filter(e => e.status === 'pending' || e.status === 'inprogress');
-}
-
-/**
- * Get NPC-only events.
- * @param {string} chatId
- * @returns {object[]} Events where isNPC is true
- */
-export function getNPCEvents(chatId) {
-    const events = getAllEvents(chatId);
-    return events.filter(e => e.isNPC === true);
-}
-
-/**
- * Get events by origin type.
- * @param {string} chatId
- * @param {string} origin - 'detected' | 'generated'
- * @returns {object[]}
- */
-export function getEventsByOrigin(chatId, origin) {
-    const events = getAllEvents(chatId);
-    return events.filter(e => e.origin === origin);
 }
 
 /**
@@ -706,14 +753,9 @@ export function getEventsGroupedByTier(chatId) {
 
 /**
  * Roll the event horizon forward by one day.
- * This is called during day advancement to update event tiers appropriately:
- *   - Immediate events that are past-due → marked missed
- *   - Week events may become immediate
- *   - Month events may become week
- *   - Undetermined events stay unchanged
- *
- * The exact logic depends on the narrative context and is ultimately decided
- * by the Planning LLM. This function provides the structural update only.
+ * Applies tier/status changes that were already decided by the structural calendar
+ * or an approved review result. Dated-event placement itself is deterministic; this
+ * helper persists the requested move and stamps the appropriate timing markers.
  *
  * @param {string} chatId
  * @param {object} tierChanges - Object mapping event IDs to their new tiers
@@ -722,9 +764,11 @@ export function getEventsGroupedByTier(chatId) {
 export async function rollEventHorizon(chatId, tierChanges) {
     const events = getAllEvents(chatId);
     let dayCount = null;
+    let elapsedStoryDays = 0;
     try {
         const day = getCurrentDay(chatId);
         if (day && typeof day.dayCount === 'number') dayCount = day.dayCount;
+        if (day && Number.isInteger(day.elapsedStoryDays)) elapsedStoryDays = day.elapsedStoryDays;
     } catch (e) { /* non-fatal */ }
     for (const event of events) {
         if (tierChanges[event.id]) {
@@ -735,9 +779,11 @@ export async function rollEventHorizon(chatId, tierChanges) {
                 // out — previously roll-missed events never carried one and
                 // therefore never compacted.
                 if (typeof event.resolveDay !== 'number') event.resolveDay = dayCount;
+                if (typeof event.resolveElapsedDay !== 'number') event.resolveElapsedDay = elapsedStoryDays;
             } else {
                 event.tier = newTier;
                 event.tierSetDay = dayCount;
+                event.tierSetElapsedDay = elapsedStoryDays;
             }
         }
     }
@@ -745,14 +791,6 @@ export async function rollEventHorizon(chatId, tierChanges) {
 }
 
 // ── Bulk operations ───────────────────────────────────────────────────────
-
-/**
- * Delete all events for a chat.
- * @param {string} chatId
- */
-export function clearAllEvents(chatId) {
-    deleteChatData(chatId, 'events');
-}
 
 /**
  * Remove a single concluded event from the active list, preserving a concise
@@ -774,7 +812,7 @@ export async function removeEventWithSummary(chatId, eventId) {
         const statusIcon = event.status === 'resolved' ? '✅' : '⏳';
         const tierTag = event.tier !== 'undetermined' ? ` [${event.tier}]` : '';
         const dateTag = event.scheduledDate ? ` (${event.scheduledDate})` : '';
-        const resolveTag = typeof event.resolveDay === 'number' ? ` — Resolved Day ${event.resolveDay}` : '';
+        const resolveTag = typeof event.resolveElapsedDay === 'number' ? ` — Resolved after ${event.resolveElapsedDay} elapsed story day(s)` : '';
         let summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag}${resolveTag}`;
         if (summary.length > 300) summary = summary.substring(0, 297) + '...';
         const updatedDoNotForget = [...doNotForget, summary];
@@ -793,13 +831,22 @@ export async function removeEventWithSummary(chatId, eventId) {
 }
 
 /**
- * Get the total count of events for a chat.
+ * Remove legacy concluded events that were already promoted to Secrets but
+ * remained in the visible Event list. The Secret is independent; preserve a
+ * Past Events summary and remove the stale Event immediately.
  * @param {string} chatId
- * @returns {number}
+ * @returns {Promise<number>} number of lingering promoted events removed
  */
-export function getEventCount(chatId) {
-    const events = getAllEvents(chatId);
-    return events.length;
+export async function cleanupPromotedConcludedEvents(chatId) {
+    const lingeringIds = getAllEvents(chatId)
+        .filter(event => (event.status === 'resolved' || event.status === 'missed') && event.promotedSecretId)
+        .map(event => event.id);
+
+    let removed = 0;
+    for (const eventId of lingeringIds) {
+        if (await removeEventWithSummary(chatId, eventId)) removed++;
+    }
+    return removed;
 }
 
 // ── Event Horizon Compaction ──────────────────────────────────────────────
@@ -816,25 +863,23 @@ export function getEventCount(chatId) {
  *
  * Compaction eligibility (MUST satisfy ALL):
  *   - Event status is 'resolved' or 'missed'
- *   - Event has a resolveDay set (story day when it was resolved)
- *   - Current dayCount - resolveDay >= thresholdDays
- *   - Event does NOT have a promotedSecretId (promoted events are kept
- *     to preserve the link back to their Notebook secret)
+ *   - Event has a resolveElapsedDay set
+ *   - Current elapsedStoryDays - resolveElapsedDay >= thresholdDays
  *
- * Events without resolveDay (legacy) are NOT compacted — they survive
- * until manually resolved again with the new tracking field.
+ * Events without resolveElapsedDay are NOT compacted until migration or a
+ * later status update establishes the duration marker.
  *
  * The doNotForget field has a hard cap of 50 entries (FIFO eviction).
  *
  * @param {string} chatId
- * @param {number} [thresholdDays=3] - Story days after which a resolved/missed
+ * @param {number} [thresholdDays=0] - Story days after which a resolved/missed
  *   event is eligible for compaction.
  * @returns {{ compacted: number, summaries: string[] }} Result info
  */
-export async function compactEventHorizon(chatId, thresholdDays = 3) {
+export async function compactEventHorizon(chatId, thresholdDays = 0) {
     try {
         const currentDay = getCurrentDay(chatId);
-        const dayCount = currentDay?.dayCount ?? 0;
+        const elapsedStoryDays = Number.isInteger(currentDay?.elapsedStoryDays) ? currentDay.elapsedStoryDays : 0;
         const events = getAllEvents(chatId);
         const notebook = getNotebook(chatId);
         const doNotForget = notebook.core.doNotForget || [];
@@ -845,16 +890,15 @@ export async function compactEventHorizon(chatId, thresholdDays = 3) {
 
         for (const event of events) {
             const isStale = event.status === 'resolved' || event.status === 'missed';
-            const hasResolveDay = typeof event.resolveDay === 'number';
-            const pastThreshold = hasResolveDay && (dayCount - event.resolveDay >= thresholdDays);
-            const alreadyPromoted = event.promotedSecretId != null;
+            const hasResolveDay = typeof event.resolveElapsedDay === 'number';
+            const pastThreshold = hasResolveDay && (elapsedStoryDays - event.resolveElapsedDay >= thresholdDays);
             // Events awaiting a player decision (promotion review or validity
             // review) must not be compacted out from under the pending card.
             const awaitingDecision = event.promotionFlag != null || event.validityFlag != null || event.timingFlag != null;
 
-            // Skip promoted events — they need to stick around so the
-            // promotedSecretId link back to the Notebook secret survives.
-            if (isStale && hasResolveDay && pastThreshold && !alreadyPromoted && !awaitingDecision) {
+            // Promoted events are compactable too: the Notebook secret is
+            // independent, and keeping the concluded Event only creates clutter.
+            if (isStale && hasResolveDay && pastThreshold && !awaitingDecision) {
                 compactable.push(event);
             } else {
                 remaining.push(event);
@@ -871,7 +915,7 @@ export async function compactEventHorizon(chatId, thresholdDays = 3) {
             const statusIcon = event.status === 'resolved' ? '✅' : '⏳';
             const tierTag = event.tier !== 'undetermined' ? ` [${event.tier}]` : '';
             const dateTag = event.scheduledDate ? ` (${event.scheduledDate})` : '';
-            const summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag} — Resolved Day ${event.resolveDay}`;
+            const summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag} — Resolved after ${event.resolveElapsedDay} elapsed story day(s)`;
 
             // Truncate overlong summaries (cap at 300 chars to keep the field tidy)
             summaries.push(summary.length > 300 ? summary.substring(0, 297) + '...' : summary);

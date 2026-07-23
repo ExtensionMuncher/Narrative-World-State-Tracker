@@ -1615,3 +1615,24 @@
         left: 0;
     }
 }
+
+/* Quiet persistent cadence health indicator */
+.nwst-scan-health {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 18px;
+    margin: -5px 0 9px;
+    padding: 2px 4px;
+    font-size: 10.5px;
+    line-height: 1.35;
+    color: #888;
+    cursor: help;
+}
+.nwst-scan-health-dot { font-size: 8px; color: #7f9b83; }
+.nwst-scan-health[data-status="scanning"] .nwst-scan-health-dot { color: #6f91b8; }
+.nwst-scan-health[data-status="failed"] .nwst-scan-health-dot,
+.nwst-scan-health[data-status="backlog"] .nwst-scan-health-dot { color: #bd7b73; }
+.nwst-scan-health[data-status="paused"] .nwst-scan-health-dot,
+.nwst-scan-health[data-status="disabled"] .nwst-scan-health-dot,
+.nwst-scan-health[data-status="warmup"] .nwst-scan-health-dot { color: #a99a6c; }

@@ -474,7 +474,7 @@ function buildSecretEntryHTML(secret) {
 
                 <div class="nwst-secret-field" style="margin-bottom:8px">
                     <div class="nwst-secret-field-label">Trigger anchors
-                        <span style="font-size:10px;color:#999;font-weight:normal"> — distinctive words/phrases unique to THIS secret (comma-separated). These make injection reliable. e.g. for a secret about Rowan: rowan, affiliate, courier, tattoo</span>
+                        <span style="font-size:10px;color:#999;font-weight:normal"> — distinctive words/phrases unique to THIS secret (comma-separated). These make injection reliable. e.g. for a secret about Mara: mara, night courier, silver ring, east gate</span>
                     </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="triggerAnchorsFlat"
                         style="font-size:13px;line-height:1.5;border:0.5px solid #777;border-radius:6px;padding:6px 8px;min-height:28px;cursor:text">${escapeHTML(flattenAnchors(secret.triggerAnchors))}</div>

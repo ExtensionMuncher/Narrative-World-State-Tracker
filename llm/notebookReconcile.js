@@ -24,6 +24,7 @@
 // =============================================================================
 
 import { resolveProfile, generateWithProfile } from './connections.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import {
     getCoreField, getMysteryField, replaceCoreField, replaceMysteryField
 } from '../data/notebook.js';
@@ -56,6 +57,8 @@ CRITICAL RULES — READ CAREFULLY:
 - NEVER promote an unresolved detail just because it shares a topic with a fact. Promote ONLY if the underlying question is now answered in the story.
 - When in doubt, leave a bullet alone. Under-tidying is far better than destroying a deliberate narrative thread.
 - Preserve specific names, dates, and concrete details when merging or editing. Do not generalize away specifics.
+- Preserve explicitly stated motives. Do NOT rewrite fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior as confidence, strategy, dominance, bravery, or calculated control unless the existing bullet itself establishes that interpretation.
+- Do not make characters more competent, composed, sinister, romantic, strategic, or "badass" while tidying phrasing.
 - Do not touch any field other than these three.
 
 OUTPUT FORMAT (JSON only, no markdown fences, no commentary):
@@ -186,7 +189,7 @@ export async function runNotebookReconcile(chatId) {
 
     let response;
     try {
-        response = await generateWithProfile(profile, messages);
+        response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
     } catch (e) {
         console.error('[NWST Reconcile] LLM call failed:', e);
         nwstToast('Notebook reconciliation failed — see console.', 'error');

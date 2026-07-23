@@ -23,12 +23,16 @@ import {
     getConditions, updateConditionContent, getSettingContext,
     saveSnapshot, getSeasonConfig, getCalendarConfig
 } from '../data/worldState.js';
-import { getAllEvents, saveAllEvents, addEvent } from '../data/events.js';
+import { getAllEvents, saveAllEvents, addEvent, classifyScheduledEventTier } from '../data/events.js';
 import { getNotebook, saveNotebook } from '../data/notebook.js';
 import { getPlannerPrompt } from '../settings.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
-import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle, computeLunarAngleFromDate, getMoonPhaseForAngle, computeSeason } from './dayAdvancement.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
+import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle, computeLunarAngleFromDate, getMoonPhaseForAngle, computeSeason, refreshExtraMoons, buildMoonPhenomenaOptions } from './dayAdvancement.js';
+import { getEraPin } from '../data/worldState.js';
+import { advanceCurrentCalendarDate, parseCurrentCalendarDate, dayOfYearFor, daysBetweenCalendarDates, wrapDayCount, extractYearFromText, computeDeterministicDate } from '../lib/calendarMath.js';
 import { dlog } from "../lib/debug.js";
+import { getMoonConfig } from '../data/moons.js';
 
 // ── Internal prompt ───────────────────────────────────────────────────────
 
@@ -48,8 +52,20 @@ You must update ALL of the following:
 2. ALL EVENTS: Mark past-due events as resolved or missed. Update surviving events to correct tiers. Generate new events where the skip context warrants them. Adjust NPC events based on what would plausibly have occurred.
 
 CRITICAL — NPC vs User Events: Events driven by NPC characters (events about a character's internal struggle, personal relationships, backstory, or decisions) MUST have "isNPC": true. Events that are world-facing or player-facing (faction movements, festivals, environmental changes, rumors the player can investigate) should have "isNPC": false. When in doubt, if a specific NPC name appears in the title or description, set isNPC: true.
-3. WORLD CONDITIONS: Update political, social, spiritual, and environmental conditions to reflect what the skip duration and reason imply.
-4. NOTEBOOK: Update planted details, character whereabouts, offscreen pressures as appropriate for elapsed time. Remove items that would have resolved.
+3. WORLD CONDITIONS: Use one of two mental modes for each condition. GROUNDED means the skip description/current state actually establishes the macro condition, with at most ONE conservative inference and no invented actor, reaction, institution, team, rumor, policy, coordination, awareness, or offscreen development. AMBIENT means a restrained low-stakes background condition consistent with Setting Context and the new date/season, independent of the immediate cast. Ambient may introduce modest background motion involving setting-supported institutions/factions/populations/environments, including named overarching institutions, provided it stays something the active cast could plausibly never notice. If an invented development would force immediate plan changes, urgent follow-up, or substantially rewrite the playable world, it is too consequential unless the supplied world state already supports that scale. Keep conditions at macro/durable scale: institutions, factions, populations, districts, regions, cultures, social patterns, spiritual systems, or environments. A named character may be identified as the CAUSE of a genuine grounded macro shift, but do not turn their personal actions into the World Condition itself. Do not invent unseen meetings, rumor circulation, institutional reactions, coordination, mutual awareness, policy shifts, resource strain, new teams/details, or faction-wide sentiment to bridge a local fact into a macro consequence. Preserve information asymmetry. Plausible future consequences are not current conditions. Avoid casually inventing plot-forcing upheavals such as war, coups, states of emergency, sweeping nationwide crackdowns/purges, mass civil disorder, economic collapse, catastrophic disasters, mass-casualty events, widespread infrastructure failure, or supernatural/metaphysical catastrophes. Avoid unsupported unprecedented/historic/system-wide claims.
+
+CATEGORY BOUNDARIES / MACRO THRESHOLDS FOR WORLD CONDITIONS:
+- POLITICAL: institutions, factions, governance, territory, policy/regulatory pressure, leadership/hierarchy, organizational posture, or institutional/faction relationships. One case, target, operative, restraining order, arrest, or investigation is not macro by itself. AMBIENT Political may include modest institutional motion such as routine procedural guidance, staffing/budget pressure, promotion cycles, municipal initiatives, enforcement-priority shifts, or low-key faction/corporate maneuvering when background-scale.
+- SOCIAL: collective behavior, norms, communities, public routines, workplaces, commerce, social spaces, population habits, or group-level pressures. Private relationships are not Social World State. Season/weather may explain social behavior but should not dominate the paragraph.
+- SPIRITUAL/SUPERNATURAL: durable metaphysical systems/pressures, supernatural factions, ritual cycles, regional phenomena, barriers/realms, or other setting-supported supernatural conditions. One character's aura/encounter/emotion is not world-scale metaphysics. Do not invent supernatural ontology absent setting support.
+- ENVIRONMENTAL: durable climate/seasonal patterns, ecology, landscape, water/air conditions, regional hazards, flora/fauna shifts, or persistent environmental change. The new day's immediate weather belongs in Current Day unless it reflects a wider pattern.
+- A GROUNDED FACT is not automatically a GROUNDED WORLD CONDITION. If the skip only establishes case-specific facts, keep/preserve the broader condition or use restrained AMBIENT background rather than inflating those facts into macro state.
+4. NOTEBOOK: Maintain the latest coherent Notebook state after the skip — not an archive of every superseded intermediate state. Remove or replace outdated, contradicted, resolved, expired, or no-longer-current bullets across all Notebook fields. characterWhereabouts must contain only one latest-known position per character; offscreenPressure only one current pressure per source; currentToneAtmosphere only the current tone. Preserve durable facts unless the story explicitly corrected them.
+
+NOTEBOOK MOTIVE GROUNDING — applies to every Notebook addition/edit:
+- When narration, dialogue, or internal thought explicitly states WHY a character acted, preserve that stated motive as higher-confidence evidence than dramatic presentation.
+- Do NOT upgrade fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior into confidence, strategy, dominance, bravery, or calculated control unless the prose establishes it.
+- Do not make characters more competent, composed, sinister, romantic, strategic, or "badass" than the evidence supports.
 
 IMPORTANT — Moon Phase: You must determine the correct moon phase at the new date after the time skip. Consider:
 - The current moon phase (provided in the context)
@@ -69,7 +85,8 @@ Respond with a JSON object:
     "flora": "seasonal flora description",
     "fauna": "seasonal fauna description",
     "spiritualClimate": "if applicable",
-    "moonPhaseName": "exact moon phase name at the new date (e.g. 'Waning Crescent', 'First Quarter', 'Full Moon')"
+    "moonPhaseName": "exact moon phase name at the new date (e.g. 'Waning Crescent', 'First Quarter', 'Full Moon')",
+    "daysSkipped": number — the total whole days elapsed in this skip (e.g. "three weeks" = 21). REQUIRED. Count carefully; the system advances its deterministic calendar by exactly this many days.
   },
   "eventUpdates": {
     "resolved": ["event_id_1", ...],
@@ -99,6 +116,8 @@ Respond with a JSON object:
     "addMysteryBullets": { "fieldName": ["text1"] }
   }
 }
+
+EVENT UPDATE SAFETY: Only list an existing event under resolved, missed, or tierChanges when the time skip clearly changes that event. Existing events omitted from eventUpdates remain unchanged; omission does NOT mean resolved.
 
 Write with atmospheric detail. Ground everything in the setting context and the skip description.`;
 
@@ -159,9 +178,11 @@ export async function executeTimeSkip(skipDescription) {
             ? computeSeason(currentDay.dayCount, getSeasonConfig(chatId))
             : null;
 
+        const eraPinForPrompt = !getCalendarConfig(chatId).enabled ? getEraPin(chatId) : '';
         const userPrompt = buildTimeskipPrompt(
             skipDescription, currentDay, conditions, events,
-            notebook, settingContext, chatContext, currentComputedSeason
+            notebook, settingContext, chatContext, currentComputedSeason,
+            eraPinForPrompt
         );
 
         // ── 4. Call Planning LLM via connection profile ────────
@@ -171,7 +192,7 @@ export async function executeTimeSkip(skipDescription) {
         ];
 
         dlog('[NWST Timeskip] Calling Planning LLM with full context...');
-        const response = await generateWithProfile(profile, messages);
+        const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.BULK });
 
         if (!response) {
             throw new Error('Planning LLM returned empty response.');
@@ -183,25 +204,93 @@ export async function executeTimeSkip(skipDescription) {
             throw new Error('Failed to parse Planning LLM response.');
         }
 
-        // Apply Current Day updates
-        //   - The LLM generates a full new currentDay including season
-        //   - When the seasonal engine is active, the computed season OVERRIDES
-        //     the LLM's season — the engine is the authority on what season it is
-        //   - dayCount is PRESERVED through timeskip (no reliable estimate of
-        //     skip duration yet; user can edit via UI if needed)
+        // Apply Current Day updates.
+        // Calendar position (dayCount) is cyclical; elapsedStoryDays is a
+        // separate duration counter. The calendar advances from the currently
+        // displayed date using the chat's own Calendar Config — never from the
+        // elapsed counter.
+        let appliedDaysSkipped = null;
         if (result.currentDay) {
             nwstToast('Current Day updated.', 'info');
 
-            const oldDayCount = preSkipSnapshot.worldState?.currentDay?.dayCount ?? 0;
+            const preDay = preSkipSnapshot.worldState?.currentDay || {};
+            const oldDayCount = Number.isInteger(preDay.dayCount) && preDay.dayCount > 0 ? preDay.dayCount : 1;
+            const oldElapsedStoryDays = Number.isInteger(preDay.elapsedStoryDays) && preDay.elapsedStoryDays >= 0 ? preDay.elapsedStoryDays : 0;
             const seasonConfig = getSeasonConfig(chatId);
-            const computedSeason = computeSeason(oldDayCount, seasonConfig);
-            const finalSeason = computedSeason !== null ? computedSeason : (result.currentDay.season || '');
+            const calCfg = getCalendarConfig(chatId);
+            const dmy = getSetting('dateFormatDMY') === true;
 
+            let reportedDaysSkipped = Number(result.currentDay.daysSkipped);
+            if (!Number.isInteger(reportedDaysSkipped) || reportedDaysSkipped < 0) reportedDaysSkipped = Math.floor(reportedDaysSkipped);
+            if (!Number.isInteger(reportedDaysSkipped) || reportedDaysSkipped < 0 || reportedDaysSkipped > 36500) {
+                reportedDaysSkipped = null;
+            }
+
+            // If the LLM omitted daysSkipped, derive it from the old and new
+            // calendar dates using the configured custom month structure.
+            if (!Number.isInteger(reportedDaysSkipped)) {
+                const oldDate = parseCurrentCalendarDate(preDay.dateDisplay || '', preDay.dateSub || '', calCfg, dmy);
+                const newDate = parseCurrentCalendarDate(result.currentDay.dateDisplay || '', result.currentDay.dateSub || '', calCfg, dmy);
+                if (oldDate && newDate) {
+                    const diff = daysBetweenCalendarDates(oldDate, newDate, calCfg);
+                    if (Number.isInteger(diff) && diff >= 0) {
+                        reportedDaysSkipped = diff;
+                        dlog(`[NWST Timeskip] daysSkipped missing/invalid — derived ${diff} day(s) from configured calendar dates.`);
+                    }
+                }
+            }
+            appliedDaysSkipped = reportedDaysSkipped;
+
+            let newDayCount = oldDayCount;
+            let newElapsedStoryDays = oldElapsedStoryDays;
+            if (Number.isInteger(appliedDaysSkipped)) {
+                newElapsedStoryDays = oldElapsedStoryDays + appliedDaysSkipped;
+                const advanced = advanceCurrentCalendarDate(preDay, appliedDaysSkipped, calCfg, dmy);
+                if (advanced) {
+                    result.currentDay.dateDisplay = advanced.dateDisplay;
+                    newDayCount = advanced.dayOfYear;
+
+                    // Preserve player-authored custom era labels. For other
+                    // calendars the LLM's dateSub remains authoritative.
+                    const codeEraWins = calCfg.enabled && (calCfg.eraName || '').trim();
+                    if (codeEraWins) {
+                        const eraSub = computeDeterministicDate(advanced.date, newDayCount, newDayCount, calCfg).eraSub || '';
+                        result.currentDay.dateSub = eraSub;
+                    }
+                } else {
+                    // If the pre-skip date itself cannot be parsed, trust the
+                    // LLM-written new date when it can be parsed; otherwise wrap
+                    // the cyclical counter by the configured year length.
+                    const parsedNew = parseCurrentCalendarDate(result.currentDay.dateDisplay || '', result.currentDay.dateSub || '', calCfg, dmy);
+                    if (parsedNew) {
+                        newDayCount = dayOfYearFor(parsedNew, calCfg);
+                    } else {
+                        const currentYear = extractYearFromText(preDay.dateSub || '') ?? extractYearFromText(preDay.dateDisplay || '') ?? 1;
+                        newDayCount = wrapDayCount(oldDayCount + appliedDaysSkipped, calCfg, currentYear);
+                    }
+                }
+            } else {
+                // No trustworthy elapsed duration: keep elapsedStoryDays as-is,
+                // but if the LLM supplied a parseable new date, keep dayCount in
+                // sync with that displayed calendar position.
+                const parsedNew = parseCurrentCalendarDate(result.currentDay.dateDisplay || '', result.currentDay.dateSub || '', calCfg, dmy);
+                if (parsedNew) newDayCount = dayOfYearFor(parsedNew, calCfg);
+            }
+
+            const computedSeason = computeSeason(newDayCount, seasonConfig);
+            const finalSeason = computedSeason !== null ? computedSeason : (result.currentDay.season || '');
             await replaceCurrentDay(chatId, {
                 ...result.currentDay,
                 season: finalSeason,
-                dayCount: oldDayCount
+                dayCount: newDayCount,
+                elapsedStoryDays: newElapsedStoryDays
             });
+
+            if (Number.isInteger(appliedDaysSkipped)) {
+                dlog(`[NWST Timeskip] +${appliedDaysSkipped} story day(s) → dayCount ${newDayCount}, elapsedStoryDays ${newElapsedStoryDays}.`);
+            } else {
+                console.warn('[NWST Timeskip] No trustworthy skip length — elapsedStoryDays preserved.');
+            }
         }
 
         // Apply event updates
@@ -230,9 +319,18 @@ export async function executeTimeSkip(skipDescription) {
             let newAngle = 0;
             let phaseSource = '';
 
+            // Priority 0: a validated elapsed-day count advances the stored moon
+            // angle directly, regardless of whether the displayed calendar date
+            // is deterministic or LLM-owned.
+            if (Number.isInteger(appliedDaysSkipped)) {
+                const oldAngleDet = preSkipSnapshot.worldState?.currentDay?.lunarAngle ?? getLunarAngle(chatId) ?? 0;
+                newAngle = ((oldAngleDet + appliedDaysSkipped * getDegreesPerDay(chatId)) % 360 + 360) % 360;
+                phaseSource = `elapsed +${appliedDaysSkipped}d`;
+            }
+
             // Priority 1: LLM directly specified the moon phase
             const llmPhaseName = result.currentDay?.moonPhaseName;
-            if (llmPhaseName && typeof llmPhaseName === 'string' && llmPhaseName.trim()) {
+            if (!phaseSource && llmPhaseName && typeof llmPhaseName === 'string' && llmPhaseName.trim()) {
                 const phaseAngle = getPhaseAngle(llmPhaseName.trim());
                 // getPhaseAngle returns 0 for unknown phases, but valid phases
                 // always return a positive center angle (New Moon = 11.25°)
@@ -262,7 +360,7 @@ export async function executeTimeSkip(skipDescription) {
                 const oldDate = oldDay.dateDisplay || '';
                 const newDate = result.currentDay?.dateDisplay || '';
                 const estimatedDays = estimateDaysBetweenDates(oldDate, newDate);
-                newAngle = ((oldLunarAngle + estimatedDays * getDegreesPerDay()) % 360 + 360) % 360;
+                newAngle = ((oldLunarAngle + estimatedDays * getDegreesPerDay(chatId)) % 360 + 360) % 360;
                 phaseSource = `estimated ${estimatedDays}d from stored angle`;
             }
 
@@ -270,16 +368,27 @@ export async function executeTimeSkip(skipDescription) {
             newAngle = ((newAngle % 360) + 360) % 360;
             setLunarAngle(chatId, newAngle);
 
+            // Extra moons advance by the best-known skip length: exact when
+            // the deterministic engine ran, else estimated from date strings.
+            let extraMoonDays = appliedDaysSkipped;
+            if (!Number.isInteger(extraMoonDays) || extraMoonDays < 0) {
+                const oldDateEm = preSkipSnapshot.worldState?.currentDay?.dateDisplay || '';
+                const est = estimateDaysBetweenDates(oldDateEm, result.currentDay?.dateDisplay || '');
+                extraMoonDays = (Number.isInteger(est) && est > 0) ? est : 1;
+            }
+
             // Generate new 7-day moon phase strip from the new angle
             // Build phenomena context from the current (pre-skip or updated) day
-            const cycleDays = getSetting('moonCycleDays') || 29.53;
-            const phenOptions = {
-                season: currentDay?.season || '',
-                weatherToday: currentDay?.weatherToday || '',
-                cycleDays
-            };
+            const cycleDays = getMoonConfig(chatId).moonCycleDays || 29.53058867;
+            const phenOptions = buildMoonPhenomenaOptions(chatId, result.currentDay || currentDay, {
+                cycleDays,
+                forecast: Array.isArray(result.forecast) && result.forecast.length > 0
+                    ? result.forecast
+                    : getForecast(chatId)
+            });
             const newMoonPhases = generateMoonPhases(newAngle, 7, 0, phenOptions);
             await replaceMoonPhases(chatId, newMoonPhases);
+            await refreshExtraMoons(chatId, extraMoonDays, phenOptions);
 
             const phaseInfo = getMoonPhaseForAngle(newAngle);
             nwstToast(`Moon phases recalculated (${phaseSource}). Anchored as "${phaseInfo.phaseName}" (${newAngle.toFixed(1)}°).`, 'info');
@@ -348,7 +457,7 @@ function estimateDaysBetweenDates(oldDate, newDate) {
 
 // ── Prompt building ───────────────────────────────────────────────────────
 
-function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook, settingContext, chatContext, computedSeason) {
+function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook, settingContext, chatContext, computedSeason, eraPin = '') {
     let prompt = '';
 
     prompt += `TIME SKIP DESCRIPTION:\n"${skipDesc}"\n\n`;
@@ -356,6 +465,9 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     prompt += `=== CURRENT WORLD STATE ===\n`;
     prompt += `Date: ${currentDay.dateDisplay || '(not set)'}\n`;
     prompt += `Sub-Date: ${currentDay.dateSub || ''}\n`;
+    if (eraPin) {
+        prompt += `PLAYER-VERIFIED ERA: the player manually confirmed the era system ("${eraPin}"). Keep the new dateSub in this same era system — update era-relative year numbers for the elapsed time, but do NOT switch to a different era system.\n`;
+    }
     prompt += `Season: ${currentDay.season || '(not set)'}\n`;
     if (computedSeason) {
         prompt += `System-computed current season: ${computedSeason}\n`;
@@ -434,9 +546,24 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
 
 // ── Chat context ──────────────────────────────────────────────────────────
 
-function getVisibleChatContext() {
-    // Placeholder — refined during integration
-    return '';
+function getVisibleChatContext(count = 20) {
+    try {
+        const ctx = SillyTavern.getContext();
+        const chat = ctx.chat || [];
+        const visibleMessages = chat.filter(msg => {
+            if (msg.is_system && msg.extra?.hidden) return false;
+            if (msg.extra?.display === 'none') return false;
+            return Boolean(msg.mes);
+        });
+
+        return visibleMessages.slice(-count).map(msg => {
+            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            return `[${sender}]: ${msg.mes}`;
+        }).join('\n');
+    } catch (e) {
+        console.warn('[NWST Timeskip] Could not gather recent visible chat context:', e);
+        return '';
+    }
 }
 
 // ── Response parsing ──────────────────────────────────────────────────────
@@ -462,44 +589,57 @@ function parseTimeskipResponse(response) {
 
 async function applyEventUpdates(chatId, updates) {
     const events = getAllEvents(chatId);
+    const currentDay = getCurrentDay(chatId);
+    const currentDayCount = (currentDay && typeof currentDay.dayCount === 'number') ? currentDay.dayCount : null;
+    const currentElapsedDay = (currentDay && Number.isInteger(currentDay.elapsedStoryDays)) ? currentDay.elapsedStoryDays : 0;
 
-    // Track which event IDs the LLM explicitly addressed
-    const mentionedIds = new Set();
-
-    // Mark resolved
+    // Only explicit LLM decisions mutate existing events. Omission means
+    // "unchanged", not "resolved" — otherwise a truncated or incomplete
+    // response can silently close unrelated future events.
     for (const id of (updates.resolved || [])) {
-        mentionedIds.add(id);
         const event = events.find(e => e.id === id);
-        if (event) event.status = 'resolved';
+        if (event) {
+            event.status = 'resolved';
+            event.resolveDay = currentDayCount;
+            event.resolveElapsedDay = currentElapsedDay;
+        }
     }
 
-    // Mark missed
     for (const id of (updates.missed || [])) {
-        mentionedIds.add(id);
         const event = events.find(e => e.id === id);
-        if (event) event.status = 'missed';
+        if (event) {
+            event.status = 'missed';
+            event.resolveDay = currentDayCount;
+            event.resolveElapsedDay = currentElapsedDay;
+        }
     }
 
-    // Apply tier corrections for surviving events. Tier-changed events count
-    // as "mentioned" so the auto-resolve pass below does not close them.
     // The undetermined tier is protected — deliberately timeless — so it is
     // neither a valid source nor a valid target for automated tier changes.
     const VALID_TIERS = ['immediate', 'week', 'month'];
     const tierChanges = (updates.tierChanges && typeof updates.tierChanges === 'object') ? updates.tierChanges : {};
     for (const [id, tier] of Object.entries(tierChanges)) {
-        mentionedIds.add(id);
         const event = events.find(e => e.id === id);
-        if (event && event.tier !== 'undetermined' && VALID_TIERS.includes(tier)) event.tier = tier;
+        if (event && event.tier !== 'undetermined' && VALID_TIERS.includes(tier) && event.tier !== tier) {
+            event.tier = tier;
+            event.tierSetDay = currentDayCount;
+            event.tierSetElapsedDay = currentElapsedDay;
+        }
     }
 
-    // Auto-resolve any events the LLM did NOT explicitly mention.
-    // After a timeskip, time has passed — if the LLM didn't specifically
-    // address an event, it should be considered resolved rather than lingering.
+    // Re-apply structural placement to every concretely dated active event.
+    // Time Skip may change the current month by many days at once; dated events
+    // therefore move into/out of the internal Future Scheduled queue based on
+    // the new canonical date. Omission still does NOT auto-resolve or auto-miss
+    // an event; only explicit LLM decisions can conclude one here.
     for (const event of events) {
-        if (!mentionedIds.has(event.id) &&
-            event.status !== 'resolved' &&
-            event.status !== 'missed') {
-            event.status = 'resolved';
+        if (event.status !== 'pending' && event.status !== 'inprogress') continue;
+        if (event.tier === 'undetermined' && typeof event.scheduledElapsedStart !== 'number') continue;
+        const structuralTier = classifyScheduledEventTier(chatId, event.scheduledElapsedStart, event.scheduledElapsedEnd);
+        if (structuralTier && structuralTier !== 'missed' && event.tier !== structuralTier) {
+            event.tier = structuralTier;
+            event.tierSetDay = currentDayCount;
+            event.tierSetElapsedDay = currentElapsedDay;
         }
     }
 
@@ -527,9 +667,42 @@ async function applyConditionUpdates(chatId, updates) {
 
 async function applyNotebookUpdates(chatId, updates) {
     const notebook = getNotebook(chatId);
+    const CORE_FIELDS = ['unresolvedDetail', 'promiseThreatDeadline', 'offscreenPressure', 'doNotForget'];
+    const MYSTERY_FIELDS = ['establishedFacts', 'plantedDetails', 'characterWhereabouts', 'inconsistenciesFlagged', 'currentToneAtmosphere'];
 
-    // This is a simplified application — refined during integration testing
-    // The LLM response format for notebook updates will be calibrated with real responses
+    const applyRemovals = (section, removals, allowedFields) => {
+        if (!removals || typeof removals !== 'object') return;
+        for (const [fieldName, indexes] of Object.entries(removals)) {
+            if (!allowedFields.includes(fieldName) || !Array.isArray(indexes) || !Array.isArray(section[fieldName])) continue;
+            const validIndexes = [...new Set(indexes)]
+                .filter(index => Number.isInteger(index) && index >= 0 && index < section[fieldName].length)
+                .sort((a, b) => b - a);
+            for (const index of validIndexes) {
+                section[fieldName].splice(index, 1);
+            }
+        }
+    };
+
+    const applyAdditions = (section, additions, allowedFields) => {
+        if (!additions || typeof additions !== 'object') return;
+        for (const [fieldName, bullets] of Object.entries(additions)) {
+            if (!allowedFields.includes(fieldName) || !Array.isArray(bullets) || !Array.isArray(section[fieldName])) continue;
+            for (const bullet of bullets) {
+                if (typeof bullet !== 'string') continue;
+                const trimmed = bullet.trim();
+                if (trimmed && !section[fieldName].includes(trimmed)) {
+                    section[fieldName].push(trimmed);
+                }
+            }
+        }
+    };
+
+    applyRemovals(notebook.core, updates.removeCoreBullets, CORE_FIELDS);
+    applyAdditions(notebook.core, updates.addCoreBullets, CORE_FIELDS);
+    applyRemovals(notebook.mystery, updates.removeMysteryBullets, MYSTERY_FIELDS);
+    applyAdditions(notebook.mystery, updates.addMysteryBullets, MYSTERY_FIELDS);
+
+    await saveNotebook(chatId, notebook);
     dlog('[NWST Timeskip] Notebook updates applied.');
 }
 

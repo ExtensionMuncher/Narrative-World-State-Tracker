@@ -3,10 +3,9 @@
 // NWST Message Scanner — llm/scanner.js
 // =============================================================================
 // Background scanner that runs every N messages (configurable, default 20).
-// Calls the Planning LLM to review recent chat messages and update:
-//   - Notebook fields (adds/modifies bullets)
-//   - Community summaries
-//   - World conditions
+// Uses the same Planning LLM profile for two focused cadence calls:
+//   - Detailed continuity: self-maintaining Notebook, detected plans, Secrets, Event status
+//   - Persistent state: World Conditions and Community summaries/membership
 //   - Flags NPC detected events (proposed to user, never auto-committed)
 //   - Detects new secrets forming in the narrative (auto-created, with dedup)
 //
@@ -17,12 +16,13 @@
 // =============================================================================
 
 import { generateWithProfile } from './connections.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { getChatId, nwstToast } from '../utils.js';
 import { getScanFrequency, getScanMinimumMessages, isPaused, isEnabled } from '../settings.js';
 import { chatHasData } from '../data/storage.js';
-import { getWorldState, getEnabledConditions, getSettingContext, updateConditionContent, getCalendarConfig } from '../data/worldState.js';
-import { getActiveEvents } from '../data/events.js';
-import { getNotebook, addCoreBullet, upsertCoreBullet, addMysteryBullet, upsertCharacterBullet, replaceMysteryField, replaceMysteryFieldDiff, getCoreField, getMysteryField, addSecret, getAllSecrets, flagSecretForArchive, getSecretStatus, getInjectableSecrets } from '../data/notebook.js';
+import { getWorldState, getSettingContext, updateConditionContent, getCalendarConfig } from '../data/worldState.js';
+import { getTrackedEvents } from '../data/events.js';
+import { getNotebook, addCoreBullet, addMysteryBullet, replaceMysteryField, replaceMysteryFieldDiff, getCoreField, getMysteryField, addSecret, getAllSecrets, flagSecretForArchive, getSecretStatus, getInjectableSecrets } from '../data/notebook.js';
 import { beginMutationBatch, recordMutation, commitMutationBatch } from '../data/notebookHistory.js';
 import { replaceCoreField as replaceCoreFieldQuiet } from '../data/notebook.js';
 import { getAllCommunities, updateCommunitySummary, updateCommunityMembers, addCommunity } from '../data/communities.js';
@@ -33,6 +33,8 @@ import { getReconcileCadence } from '../settings.js';
 import { runSecretsSidecar } from './secretsSidecar.js';
 import { getSidecarCadence, getSecretDecayThreshold } from '../settings.js';
 import { dlog } from "../lib/debug.js";
+import { buildAliasRegistry, toCanonicalId } from '../data/aliasRegistry.js';
+import { buildWorldEvidenceSources, formatWorldEvidenceSources, collectRecentCastNames, validateWorldConditionPayload, isLikelySceneContaminatedCondition } from './worldConditionEvidence.js';
 
 // ── Scanner state ─────────────────────────────────────────────────────────
 //
@@ -59,6 +61,14 @@ let warmupMessageCount = 0;      // Counts messages during Phase 1 warmup
 let scanPhase = 'warmup';        // 'warmup' | 'cadence'
 let scanTimer = null;
 let isScanning = false;
+// Message count at the last FAILED scan attempt (0 = none) — retry backoff
+let _lastScanFailureCount = 0;
+let _lastScanFailureReason = '';
+let _lastScanFailureAt = 0;
+let _lastScanSuccessAt = 0;
+let _lastScanSuccessCount = 0;
+let _lastScanRangeStart = null;
+let _lastScanRangeEnd = null;
 
 // ── Scanner state persistence (survives page reload) ──────────────────────
 // Saves the scanner's cadence position to chatMetadata so reloading the page
@@ -73,7 +83,14 @@ function saveScannerState() {
         if (!chatMetadata) return;
         chatMetadata[SCANNER_STATE_KEY] = {
             messageCountAtLastScan,
-            scanPhase
+            scanPhase,
+            lastScanFailureCount: _lastScanFailureCount,
+            lastScanFailureReason: _lastScanFailureReason,
+            lastScanFailureAt: _lastScanFailureAt,
+            lastScanSuccessAt: _lastScanSuccessAt,
+            lastScanSuccessCount: _lastScanSuccessCount,
+            lastScanRangeStart: _lastScanRangeStart,
+            lastScanRangeEnd: _lastScanRangeEnd
         };
         saveMetadata(); // fire-and-forget — non-critical
     } catch (e) { /* non-fatal */ }
@@ -87,103 +104,161 @@ function loadScannerState() {
     } catch (e) { return null; }
 }
 
+function emitScannerHealth() {
+    try {
+        window.dispatchEvent(new CustomEvent('nwst:scan-health-changed', { detail: getScannerHealth() }));
+    } catch (_) { /* UI may not be mounted yet */ }
+}
+
+function markScanFailure(reason, rangeStart = null, rangeEnd = null) {
+    _lastScanFailureReason = String(reason || 'Scan did not complete.');
+    _lastScanFailureAt = Date.now();
+    if (Number.isInteger(rangeStart)) _lastScanRangeStart = rangeStart;
+    if (Number.isInteger(rangeEnd)) _lastScanRangeEnd = rangeEnd;
+    saveScannerState();
+    emitScannerHealth();
+}
+
+function markScanSuccess(rangeStart, rangeEnd) {
+    _lastScanFailureCount = 0;
+    _lastScanFailureReason = '';
+    _lastScanFailureAt = 0;
+    _lastScanSuccessAt = Date.now();
+    _lastScanSuccessCount = Number.isInteger(rangeEnd) ? rangeEnd : getCurrentMessageCount();
+    _lastScanRangeStart = Number.isInteger(rangeStart) ? rangeStart : null;
+    _lastScanRangeEnd = Number.isInteger(rangeEnd) ? rangeEnd : null;
+    saveScannerState();
+    emitScannerHealth();
+}
+
+export function getScannerHealth() {
+    const currentCount = getCurrentMessageCount();
+    const frequency = Math.max(1, getScanFrequency());
+    const backlog = Math.max(0, currentCount - messageCountAtLastScan);
+    const messagesSinceWarmup = Math.max(0, currentCount - warmupMessageCount);
+    const floor = Math.max(1, getScanMinimumMessages());
+    let status = 'healthy';
+    let nextIn = Math.max(0, frequency - backlog);
+
+    if (!isEnabled()) status = 'disabled';
+    else if (isPaused()) status = 'paused';
+    else if (isScanning) status = 'scanning';
+    else if (scanPhase === 'warmup') {
+        status = 'warmup';
+        nextIn = Math.max(0, floor - messagesSinceWarmup);
+    } else if (_lastScanFailureReason) {
+        status = 'failed';
+        nextIn = _lastScanFailureCount > 0 ? Math.max(0, 3 - (currentCount - _lastScanFailureCount)) : 0;
+    } else if (backlog >= frequency) {
+        status = 'backlog';
+        nextIn = 0;
+    }
+
+    return {
+        status,
+        phase: scanPhase,
+        isScanning,
+        currentMessageCount: currentCount,
+        messageCountAtLastScan,
+        backlog,
+        nextIn,
+        scanFrequency: frequency,
+        warmupProgress: scanPhase === 'warmup' ? messagesSinceWarmup : null,
+        warmupFloor: floor,
+        lastSuccessAt: _lastScanSuccessAt,
+        lastSuccessMessageCount: _lastScanSuccessCount,
+        lastFailureAt: _lastScanFailureAt,
+        lastFailureReason: _lastScanFailureReason,
+        lastRangeStart: _lastScanRangeStart,
+        lastRangeEnd: _lastScanRangeEnd
+    };
+}
+
 // ── Internal system prompts ───────────────────────────────────────────────
-// These are not user-editable. The user-editable planner prompt is passed as
-// an additional instruction, not as the primary system prompt.
+// These are not user-editable. The cadence work is deliberately split into
+// focused internal prompts while reusing the same Planning LLM connection.
 
-const SCANNER_SYSTEM_PROMPT = `You are a narrative world state scanner for an ongoing roleplay. You review recent chat messages and update the living world state — the notebook, world conditions, and community summaries.
+const SCANNER_SYSTEM_PROMPT = `You are a narrative continuity scanner for an ongoing roleplay. You review recent chat messages and maintain the detailed story ledger: Notebook, detected future plans, Secrets, and active Event status.
 
-You will receive the recent chat messages, current world state, current notebook, active community summaries, and active events.
+You will receive recent chat messages, the current date/calendar anchor, the current Notebook, existing Secrets, and tracked Events.
 
 WHAT YOU DO:
 
-1. NOTEBOOK UPDATES — add or update bullets in notebook fields based on what happened:
-   - unresolvedDetail: new unresolved threads, unanswered questions, things left dangling
-   - promiseThreatDeadline: explicit or implied promises, threats, warnings, or deadlines set in the scene
-   - offscreenPressure: pressures building away from the scene, as "Source: pressure" (e.g. "Victor: escalating his monitoring of Mira"). Report each source's CURRENT pressure; replacing a source's prior pressure, not stacking.
-   - doNotForget: specific important details that must not be dropped (an object, a name, a revealed fact)
-   - establishedFacts: things now confirmed as true in this world — do not add speculation
-   - plantedDetails: seeds placed in the scene that haven't paid off yet (a meaningful glance, an unexplained object, a subtle shift)
-   - characterWhereabouts: the CURRENT location of each named character, as "CharacterName: location/activity". Report one entry per character reflecting their LATEST known position. If a character's location changed this scene, report the new one — do not repeat their old position. Format strictly as "Name: where they are now".
-   - inconsistenciesFlagged: anything in the recent messages that contradicts established facts
-   - currentToneAtmosphere: the SINGLE current emotional register and tension level right now. Provide one entry; it replaces the previous tone.
+1. NOTEBOOK MAINTENANCE — keep the Notebook CURRENT, not merely additive.
+   - unresolvedDetail: unresolved threads, unanswered questions, dangling mysteries.
+   - promiseThreatDeadline: active promises, threats, warnings, or deadlines.
+   - offscreenPressure: current pressures building away from the scene, as "Source: pressure". One current pressure per source; replace stale pressure instead of stacking it.
+   - doNotForget: durable specific details that must not be dropped (objects, names, revealed facts, enduring context).
+   - establishedFacts: confirmed truths — never speculation.
+   - plantedDetails: still-live seeds that have not paid off yet.
+   - characterWhereabouts: the CURRENT latest-known location/activity of each named character, formatted strictly as "Name: where they are now". One current entry per character.
+   - inconsistenciesFlagged: contradictions that are STILL unresolved.
+   - currentToneAtmosphere: the SINGLE current emotional register/tension level. One entry only.
 
-2. WORLD CONDITION UPDATES — update only conditions that meaningfully shifted in the recent messages:
-   CRITICAL: World conditions are ATMOSPHERIC NARRATIVES, not factual summaries. They must:
-   - Describe the condition's CURRENT MOOD, SUBTEXT, and IMPLICATIONS — not just facts
-   - Read the space between what is stated and what is left unsaid
-   - Convey tension, movement, or stasis with specificity and texture
-   - Sound like a thoughtful narrator interpreting the world, not a journalist listing events
-   - Characters and factions MAY be named when their presence shapes the world condition — use names when it adds clarity and grounding. What must NOT appear is: specific character actions that belong in the chat log, personal emotional states, or story events framed as current facts. Describe what the world looks like as a result of forces at work, not what a specific character did or feels right now.
+   CURRENT-STATE CLEANUP IS PART OF THE JOB:
+   - Existing Notebook bullets are labeled (UD#, PT#, OP#, DNF#, EF#, PD#, CW#, IF#, TA#).
+   - If recent prose makes an existing bullet obsolete, superseded, contradicted, resolved, paid off, expired, or no longer current, put its label in notebookRetirements.
+   - Do NOT retain an old location after the same character is explicitly somewhere else now.
+   - Do NOT retain a resolved deadline, paid-off planted detail, superseded pressure, or fixed inconsistency merely because it used to be true.
+   - Durable historical facts may remain true even after the scene moves on. Never retire a fact only because it was not mentioned recently.
+   - When unsure whether a durable fact is obsolete, preserve it. Be more proactive with explicitly current-state fields.
 
-   Example of BAD world condition (factual summary):
-   "Kellan has left for a nearby village. The court attendants are watching Mira."
+   MOTIVE / INTERPRETATION GROUNDING — applies to EVERY Notebook field:
+   - When narration, dialogue, or internal thought explicitly states WHY a character acted, preserve that stated motive as higher-confidence evidence than the dramatic style of the action.
+   - Do NOT upgrade fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior into confidence, strategy, dominance, bravery, or calculated control unless the prose actually establishes that interpretation.
+   - Do NOT make a character "more badass," competent, composed, malicious, romantic, or strategic than the text supports.
+   - Distinguish observed fact from interpretation. If the text supports only suspicion, record it as uncertainty rather than certainty.
 
-   Example of GOOD world condition (atmospheric narrative):
-   "Kellan's absence has shifted the gravitational center of the fortress. The attendants move more openly now — assessing, circling, recalibrating. Whatever fragile equilibrium his presence imposed has dissolved into something more volatile and less predictable."
-
-   Only update a condition if something in the recent messages genuinely changes it. If a condition is stable, leave it unchanged.
-
-3. COMMUNITY SUMMARY UPDATES — update community summaries if social dynamics shifted:
-   Community summaries must be ANALYTICAL and NUANCED. They are not plot recaps. They should:
-   - Read between the lines of character interactions and identify the underlying power dynamics
-   - Surface what is unspoken — what characters are maneuvering around, avoiding, or competing for
-   - Note specific details that carry weight (a particular choice, a significant omission, a gesture)
-   - Describe the internal tensions and pressures within the group, not just the surface events
-   - Be dense with insight, not long with description
-   - Use bullet points (•) for observations, each a specific concrete observation. Do not pad — output only as many bullets as the community genuinely warrants. An optional 1-2 sentence overview paragraph may precede the bullets.
-
-   CRITICAL — AVOID DUPLICATE COMMUNITIES: Before suggesting a NEW community in communityUpdates, check every existing community name. If an existing community covers the same social group under a different name (e.g., "The Servants" vs "Household Staff"), UPDATE ITS SUMMARY instead of creating a duplicate. Pay attention to member overlap and thematic similarity. Duplicate communities fragment the analysis and must be prevented.
-
-4. NPC EVENT DETECTION — identify any EXPLICIT future plans made by characters:
+2. NPC EVENT DETECTION — identify EXPLICIT future plans made by characters.
    Only flag events where a character explicitly states or clearly implies something will happen.
-   Do NOT infer or extrapolate — only flag what is directly stated.
+   Do NOT infer or extrapolate a future plan from ordinary actions.
 
-5. SECRET DETECTION & KNOWLEDGE TRACKING — Two responsibilities:
+3. SECRET DETECTION & KNOWLEDGE TRACKING — two responsibilities:
 
-   a) CONSIDER EXISTING SECRETS when making notebook updates:
-      - Character knowledge states affect what notebook fields should reflect (e.g., concealment pressure → offscreenPressure; a secret revealed on-screen → establishedFacts; ongoing concealment → unresolvedDetail)
-      - A secret's whoKnows/whoDoesNotKnow lists determine which characters can act on that knowledge
+   a) CONSIDER EXISTING SECRETS when maintaining the Notebook:
+      - Character knowledge states affect what Notebook fields should reflect.
+      - A Secret's whoKnows/whoDoesNotKnow lists determine which characters can act on that knowledge.
 
    b) DETECT NEW SECRETS forming in the recent messages:
-      - Identify when a character is actively concealing something, makes a hidden agreement, or when information is deliberately withheld
-      - Detect secrets that form organically from the narrative (hidden past, concealed plan, forbidden relationship)
-      - Check the existing secrets list to avoid duplicates — do NOT recreate secrets that already exist
-      - A new secret should include: title, type, core content, who knows it, who does NOT know it
-      - Set injectionPriority based on narrative urgency:
-        "high" — secrets whose revelation would cause immediate, major consequences (active ticking bomb, imminent betrayal)
-        "normal" — standard secrets with clear dramatic potential (default)
-        "low" — minor secrets, background details, or secrets with low immediate impact
+      - Identify concealed information, hidden agreements, deliberately withheld truths, hidden pasts, concealed plans, or forbidden relationships.
+      - Check the existing Secrets list to avoid duplicates.
+      - A new Secret should include title, type, core content, who knows it, and who does NOT know it.
+      - injectionPriority: "high" for imminent major consequences, "normal" for standard dramatic potential, "low" for background/minor Secrets.
 
-      TYPE GUIDE (choose the most fitting — do NOT default everything to "character"):
-      "character": A secret about a specific character's nature, past, feelings, or abilities
-      "user_pc": A secret the {{user}} character (the PC) is keeping, or a secret about them
-      "world": A secret about the world, setting, factions, or environment (not tied to one character)
-      "dramatic_irony": Something the audience/reader knows but key characters do not
-      "unconfirmed_suspicion": A suspicion a character holds that is not yet confirmed true
+      TYPE GUIDE:
+      "character": about a specific character's nature, past, feelings, or abilities
+      "user_pc": a Secret the {{user}} character is keeping, or a Secret about them
+      "world": about the setting, factions, institutions, or environment
+      "dramatic_irony": audience/reader knows, key characters do not
+      "unconfirmed_suspicion": a character's suspicion that is not confirmed true
 
       DETECTING RESOLVED THREADS:
-      - Review the current notebook's unresolvedDetail and promiseThreatDeadline bullets. If the recent messages clearly RESOLVE, pay off, or expire one of them, copy its EXACT text into "resolvedThreads" so it can be removed. Only genuinely closed threads — when in doubt, leave it.
+      - Review unresolvedDetail and promiseThreatDeadline. If recent messages clearly RESOLVE, pay off, or expire one, copy its EXACT text into resolvedThreads.
+      - notebookRetirements may also retire other stale Notebook bullets by label.
 
       DETECTING REVEALED SECRETS:
-      - Review the EXISTING secrets list. If the prose clearly shows a previously-hidden secret becoming KNOWN to a character who did not know it (an on-screen reveal, a confession, a discovery), list that secret's EXACT title under "revealedSecrets".
-      - Only flag a genuine reveal — not a passing mention, a near-miss, or a suspicion. The unaware party must actually learn the truth.
+      - If prose clearly shows an EXISTING Secret becoming known to someone who did not know it, list that exact Secret title under revealedSecrets.
+      - A near-miss or suspicion is not a reveal.
 
-      RULES for new secrets:
-      - Do NOT include the literal label "User" (the real-world person at the keyboard) in whoKnows or whoDoesNotKnow lists — "User" is the OOC author, not a narrative participant
-      - The named {{user}} character (the PC) IS a legitimate narrative participant and CAN appear in whoKnows/whoDoesNotKnow
-      - When a secret involves the {{user}} character, use type "user_pc", NOT "character"
+      RULES FOR NEW SECRETS:
+      - If a character personally discovers evidence and understands the Secret's core fact, they belong in whoKnows even if a finer detail remains inferred.
+      - Put only the still-uncertain finer detail into an unconfirmed_suspicion when appropriate.
+      - Never put the same character in both whoKnows and whoDoesNotKnow.
+      - Never put the literal label "User" in knowledge lists; the named {{user}} character is a valid narrative participant.
+      - When a Secret involves the {{user}} character, use type "user_pc".
 
-6. EVENT MAINTENANCE — keep the active events list truthful to the story:
-   - RESOLVED: an active event whose projected moment clearly HAPPENED on-screen in the recent messages.
-   - MISSED: an active event whose window clearly passed, or whose premise visibly failed, in the recent messages.
-   - TIER CORRECTIONS: for active events WITHOUT a scheduled date, move them between immediate/week/month when the recent messages make their urgency clear (dated events are moved by the calendar automatically — leave them alone). Tier meanings: immediate = today/tomorrow, week = before the current weekday cycle ends, month = beyond this week. Events in the "undetermined" tier are deliberately timeless — never move events in or out of it (you may still mark them RESOLVED or MISSED when the messages clearly show it).
-   Reference events by the E# labels shown in the ACTIVE EVENTS list. Be conservative — report only what the messages clearly show. Most scans should leave events untouched; empty arrays are the expected result.
+4. EVENT MAINTENANCE — keep tracked Events truthful.
+   - RESOLVED: projected moment clearly happened on-screen.
+   - MISSED: its window clearly passed or premise visibly failed.
+   - TIER CORRECTIONS: only for active UNDated Events when urgency becomes clear. immediate = today/tomorrow; week = later in current weekday cycle; month = later in current calendar month.
+   - Dated Events are placed structurally by the calendar. Do not tier-correct them.
+   - "undetermined" is deliberately timeless; never move Events in or out of it, though you may resolve/miss them.
+   - Reference Events by their E# labels. Be conservative; most scans should leave Events untouched.
 
-RESPONSE FORMAT — respond with a JSON object:
+RESPONSE FORMAT — valid JSON only:
 {
   "notebookUpdates": {
-    "unresolvedDetail": ["new bullet 1", "new bullet 2"],
+    "unresolvedDetail": [],
     "promiseThreatDeadline": [],
     "offscreenPressure": [],
     "doNotForget": [],
@@ -193,39 +268,28 @@ RESPONSE FORMAT — respond with a JSON object:
     "inconsistenciesFlagged": [],
     "currentToneAtmosphere": []
   },
-  "conditionUpdates": {
-    "political": "Updated atmospheric narrative, or null if unchanged",
-    "social": null,
-    "spiritual": null,
-    "environmental": null
-  },
-  "communityUpdates": [
-    {
-      "name": "Community name (must match existing name exactly, or new name if new community)",
-      "members": "member list if changed",
-      "summary": "Updated analytical summary using bullet points (•) for observations. Do not pad — only as many bullets as the community warrants. An optional 1-2 sentence overview paragraph may precede the bullets."
-    }
-  ],
+  "notebookRetirements": ["UD2", "CW4"],
   "detectedNPCEvents": [
     {
       "title": "Brief label",
       "description": "What was explicitly stated or clearly implied",
       "tier": "immediate" | "week" | "month" | "undetermined",
-      "detectedFrom": "brief reference to what in the chat indicates this"
+      "scheduledDate": "Concrete date/day when stated or clearly implied; null otherwise",
+      "detectedFrom": "brief grounding reference"
     }
   ],
   "newSecrets": [
     {
       "title": "Secret title",
       "type": "character" | "user_pc" | "world" | "dramatic_irony" | "unconfirmed_suspicion",
-      "secret": "The hidden knowledge content",
+      "secret": "Hidden knowledge content",
       "whoKnows": ["Character A"],
       "whoDoesNotKnow": ["Character B"],
-      "evidenceShown": "optional evidence visible in chat",
-      "pressureRisk": "A concrete 1-2 sentence description of the SPECIFIC consequences if this secret were revealed or acted upon — who would be hurt, what would break, what would escalate. Be specific and narrative, NOT a severity label. Bad: 'moderate'. Good: 'If Mira discovers the surveillance, it would feel like a violation of privacy and could shatter any trust, painting Kellan as a controlling predator.'",
-      "revealConditions": "optional conditions for reveal",
+      "evidenceShown": "optional evidence",
+      "pressureRisk": "specific narrative consequence if revealed/acted upon",
+      "revealConditions": "optional reveal conditions",
       "injectionPriority": "high" | "normal" | "low",
-      "triggerAnchors": ["3-7 distinctive words/short phrases UNIQUE to this secret that signal a scene is about it. Prefer multi-word phrases and the subject's name over generic single words. AVOID broad themes shared with other secrets."]
+      "triggerAnchors": ["3-7 distinctive phrases"]
     }
   ],
   "eventUpdates": {
@@ -233,23 +297,136 @@ RESPONSE FORMAT — respond with a JSON object:
     "missed": [],
     "tierChanges": { "E3": "immediate" | "week" | "month" }
   },
-  "resolvedThreads": [
-    "EXACT text of an existing bullet from the current notebook's unresolvedDetail or promiseThreatDeadline lists that has now been RESOLVED, paid off, or expired in the recent messages. Copy the bullet text verbatim so it can be matched and removed. Only include genuinely closed threads — not ones still pending."
-  ],
+  "resolvedThreads": ["EXACT text of a resolved unresolvedDetail/promiseThreatDeadline bullet"],
   "revealedSecrets": [
     {
-      "title": "EXACT title of an EXISTING secret (from the provided secrets list) that has now been REVEALED on-screen to a character who previously did not know it. Only include a secret here if the prose clearly shows the hidden knowledge becoming known — not merely referenced or suspected.",
+      "title": "EXACT title of an EXISTING Secret",
       "revealedTo": "who learned it",
-      "evidence": "brief quote or reference to where in the prose it was revealed"
+      "evidence": "brief grounding evidence"
     }
   ],
   "noChanges": false
 }
 
 If nothing meaningful changed, return {"noChanges": true} and nothing else.
-Only include fields that have actual updates — empty arrays and null values are fine for unchanged fields.
-For notebookUpdates: only include NEW bullets to add. Do not repeat bullets already in the notebook.
-For newSecrets: only include secrets that are genuinely new. Do not recreate secrets that already exist in the provided list.`;
+For notebookUpdates, include only genuinely new/current bullets. Do not repeat existing bullets unchanged.
+For notebookRetirements, use ONLY labels that exist in the supplied current Notebook.
+For newSecrets, create only genuinely new Secrets.`;
+
+// World Conditions and Communities intentionally use a second focused call on
+// the SAME Planning LLM profile. Keeping macro/durable-state synthesis separate
+// prevents detailed Notebook extraction from pulling these summaries down into
+// scene recap.
+const WORLD_COMMUNITY_SYSTEM_PROMPT = `You maintain the persistent WORLD CONDITIONS and COMMUNITY records for an ongoing roleplay. This is a macro/durable-state task, not a scene-summary task.
+
+GENERAL RULES:
+- MOST cadence scans should leave most or all World Conditions and Communities unchanged.
+- Treat recent chat as EVIDENCE of possible changes inside a larger world. The chat itself is not "the world."
+- Existing saved summaries are state to preserve or revise, NOT examples whose granularity must be imitated. They may already be too scene-focused.
+- If an existing World Condition or Community summary is itself clearly a scene recap rather than valid persistent state, correcting that contamination IS a legitimate maintenance update even when no new macro change occurred. Preserve any valid facts while rewriting at the proper scale.
+- A dramatic development for the immediate cast is not automatically a change to the surrounding world or a durable Community dynamic.
+
+WORLD CONDITIONS — CADENCE BEHAVIOR:
+On automatic cadence, the DEFAULT is to PRESERVE the existing World Condition.
+- GROUNDED is allowed only when the supplied evidence establishes a NEW qualifying macro transition since the current saved condition.
+- AMBIENT is only a repair/fill path when the current condition is empty or clearly scene-contaminated. Do not use Ambient to refresh healthy state.
+- If no qualifying macro transition occurred and the condition is healthy, return update:false.
+
+GROUNDED MODE — NEW MACRO TRANSITIONS ONLY:
+- Use this only when the supplied evidence establishes a genuine NEW macro/durable transition, not merely the existence or continuation of an institution/faction/process.
+- Static facts such as "the organization conducts surveillance," "law enforcement processes paperwork," or "a faction remains active" are NOT cadence updates.
+- Every Grounded update must include transitionType from the category-specific list below.
+- Before updating, mentally REMOVE the protagonist and immediate active cast. If the result stops describing a meaningful institution, faction, population, district, region, culture, social pattern, spiritual system, or environment, return update:false.
+- A character may CAUSE a World Condition change without BEING the World Condition.
+- Named characters MAY be used when identifying the cause of a genuine macro-level shift prevents ambiguity. The SUBJECT must remain the wider institution/faction/population/region/system.
+- Supply 1-4 evidence source IDs in evidenceRefs (for example ["M2", "M5"]). Do NOT copy quotes; choose only the source blocks that actually establish the macro claim.
+- Every factual claim in the condition must be supported by those cited source blocks or by ONE conservative inference that does not require any new actor, reaction, institution, team, rumor, policy, coordination, awareness, or offscreen development.
+- Do not combine unrelated facts from separate source IDs to manufacture a new relationship. Example: a legal/restraining-order source plus a syndicate-surveillance source does NOT establish a law-enforcement surveillance team.
+- If the cited source blocks do not establish the macro claim, do not write it as grounded.
+
+AMBIENT MODE:
+- Use this when no grounded story-derived macro update is available but a quiet background condition would help establish that the world continues beyond the active cast.
+- Ambient content must come from Setting Context, date/season/weather, and ordinary low-stakes setting-consistent background life.
+- Do NOT name or causally reference the protagonist or recent active cast.
+- Do NOT turn recent scene events into ambient consequences.
+- Ambient may introduce modest current developments involving setting-supported institutions/factions/populations/environments when they quietly demonstrate that the world continues beyond the cast.
+- AMBIENT PROPORTIONALITY TEST: an invented development must remain something the active cast could plausibly never notice. If it would reasonably force immediate plan changes, urgent follow-up, or substantially rewrite the playable world, it is too consequential unless Setting Context/Current Day already supports that scale.
+- Keep it restrained and subordinate to the active story: no gratuitous crises, no parade of unrelated developments, and no casually invented war, coup, state of emergency, martial law, government collapse, sweeping nationwide crackdown/purge, mass civil disorder, economic collapse, catastrophic disaster, mass-casualty event, widespread infrastructure failure, or supernatural/metaphysical catastrophe.
+- Prefer one coherent background theme with at most 1-2 closely related developments rather than a bulletin list of unrelated news.
+- Evidence may be an empty array in ambient mode.
+
+HARD GROUNDING GUARDS:
+- NO INVISIBLE MIDDLE STEPS. Do not invent offscreen meetings, rumor circulation, institutional reactions, coordination, policy shifts, resource strain, public awareness, new teams/details, or faction-wide sentiment to make a local event sound macro.
+- Preserve INFORMATION ASYMMETRY. If one side knows about another and the reverse is not explicitly established, do not invent mutual awareness, a détente, reciprocal maneuvering, shared protocols, or coordination.
+- Do not confuse a plausible FUTURE consequence with CURRENT world state. Possible escalation belongs in Events or remains unstated until grounded.
+- Do not create a new organization, team, task force, policy, institutional practice, rumor network, public reaction, resource shortage, or formal relationship unless the cited source text itself establishes it.
+- Avoid unsupported scale inflation. Claims such as "unprecedented," "historic," "no precedent in living memory," "system-wide," or equivalent grandiosity require cited evidence at that scale.
+- Conditions should be durable enough to survive many messages when the wider state has not changed.
+
+CATEGORY BOUNDARIES / MACRO THRESHOLDS:
+- POLITICAL: concerns wider power structures, institutions, factions, governance, territorial control, policy/regulatory pressure, leadership/hierarchy, organizational posture, or relationships between institutions/factions. A single case, restraining order, piece of paperwork, target, operative, surveillance post, visitor, arrest, or investigation is NOT a Political World Condition unless the evidence establishes a wider change in institutional/faction behavior. Political AMBIENT may introduce modest background institutional motion — routine guidance/procedural updates, staffing or budget pressure, promotion cycles, municipal initiatives, enforcement-priority shifts, or low-key faction/corporate maneuvering — including named overarching institutions when setting-consistent. It must not invent plot-forcing political upheaval or sweeping changes that would demand immediate story response.
+- SOCIAL: concerns collective behavior, cultural/social norms, community patterns, public routines, workplaces, commerce, social spaces, population habits, reputation patterns, or group-level pressures. A private relationship or isolated interaction is not Social World State merely because other people could plausibly notice it. In SOCIAL AMBIENT mode, season/weather may EXPLAIN collective behavior, but the paragraph must primarily describe what people, communities, workplaces, or social spaces are doing; do not turn Social into a second Environmental condition.
+- SPIRITUAL/SUPERNATURAL: concerns durable metaphysical rules/pressures, supernatural factions, ritual cycles, regional spiritual phenomena, barriers/realms, sacred/profane conditions, or other setting-supported supernatural systems. A single character's aura, emotion, vision, encounter, spell, curse, or spiritual sensation is not a Spiritual World Condition unless it changes the wider metaphysical environment/system. Do not invent a supernatural ontology in AMBIENT mode if the supplied Setting Context/Current Day does not support one. The Current Day spiritualClimate is momentary atmosphere; this World Condition is the more durable metaphysical state behind it.
+- ENVIRONMENTAL: concerns durable physical-world conditions such as seasonal transition, climate pattern, ecology, landscape, water/air conditions, regional hazards, flora/fauna shifts, or persistent environmental change. Today's rain, temperature, fog, or one local weather moment belongs in Current Day unless it reflects a broader/persistent environmental pattern. ENVIRONMENTAL AMBIENT content should stay focused on the physical world and ecology rather than social routines.
+
+GROUNDED MACRO TEST:
+- A GROUNDED FACT is not automatically a GROUNDED WORLD CONDITION. The cited evidence must establish a wider change/state at the category's macro scale, not merely an accurate case-specific fact.
+- The required "change" field must state the macro/durable change WITHOUT naming the protagonist or immediate active cast. If you cannot describe the change without those individuals, return update:false or use AMBIENT when appropriate.
+- Political valid scopes: institution, faction, district, regional, population.
+- Social valid scopes: population, community, district, cultural, regional.
+- Spiritual valid scopes: spiritual, faction, regional, environmental.
+- Environmental valid scopes: environmental, district, regional.
+
+VALID GROUNDED transitionType VALUES:
+- Political: policy_change | governance_change | hierarchy_change | territorial_change | organization_wide_posture_change | intergroup_relationship_change | regulatory_change
+- Social: collective_norm_change | community_behavior_change | public_routine_change | reputation_shift | population_pressure_change | cultural_change
+- Spiritual: metaphysical_system_change | ritual_cycle_change | supernatural_faction_change | regional_spiritual_change | barrier_realm_change
+- Environmental: seasonal_pattern_change | climate_pattern_change | ecological_change | regional_hazard_change | flora_fauna_change | landscape_change | air_water_change
+
+The change field must describe an actual transition (shifted, expanded, tightened, reorganized, spread, declined, etc.). "Remains," "continues," "maintains," "operates," or other static/continuing facts do not qualify as a cadence Grounded change.
+
+COMMUNITIES:
+- A Community summary describes the group's durable structure, relationships, hierarchy, loyalties, fractures, collective pressures, reputation, objectives, and current collective posture.
+- Recent events may CHANGE that durable state, but must be absorbed into the group dynamic rather than narrated as a scene recap.
+- Update only when something lasting changed: membership/status, trust, hierarchy, alliance, fracture, collective objective, shared pressure, or group posture.
+- Include a COMPLETE comma-separated member list when membership/status changed. Preserve useful status annotations such as "(suspended)" when supported.
+- Do not remove a member merely because they did not appear in the recent window.
+- Avoid duplicate Communities. Similar membership alone does not prove two differently named groups are the same.
+
+MOTIVE / INTERPRETATION GROUNDING — mandatory for Community analysis:
+- Explicitly stated motives outrank dramatic stylistic inference.
+- Do NOT upgrade fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior into confidence, strategy, dominance, bravery, or calculated control unless the prose establishes it.
+- Do NOT make characters or groups more competent, composed, sinister, romantic, strategic, or "badass" than the evidence supports.
+
+CADENCE PERSISTENCE RULE:
+- On automatic cadence, AMBIENT is NOT a reason to refresh a healthy existing condition. If the current condition is already nonempty and valid at the proper category scale, leave it unchanged when no grounded macro shift occurred. Use AMBIENT on cadence mainly to fill an empty condition or repair clearly scene-contaminated state.
+
+FINAL WORLD-STATE CHECK:
+Do NOT summarize the latest scene. For every World Condition update, choose GROUNDED with cited source IDs or AMBIENT with no recent-cast causal claims. If neither fits, return update:false.
+
+RESPONSE FORMAT — valid JSON only:
+{
+  "conditionUpdates": {
+    "political": { "update": false, "scope": "none", "mode": "none", "transitionType": "none", "evidenceRefs": [], "change": "", "content": "" },
+    "social": { "update": false, "scope": "none", "mode": "none", "transitionType": "none", "evidenceRefs": [], "change": "", "content": "" },
+    "spiritual": { "update": false, "scope": "none", "mode": "none", "transitionType": "none", "evidenceRefs": [], "change": "", "content": "" },
+    "environmental": { "update": false, "scope": "none", "mode": "none", "transitionType": "none", "evidenceRefs": [], "change": "", "content": "" }
+  },
+  "communityUpdates": [
+    {
+      "name": "EXACT existing Community name, or a genuinely new Community name",
+      "update": true,
+      "members": "complete member list if membership/status changed; otherwise empty string",
+      "summary": "Durable collective-state summary, not a plot recap"
+    }
+  ],
+  "noChanges": false
+}
+
+A GROUNDED evidence list must look like:
+"evidenceRefs": ["M4", "M7"]
+
+If nothing qualifies, return {"noChanges": true}.`;
 
 // ── Community synthesis prompt (dedicated, richer pass) ───────────────────
 
@@ -257,35 +434,38 @@ const COMMUNITY_SYNTHESIS_PROMPT = `You are a community analyst for an ongoing n
 
 CRITICAL — AVOID DUPLICATE COMMUNITIES: You will receive a list of EXISTING COMMUNITIES above. Before creating a NEW community in your output, carefully check every existing community name. If an existing community covers the same social group under a different name (e.g., "The Servants" vs "Household Staff"), UPDATE ITS SUMMARY instead of creating a duplicate. Pay attention to member overlap and thematic similarity. Duplicate communities fragment the analysis and must be prevented. When in doubt, merge into the existing entry rather than creating a new one.
 
-Your summaries have two parts. Both must always be present.
+Your summaries always include the overview paragraph. Analytical bullets are optional and should appear only when the community genuinely warrants distinct group-level observations.
 
 PART 1 — OVERVIEW PARAGRAPH (2-4 sentences):
 Write with narrative voice and atmosphere. Capture the emotional texture, underlying pressure, and defining dynamic of this group. Name the key players and their roles. Be specific about what makes this group distinctive — not just that tension exists, but what KIND of tension, what SHAPE the dynamic takes, what is at stake. This should read like a perceptive narrator sizing up a room, not a journalist listing facts.
 
-GOOD overview: "A family where the cracks are widening. Poppy is too observant for her age and suspects Nathan is hiding serious injuries. Gerald, the boisterous father, has become eerily quiet — he knows more than he lets on. The household is a pressure cooker of unspoken worry, and the lies Nathan tells will soon break against the walls of a family that loves him."
+GOOD overview: "A family where the cracks are widening. Lena is too observant for her age and suspects Adrian is hiding serious injuries. Marcus, the usually boisterous father, has become eerily quiet — he knows more than he lets on. The household is a pressure cooker of unspoken worry, and Adrian's evasions are beginning to strain a family that loves him."
 
-BAD overview: "The Whitlock family consists of Nathan, his sisters, and their father. There is tension because Nathan is keeping secrets." (roster and vague summary — not analysis)
+BAD overview: "The Vale family consists of Adrian, his siblings, and their father. There is tension because Adrian is keeping secrets." (roster and vague summary — not analysis)
 
 PART 2 — ANALYTICAL OBSERVATIONS (variable count — determined by the community):
 Each bullet must be a specific, concrete observation tied to an actual moment, detail, pattern, or choice from the chat. These are interpretations — what does a specific thing REVEAL about the dynamic? What is being avoided, performed, or withheld? What does a small choice signal about a larger truth?
 
-BULLET COUNT IS A TEST OF ANALYTICAL RIGOR. Do not aim for any specific number. Let the community dictate the count. A simple, peripheral community might warrant only 1-2 bullets. A deeply entangled community might warrant more. Padding by aiming for a specific number is a failure — each bullet must earn its place.
+BULLET COUNT IS A TEST OF ANALYTICAL RIGOR. Do not aim for any specific number. Let the community dictate the count. A simple, peripheral community might warrant only 1-2 bullets. A deeply entangled community might warrant more. A community with no meaningful additional group-level dynamics warrants 0 bullets and should return only the overview paragraph. Padding by aiming for a specific number is a failure — each bullet must earn its place.
 
-Self-critique (perform silently before finalizing): read each bullet — is it revealing something non-obvious? Is it tied to a specific detail rather than generic? If any bullet fails, delete it. If pruning leaves 1-2 bullets, that is correct. Do not add filler to reach a count.
+Self-critique (perform silently before finalizing): read each bullet — is it revealing something non-obvious? Is it tied to a specific detail rather than generic? If any bullet fails, delete it. If pruning leaves 0-2 bullets, that is correct. Do not add filler to reach a count.
 
-GOOD bullet (2 sentences max): "Elena's shift from cold tactical assessment to visible concern — bringing food, giving space instead of orders — marks a structural change in how she processes Mira's role in the network. The operational detachment she uses as a shield is failing against something she cannot categorize as a variable."
+GOOD bullet (2 sentences max): "Nadia's shift from cold tactical assessment to visible concern — bringing food, giving space instead of orders — marks a structural change in how she processes Mira's role in the network. The operational detachment she uses as a shield is failing against something she cannot categorize as a variable."
 BAD bullet (too long): same content sprawling across 4 sentences with explanation appended
-BAD bullet (summary): "Elena brought food to Mira" — states what happened, not what it reveals
+BAD bullet (summary): "Nadia brought food to Mira" — states what happened, not what it reveals
 BAD bullet (generic): "There is tension between characters" — reveals nothing
 
 BULLET LENGTH LIMIT — STRICTLY ENFORCED:
 Each bullet must be a MAXIMUM of 2 sentences. First sentence: the observation. Second sentence (optional): what it reveals. Cut everything else. If you cannot fit the insight in 2 sentences, you have not distilled it yet.
 
 CRITICAL RULES:
-- Characters CAN and SHOULD be named in both the paragraph and bullets — specificity is what separates analysis from vague writing
-- No plot recaps — interpret what happened, do not summarize it
-- No generic observations — every bullet must surface something not obvious from the surface
-- MAXIMUM 2 sentences per bullet — hard limit, no exceptions
+- Characters CAN and SHOULD be named when specificity is useful, but the SUBJECT of each observation must remain the community's durable collective state.
+- No plot recaps — recent actions are evidence, not the summary itself.
+- No generic observations — every bullet must surface something not obvious from the surface.
+- Explicitly stated motives outrank dramatic stylistic inference. Do NOT turn fear, desperation, panic, confusion, impulsiveness, self-preservation, or reactive behavior into confidence, strategy, dominance, bravery, or calculated control unless the prose establishes it.
+- Do not make a person or group more competent, composed, sinister, romantic, strategic, or "badass" than the evidence supports.
+- Membership/status changes are part of community maintenance. Return the COMPLETE current member list when it changed; do not drop absent members merely because they did not appear in the latest scene.
+- MAXIMUM 2 sentences per bullet — hard limit, no exceptions.
 - Quality over quantity — fewer tight bullets beat padded ones. Cut anything that does not earn its length.
 
 OUTPUT FORMAT — respond with a JSON array only, no markdown fences, no explanation:
@@ -301,6 +481,19 @@ export function startScanner() {
     if (scanTimer) return;
 
     const chatId = getChatId();
+    // Module state survives chat switches, so clear the previous chat's health
+    // before loading the active chat's persisted scanner state.
+    messageCountAtLastScan = 0;
+    messageCountAtLastSidecar = 0;
+    warmupMessageCount = 0;
+    scanPhase = 'warmup';
+    _lastScanFailureCount = 0;
+    _lastScanFailureReason = '';
+    _lastScanFailureAt = 0;
+    _lastScanSuccessAt = 0;
+    _lastScanSuccessCount = 0;
+    _lastScanRangeStart = null;
+    _lastScanRangeEnd = null;
 
     // Determine starting phase:
     // If batch scan has already been run (chatHasData returns true),
@@ -312,6 +505,13 @@ export function startScanner() {
         if (savedState && savedState.scanPhase === 'cadence') {
             scanPhase = 'cadence';
             messageCountAtLastScan = savedState.messageCountAtLastScan;
+            _lastScanFailureCount = savedState.lastScanFailureCount || 0;
+            _lastScanFailureReason = savedState.lastScanFailureReason || '';
+            _lastScanFailureAt = savedState.lastScanFailureAt || 0;
+            _lastScanSuccessAt = savedState.lastScanSuccessAt || 0;
+            _lastScanSuccessCount = savedState.lastScanSuccessCount || 0;
+            _lastScanRangeStart = Number.isInteger(savedState.lastScanRangeStart) ? savedState.lastScanRangeStart : null;
+            _lastScanRangeEnd = Number.isInteger(savedState.lastScanRangeEnd) ? savedState.lastScanRangeEnd : null;
             dlog(`[NWST Scanner] Restored cadence position from before reload (last scan at msg ${messageCountAtLastScan}).`);
         } else {
             // No persisted state — first load after the patch was installed,
@@ -336,6 +536,7 @@ export function startScanner() {
     eventSource.on(event_types.MESSAGE_RECEIVED, checkAndScan);
     scanTimer = 'event-driven';
     dlog(`[NWST Scanner] Started (cadence: every ${getScanFrequency()} messages).`);
+    emitScannerHealth();
 }
 
 export function stopScanner() {
@@ -348,6 +549,7 @@ export function stopScanner() {
     }
     scanTimer = null;
     dlog('[NWST Scanner] Stopped.');
+    emitScannerHealth();
 }
 
 export function restartScanner() {
@@ -365,15 +567,18 @@ export function notifyBatchScanComplete() {
         scanPhase = 'cadence';
         messageCountAtLastScan = getCurrentMessageCount();
         dlog('[NWST Scanner] Batch scan completed during warmup — transitioning to cadence phase.');
+        saveScannerState();
+        emitScannerHealth();
     }
 }
 
 // ── Scan check ────────────────────────────────────────────────────────────
 
 async function checkAndScan() {
-    if (!isEnabled() || isPaused() || isScanning) return;
+    if (!isEnabled() || isPaused() || isScanning) { emitScannerHealth(); return; }
 
     const currentCount = getCurrentMessageCount();
+    emitScannerHealth();
 
     // ── SECRETS SIDECAR — independent cadence ────────────────────────────
     // The sidecar runs on its own interval (default 10 msgs), separate from
@@ -404,6 +609,8 @@ async function checkAndScan() {
             scanPhase = 'cadence';
             messageCountAtLastScan = currentCount;
             dlog('[NWST Scanner] Batch scan detected mid-warmup — skipping initial scan, entering cadence.');
+            saveScannerState();
+            emitScannerHealth();
             return;
         }
 
@@ -412,66 +619,133 @@ async function checkAndScan() {
             return; // Not ready yet
         }
 
-        // Floor reached — fire the initial scan
+        // Floor reached — fire the initial scan over the whole warmup gap
         dlog(`[NWST Scanner] Warmup complete (${messagesSinceStart} messages). Running initial scan...`);
         nwstToast('Running initial world state scan...', 'info');
-        await runScan();
+        const initialWindow = Math.min(messagesSinceStart, 60);
+        const initialOk = await runScan(initialWindow, warmupMessageCount);
 
-        // Transition to cadence phase — cadence counter starts fresh from here
+        // Transition to cadence phase. If the warmup gap somehow exceeded the
+        // 60-message safety window, advance only through the slice we actually
+        // processed; the remaining backlog is retained for the cadence pass.
+        // On failure the counter stays at the warmup boundary for re-coverage.
         scanPhase = 'cadence';
-        messageCountAtLastScan = getCurrentMessageCount();
+        if (initialOk) {
+            messageCountAtLastScan = warmupMessageCount + initialWindow;
+        } else {
+            messageCountAtLastScan = warmupMessageCount;
+            dlog('[NWST Scanner] Initial scan did not complete — counter held at warmup boundary for re-coverage.');
+        }
         saveScannerState(); // Persist immediately after initial scan
+        emitScannerHealth();
         dlog('[NWST Scanner] Initial scan complete. Entering cadence phase.');
         return;
     }
 
     // ── PHASE 2: NORMAL CADENCE ──────────────────────────────────────────
-    // Fire every N messages as configured.
+    // Fire every N messages as configured. The counter advances ONLY when a
+    // scan actually succeeds — a failed or skipped scan used to burn its
+    // whole window permanently (messages in it were never looked at again).
+    // On failure the counter holds and the scan retries after 3 more
+    // messages, with the gap-sized window covering everything missed.
     const messagesSinceLastScan = currentCount - messageCountAtLastScan;
     if (messagesSinceLastScan >= getScanFrequency()) {
-        await runScan();
-        messageCountAtLastScan = getCurrentMessageCount();
-        saveScannerState(); // Persist so reload doesn't reset the countdown
+        if (_lastScanFailureCount > 0 && (currentCount - _lastScanFailureCount) < 3) {
+            return; // backoff: wait for a few more messages before retrying
+        }
+        // Process the OLDEST unscanned slice first. The previous implementation
+        // capped the prompt at 60 but read the newest 60, then jumped the saved
+        // position to the current message count — permanently discarding any
+        // older backlog. Advance the counter only by the raw messages covered.
+        const scanWindow = Math.min(messagesSinceLastScan, 60);
+        const scanStart = messageCountAtLastScan;
+        const success = await runScan(scanWindow, scanStart);
+        if (success) {
+            _lastScanFailureCount = 0;
+            messageCountAtLastScan += scanWindow;
+            if (messageCountAtLastScan < currentCount) {
+                dlog(`[NWST Scanner] Backlog preserved — ${currentCount - messageCountAtLastScan} message(s) remain for the next scan pass.`);
+            }
+            saveScannerState(); // Persist so reload doesn't reset the countdown
+            emitScannerHealth();
+        } else {
+            _lastScanFailureCount = currentCount;
+            saveScannerState();
+            if (!_lastScanFailureReason) markScanFailure('Cadence scan did not complete.', scanStart, scanStart + scanWindow);
+            dlog('[NWST Scanner] Scan did not complete — counter held; will retry with the full gap.');
+            emitScannerHealth();
+        }
     }
 }
 
-export async function runScan() {
+export async function runScan(windowSize = 0, startIndex = null) {
     isScanning = true;
+    emitScannerHealth();
     dlog('[NWST Scanner] Running scan...');
 
     try {
         const chatId = getChatId();
-        if (!chatId) return;
+        if (!chatId) { markScanFailure('No active chat detected.'); return false; }
 
         const profile = resolveProfile('planningLLM');
         if (!profile) {
             dlog('[NWST Scanner] No Planning LLM profile — skipping scan.');
-            return;
+            markScanFailure('No Planning LLM profile configured.', startIndex, Number.isInteger(startIndex) ? startIndex + windowSize : null);
+            return false;
         }
 
-        const recentMessages = getRecentMessages(getScanFrequency());
+        // Keep each individual prompt bounded at 60 messages. When startIndex
+        // is supplied by the cadence controller, read that exact oldest backlog
+        // slice instead of the newest messages so no unscanned gap is skipped.
+        const effectiveWindow = Math.min(Math.max(windowSize || 0, getScanFrequency()), 60);
+        const recentMessages = Number.isInteger(startIndex)
+            ? getMessagesFromRange(startIndex, effectiveWindow)
+            : getRecentMessages(effectiveWindow);
         const worldState = getWorldState(chatId);
         const notebook = getNotebook(chatId);
         const communities = getAllCommunities(chatId);
-        const activeEvents = getActiveEvents(chatId);
+        const activeEvents = getTrackedEvents(chatId);
         const settingContext = getSettingContext(chatId);
 
-        const userPrompt = buildScannerPrompt(recentMessages, worldState, notebook, communities, activeEvents, settingContext);
+        const userPrompt = buildScannerPrompt(recentMessages, worldState, notebook, activeEvents, settingContext);
+        const worldEvidenceSources = buildWorldEvidenceSources(recentMessages, worldState.currentDay, settingContext);
+        const worldCommunityPrompt = buildWorldCommunityPrompt(recentMessages, worldState, communities, settingContext, worldEvidenceSources);
 
-        const messages = [
+        dlog('[NWST Scanner] Calling Planning LLM for detailed continuity...');
+        const response = await generateWithProfile(profile, [
             { role: 'system', content: SCANNER_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
-        ];
-
-        dlog('[NWST Scanner] Calling Planning LLM...');
-        const response = await generateWithProfile(profile, messages);
-
+        ], { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
         if (!response) {
-            dlog('[NWST Scanner] Empty response.');
-            return;
+            dlog('[NWST Scanner] Empty detailed-continuity response.');
+            markScanFailure('Planning LLM returned an empty detailed-continuity response.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + effectiveWindow : null);
+            return false;
         }
 
-        const hadUpdates = await applyScanResults(chatId, response, recentMessages);
+        dlog('[NWST Scanner] Calling Planning LLM for World/Community maintenance...');
+        const worldCommunityResponse = await generateWithProfile(profile, [
+            { role: 'system', content: WORLD_COMMUNITY_SYSTEM_PROMPT },
+            { role: 'user', content: worldCommunityPrompt }
+        ], { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+        if (!worldCommunityResponse) {
+            dlog('[NWST Scanner] Empty World/Community response.');
+            markScanFailure('Planning LLM returned an empty World/Community response.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + effectiveWindow : null);
+            return false;
+        }
+
+        // Parse BOTH calls before applying either one. This keeps the cadence
+        // window transactional: a malformed second response cannot leave the
+        // detailed ledger half-applied and then force the same window to retry.
+        const parsedScan = parseJsonObjectResponse(response, 'detailed continuity');
+        const parsedWorldCommunity = parseJsonObjectResponse(worldCommunityResponse, 'World/Community');
+        if (parsedScan === null || parsedWorldCommunity === null) {
+            markScanFailure('Malformed JSON in cadence scan response.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + effectiveWindow : null);
+            return false;
+        }
+
+        const detailedUpdates = await applyScanResults(chatId, parsedScan, recentMessages);
+        const worldCommunityUpdates = await applyWorldCommunityResults(chatId, parsedWorldCommunity, worldEvidenceSources, recentMessages, communities);
+        const hadUpdates = detailedUpdates || worldCommunityUpdates;
 
         if (hadUpdates) {
             nwstToast('World state updated.', 'info');
@@ -511,11 +785,17 @@ export async function runScan() {
         }
 
         dlog('[NWST Scanner] Scan complete.');
+        const rangeStart = Number.isInteger(startIndex) ? startIndex : Math.max(0, getCurrentMessageCount() - effectiveWindow);
+        markScanSuccess(rangeStart, rangeStart + effectiveWindow);
+        return true;
 
     } catch (err) {
         console.error('[NWST Scanner] Scan failed:', err);
+        markScanFailure(err?.message || 'Unexpected cadence scan error.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + (windowSize || 0) : null);
+        return false;
     } finally {
         isScanning = false;
+        emitScannerHealth();
     }
 }
 
@@ -542,9 +822,26 @@ function getRecentMessages(count) {
     } catch (e) { return []; }
 }
 
+function getMessagesFromRange(startIndex, count) {
+    try {
+        const ctx = SillyTavern.getContext();
+        const chat = ctx.chat || [];
+        const start = Math.max(0, startIndex || 0);
+        return chat.slice(start, start + count).filter(msg => {
+            if (msg.is_system && msg.extra?.hidden) return false;
+            if (msg.extra?.display === 'none') return false;
+            return true;
+        });
+    } catch (e) { return []; }
+}
 
-function buildScannerPrompt(recentMessages, worldState, notebook, communities, activeEvents, settingContext) {
+
+function buildScannerPrompt(recentMessages, worldState, notebook, activeEvents, settingContext) {
     let prompt = '';
+
+    if (settingContext) {
+        prompt += `=== SETTING / WORLD FRAME ===\n${settingContext}\n\n`;
+    }
 
     // Recent messages — the primary input
     prompt += `=== RECENT CHAT MESSAGES ===\n`;
@@ -559,7 +856,7 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
     prompt += `Date: ${worldState.currentDay?.dateDisplay || '(not set)'}\n`;
     prompt += `Season: ${worldState.currentDay?.season || '(not set)'}\n`;
     prompt += `Weather: ${worldState.currentDay?.weatherToday || '(not set)'}\n`;
-    prompt += `Story day: ${typeof worldState.currentDay?.dayCount === 'number' ? `Day ${worldState.currentDay.dayCount}` : '(not set)'}\n\n`;
+    prompt += `Calendar day-of-year: ${typeof worldState.currentDay?.dayCount === 'number' ? `Day ${worldState.currentDay.dayCount}` : '(not set)'}\n\n`;
 
     // ── CALENDAR SYSTEM (date format reference) ─────────────────
     const calConfig = getCalendarConfig(getChatId());
@@ -571,20 +868,15 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
         prompt += `=== CALENDAR SYSTEM ===\n`;
         prompt += `  Months (${calConfig.months} total): ${monthList}\n`;
         prompt += `  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n`;
-        prompt += `  Use these month and day names when generating scheduledDate values.\n\n`;
-    }
-
-    // Existing world conditions (so the LLM knows what's already there)
-    const conditions = worldState.conditions || {};
-    const hasConditions = Object.values(conditions).some(c => c.enabled && c.content);
-    if (hasConditions) {
-        prompt += `=== CURRENT WORLD CONDITIONS (update only if changed) ===\n`;
-        for (const [key, cond] of Object.entries(conditions)) {
-            if (cond.enabled) {
-                prompt += `[${key.toUpperCase()}]: ${cond.content || '(not yet set)'}\n`;
+        if (Array.isArray(calConfig.specialDays) && calConfig.specialDays.length > 0) {
+            prompt += `  Known recurring Special Days:\n`;
+            for (const sd of calConfig.specialDays) {
+                if (!sd?.name || !Number.isInteger(sd.month) || !Number.isInteger(sd.day)) continue;
+                const monthName = calConfig.monthNames[sd.month - 1] || `Month ${sd.month}`;
+                prompt += `    - ${sd.name}: ${monthName} ${sd.day}\n`;
             }
         }
-        prompt += '\n';
+        prompt += `  Use these month/day names and Special Day dates when generating scheduledDate values. If an event is tied to a known birthday, holiday, anniversary, or other listed Special Day, attach that concrete date; the calendar will place it into the correct visible horizon or future queue.\n\n`;
     }
 
     // Existing notebook
@@ -606,25 +898,11 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
         }
     }
 
-    // Community summaries
-    if (communities.length > 0) {
-        prompt += `=== CURRENT COMMUNITY SUMMARIES (update only if dynamics shifted) ===\n`;
-        for (const com of communities) {
-            prompt += `--- ${com.name} (${com.members || 'members unknown'}) ---\n`;
-            prompt += `${com.summary || '(no summary yet)'}\n\n`;
-        }
-    } else {
-        // Without this, a fresh chat gave the model no cue that community
-        // creation was part of its job, so the FIRST community rarely got made.
-        prompt += `=== CURRENT COMMUNITY SUMMARIES ===\n`;
-        prompt += `(none tracked yet — if the recent messages show a distinct social group with recurring dynamics, create it via communityUpdates)\n\n`;
-    }
-
-    // Active events — listed with stable E# labels so the scan can report
+    // Tracked events (including hidden Future Scheduled entries) — listed with stable E# labels so the scan can report
     // event maintenance (resolved / missed / tier corrections) in eventUpdates.
     // The applier rebuilds the same list in the same order to map E# → event.
     if (activeEvents.length > 0) {
-        prompt += `=== ACTIVE EVENTS ===\n`;
+        prompt += `=== TRACKED EVENTS (future-scheduled entries may be hidden from the player until they enter range) ===\n`;
         activeEvents.forEach((ev, i) => {
             const dateStr = ev.scheduledDate ? ` [${ev.scheduledDate}]` : '';
             prompt += `E${i + 1}: [${ev.tier}]${dateStr} (${ev.status}) ${ev.title}\n`;
@@ -632,71 +910,204 @@ function buildScannerPrompt(recentMessages, worldState, notebook, communities, a
         prompt += '\n';
     }
 
-    if (settingContext) {
-        prompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
-    }
-
-    prompt += `Review the recent messages and produce your JSON update response.`;
+    prompt += `Review the recent messages and produce your JSON update response. Keep the Notebook self-maintaining: add current information and retire labeled bullets that the new prose has made stale, resolved, contradicted, or superseded.`;
 
     return prompt;
 }
+
+function buildWorldCommunityPrompt(recentMessages, worldState, communities, settingContext, evidenceSources) {
+    let prompt = '';
+
+    prompt += `=== LABELED WORLD EVIDENCE SOURCES ===\n`;
+    prompt += `For GROUNDED conditions, cite only 1-4 of these source IDs in evidenceRefs. Do not quote them. Current saved conditions below are NOT valid evidence sources.\n\n`;
+    prompt += `${formatWorldEvidenceSources(evidenceSources)}\n`;
+
+
+    const conditions = worldState.conditions || {};
+    prompt += `=== CURRENT WORLD CONDITIONS — PERSISTENT STATE, NOT STYLE EXAMPLES ===\n`;
+    for (const [key, cond] of Object.entries(conditions)) {
+        if (!cond?.enabled) continue;
+        prompt += `[${key.toUpperCase()}]: ${cond.content || '(empty)'}\n`;
+    }
+    prompt += `These saved conditions may already be overly scene-focused. Preserve their valid WORLD-LEVEL facts, but do not imitate scene-level granularity.\n\n`;
+
+    prompt += `=== CURRENT COMMUNITIES — DURABLE GROUP STATE ===\n`;
+    if (communities.length === 0) {
+        prompt += `(none tracked yet)\n\n`;
+    } else {
+        for (const com of communities) {
+            prompt += `--- ${com.name} ---\n`;
+            prompt += `Members: ${com.members || '(unknown)'}\n`;
+            prompt += `Summary: ${com.summary || '(empty)'}\n\n`;
+        }
+    }
+
+    prompt += `Determine whether the WIDER WORLD or any COMMUNITY'S DURABLE COLLECTIVE STATE actually changed. For World Conditions, PRESERVE is the default. Use GROUNDED only for a NEW qualifying macro transition with a valid transitionType and cited source IDs. Use AMBIENT only to fill an empty condition or repair clearly scene-contaminated state; otherwise return update:false. A static fact, continuing operation, ordinary case, or routine institutional process is NOT a Grounded cadence update. Most fields should remain unchanged. Return the required JSON only.`;
+    return prompt;
+}
+
+const NOTEBOOK_LEDGER_FIELDS = [
+    ['core', 'unresolvedDetail', 'UD', 'Unresolved Details'],
+    ['core', 'promiseThreatDeadline', 'PT', 'Promises/Threats/Deadlines'],
+    ['core', 'offscreenPressure', 'OP', 'Offscreen Pressure'],
+    ['core', 'doNotForget', 'DNF', 'Do Not Forget'],
+    ['mystery', 'establishedFacts', 'EF', 'Established Facts'],
+    ['mystery', 'plantedDetails', 'PD', 'Planted Details'],
+    ['mystery', 'characterWhereabouts', 'CW', 'Character Whereabouts'],
+    ['mystery', 'inconsistenciesFlagged', 'IF', 'Inconsistencies Flagged'],
+    ['mystery', 'currentToneAtmosphere', 'TA', 'Current Tone/Atmosphere']
+];
+
+function getNotebookLedger(notebook) {
+    const ledger = [];
+    for (const [section, field, prefix, label] of NOTEBOOK_LEDGER_FIELDS) {
+        const bullets = notebook?.[section]?.[field] || [];
+        if (!Array.isArray(bullets)) continue;
+        bullets.forEach((text, index) => {
+            ledger.push({ id: `${prefix}${index + 1}`, section, field, label, text });
+        });
+    }
+    return ledger;
+}
+
 function formatNotebookForPrompt(notebook) {
+    const ledger = getNotebookLedger(notebook);
+    if (ledger.length === 0) return '(notebook is empty)\n';
+
     let text = '';
-    const core = notebook?.core || {};
-    const mystery = notebook?.mystery || {};
-
-    if (core.unresolvedDetail?.length)       text += `Unresolved Details:\n${core.unresolvedDetail.map(b => `  - ${b}`).join('\n')}\n`;
-    if (core.promiseThreatDeadline?.length)   text += `Promises/Threats:\n${core.promiseThreatDeadline.map(b => `  - ${b}`).join('\n')}\n`;
-    if (core.offscreenPressure?.length)       text += `Offscreen Pressure:\n${core.offscreenPressure.map(b => `  - ${b}`).join('\n')}\n`;
-    if (core.doNotForget?.length)             text += `Do Not Forget:\n${core.doNotForget.map(b => `  - ${b}`).join('\n')}\n`;
-    if (mystery.establishedFacts?.length)     text += `Established Facts:\n${mystery.establishedFacts.map(b => `  - ${b}`).join('\n')}\n`;
-    if (mystery.plantedDetails?.length)       text += `Planted Details:\n${mystery.plantedDetails.map(b => `  - ${b}`).join('\n')}\n`;
-    if (mystery.characterWhereabouts?.length) text += `Character Whereabouts:\n${mystery.characterWhereabouts.map(b => `  - ${b}`).join('\n')}\n`;
-    if (mystery.inconsistenciesFlagged?.length) text += `Inconsistencies Flagged:\n${mystery.inconsistenciesFlagged.map(b => `  - ${b}`).join('\n')}\n`;
-    if (mystery.currentToneAtmosphere?.length)  text += `Current Tone/Atmosphere:\n${mystery.currentToneAtmosphere.map(b => `  - ${b}`).join('\n')}\n`;
-
-    return text || '(notebook is empty)\n';
+    for (const [, , prefix, label] of NOTEBOOK_LEDGER_FIELDS) {
+        const rows = ledger.filter(entry => entry.id.startsWith(prefix));
+        if (rows.length === 0) continue;
+        text += `${label}:\n`;
+        for (const entry of rows) text += `  ${entry.id}: ${entry.text}\n`;
+    }
+    text += '\nUse these labels in notebookRetirements when recent prose makes an existing bullet stale, superseded, contradicted, resolved, paid off, expired, or no longer current.\n';
+    return text;
 }
 
 // ── Apply scan results ────────────────────────────────────────────────────
 
 /**
- * Parse the Planning LLM's JSON response and apply updates to storage.
- *
- * @param {string} chatId
- * @param {string} response - LLM response text
- * @param {object[]} recentMessages - Recent messages (for NPC detection pass)
- * @returns {Promise<boolean>} True if any updates were applied
+ * Parse a JSON object returned by one of the cadence Planning calls.
+ * Parsing happens before either call is applied so one malformed response
+ * cannot leave the cadence window half-processed.
  */
-async function applyScanResults(chatId, response, recentMessages) {
-    if (!response || typeof response !== 'string') return false;
-
-    let result = null;
+function parseJsonObjectResponse(response, label = 'scan') {
+    if (!response || typeof response !== 'string') return null;
     let jsonStr = response.trim();
-
-    // Strip markdown code fences
     const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch) jsonStr = fenceMatch[1].trim();
-
-    // Find outermost JSON object
     const objMatch = jsonStr.match(/\{[\s\S]*\}/);
     if (objMatch) jsonStr = objMatch[0];
-
     try {
-        result = JSON.parse(jsonStr);
+        return JSON.parse(jsonStr);
     } catch (e) {
-        console.warn('[NWST Scanner] Could not parse scan response as JSON. Logging raw response.');
-        dlog('[NWST Scanner] Raw response:', response.substring(0, 800));
-        return false;
+        console.warn(`[NWST Scanner] Could not parse ${label} response as JSON.`);
+        dlog(`[NWST Scanner] Raw ${label} response:`, response.substring(0, 800));
+        return null;
     }
+}
 
+function namedBulletPrefix(text) {
+    const idx = String(text || '').indexOf(':');
+    return idx > 0 ? String(text).slice(0, idx).trim() : '';
+}
+
+function sameNamedEntity(chatId, a, b) {
+    const aName = namedBulletPrefix(a);
+    const bName = namedBulletPrefix(b);
+    if (!aName || !bName) return false;
+    const registry = buildAliasRegistry(chatId);
+    const ar = registry.resolve(aName);
+    const br = registry.resolve(bName);
+    if (ar && br) return ar === br;
+    const ac = toCanonicalId(aName);
+    const bc = toCanonicalId(bName);
+    return !!ac && ac === bc;
+}
+
+function uniqueShortFullMatch(current, existing, incoming) {
+    const a = toCanonicalId(namedBulletPrefix(existing));
+    const b = toCanonicalId(namedBulletPrefix(incoming));
+    if (!a || !b || a === b) return false;
+    const aTokens = a.split(' ').filter(Boolean);
+    const bTokens = b.split(' ').filter(Boolean);
+    let short = null;
+    let full = null;
+    if (aTokens.length === 1 && aTokens[0].length >= 3 && bTokens.includes(aTokens[0])) { short = aTokens[0]; full = b; }
+    if (bTokens.length === 1 && bTokens[0].length >= 3 && aTokens.includes(bTokens[0])) { short = bTokens[0]; full = a; }
+    if (!short || !full) return false;
+    const candidates = current.filter(item => {
+        const c = toCanonicalId(namedBulletPrefix(item));
+        return c && c.split(' ').includes(short);
+    });
+    return candidates.length === 1;
+}
+
+async function upsertAliasAwareCoreBullet(chatId, field, bullet) {
+    const current = getCoreField(chatId, field) || [];
+    const removed = current.filter(existing => sameNamedEntity(chatId, existing, bullet) || uniqueShortFullMatch(current, existing, bullet));
+    const kept = current.filter(existing => !removed.includes(existing));
+    if (!kept.includes(bullet)) kept.push(bullet);
+    if (removed.length === 0 && current.includes(bullet)) return { removed: [], added: [] };
+    await replaceCoreFieldQuiet(chatId, field, kept);
+    return { removed, added: current.includes(bullet) ? [] : [bullet] };
+}
+
+async function upsertAliasAwareMysteryBullet(chatId, field, bullet) {
+    const current = getMysteryField(chatId, field) || [];
+    const removed = current.filter(existing => sameNamedEntity(chatId, existing, bullet) || uniqueShortFullMatch(current, existing, bullet));
+    const kept = current.filter(existing => !removed.includes(existing));
+    if (!kept.includes(bullet)) kept.push(bullet);
+    return await replaceMysteryFieldDiff(chatId, field, kept);
+}
+
+/** Apply the detailed continuity result after both cadence calls parsed. */
+async function applyScanResults(chatId, result, recentMessages) {
     if (!result || result.noChanges === true) {
-        dlog('[NWST Scanner] LLM indicated no changes needed.');
+        dlog('[NWST Scanner] Detailed continuity call indicated no changes needed.');
         return false;
     }
 
     let hadUpdates = false;
     beginMutationBatch('Scan update');  // collect destructive ops for undo/redo
+
+    // ── Retire stale/superseded Notebook state before adding replacements ──
+    // Labels refer to the exact Notebook snapshot supplied to the LLM.
+    const retirementIds = Array.isArray(result.notebookRetirements)
+        ? new Set(result.notebookRetirements.map(id => String(id || '').trim().toUpperCase()).filter(Boolean))
+        : new Set();
+    if (retirementIds.size > 0) {
+        const before = getNotebook(chatId);
+        const ledger = getNotebookLedger(before);
+        const selected = ledger.filter(entry => retirementIds.has(entry.id.toUpperCase()));
+        const grouped = new Map();
+        for (const entry of selected) {
+            const key = `${entry.section}:${entry.field}`;
+            if (!grouped.has(key)) grouped.set(key, { section: entry.section, field: entry.field, entries: [] });
+            grouped.get(key).entries.push(entry);
+        }
+        for (const { section, field, entries } of grouped.values()) {
+            const removedTexts = entries.map(entry => entry.text);
+            if (section === 'core') {
+                const current = getCoreField(chatId, field) || [];
+                const kept = current.filter(text => !removedTexts.includes(text));
+                if (kept.length !== current.length) {
+                    await replaceCoreFieldQuiet(chatId, field, kept);
+                    recordMutation('core', field, removedTexts, []);
+                    hadUpdates = true;
+                }
+            } else {
+                const current = getMysteryField(chatId, field) || [];
+                const kept = current.filter(text => !removedTexts.includes(text));
+                if (kept.length !== current.length) {
+                    const diff = await replaceMysteryFieldDiff(chatId, field, kept);
+                    if (diff && diff.removed.length) recordMutation('mystery', field, diff.removed, diff.added);
+                    hadUpdates = true;
+                }
+            }
+        }
+    }
 
     // ── Apply notebook updates ────────────────────────────────────────────
     const nbUpdates = result.notebookUpdates || {};
@@ -709,10 +1120,10 @@ async function applyScanResults(chatId, response, recentMessages) {
             for (const bullet of bullets) {
                 if (bullet && typeof bullet === 'string' && bullet.trim()) {
                     if (field === 'offscreenPressure') {
-                        // Pressures are source-keyed ("Source: pressure") — replace
-                        // the same source's stale pressure instead of stacking.
-                        const diff = await upsertCoreBullet(chatId, field, bullet.trim());
-                        if (diff && diff.removed.length) recordMutation('core', field, diff.removed, diff.added);
+                        // Source-keyed and alias-aware: "Daniel" and "Daniel Rowan"
+                        // cannot accumulate two concurrent pressure entries.
+                        const diff = await upsertAliasAwareCoreBullet(chatId, field, bullet.trim());
+                        if (diff && (diff.removed.length || diff.added.length)) recordMutation('core', field, diff.removed, diff.added);
                     } else {
                         await addCoreBullet(chatId, field, bullet.trim());
                     }
@@ -728,10 +1139,10 @@ async function applyScanResults(chatId, response, recentMessages) {
             for (const bullet of bullets) {
                 if (bullet && typeof bullet === 'string' && bullet.trim()) {
                     if (field === 'characterWhereabouts') {
-                        // A character has ONE current location — replace the stale
-                        // entry for that character instead of stacking a new one.
-                        const diff = await upsertCharacterBullet(chatId, field, bullet.trim());
-                        if (diff && diff.removed.length) recordMutation('mystery', field, diff.removed, diff.added);
+                        // A character has ONE latest-known location. Resolve aliases and
+                        // short/full-name variants before replacing the old entry.
+                        const diff = await upsertAliasAwareMysteryBullet(chatId, field, bullet.trim());
+                        if (diff && (diff.removed.length || diff.added.length)) recordMutation('mystery', field, diff.removed, diff.added);
                     } else if (field === 'currentToneAtmosphere') {
                         // There is ONE current tone — replace, don't accumulate a
                         // history of every tone the story has ever had.
@@ -765,47 +1176,8 @@ async function applyScanResults(chatId, response, recentMessages) {
         }
     }
 
-    // ── Apply world condition updates ─────────────────────────────────────
-    const condUpdates = result.conditionUpdates || {};
-    for (const [condName, content] of Object.entries(condUpdates)) {
-        if (content && typeof content === 'string' && content.trim() &&
-            ['political', 'social', 'spiritual', 'environmental'].includes(condName)) {
-            await updateConditionContent(chatId, condName, content.trim());
-            hadUpdates = true;
-            dlog(`[NWST Scanner] Updated world condition: ${condName}`);
-        }
-    }
-
-    // ── Apply community summary updates ───────────────────────────────────
-    const comUpdates = result.communityUpdates || [];
-    const existingCommunities = getAllCommunities(chatId);
-
-    for (const update of comUpdates) {
-        if (!update.name || !update.summary) continue;
-        const existing = existingCommunities.find(c => c.name.toLowerCase() === update.name.toLowerCase());
-        if (existing) {
-            await updateCommunitySummary(chatId, existing.id, update.summary.trim());
-            // Also apply member changes — previously these were silently dropped,
-            // freezing every community's member list at creation time.
-            if (typeof update.members === 'string' && update.members.trim()
-                && update.members.trim() !== (existing.members || '').trim()) {
-                await updateCommunityMembers(chatId, existing.id, update.members.trim());
-                dlog(`[NWST Scanner] Updated members for community: ${update.name}`);
-            }
-        } else {
-            // New community detected — create it
-            await addCommunity(chatId, {
-                name: update.name,
-                members: update.members || '',
-                summary: update.summary.trim()
-            });
-        }
-        hadUpdates = true;
-        dlog(`[NWST Scanner] Updated community: ${update.name}`);
-    }
-
     // ── Apply event maintenance (resolved / missed / tier corrections) ────
-    // E# labels map to the same getActiveEvents() ordering used when the
+    // E# labels map to the same getTrackedEvents() ordering used when the
     // prompt was built; nothing between build and apply mutates the events
     // array, so the mapping is stable. Flagged events awaiting a player
     // decision are never touched.
@@ -814,7 +1186,7 @@ async function applyScanResults(chatId, response, recentMessages) {
         try {
             const { updateEvent: updateEvt, setEventStatus: setEvtStatus } = await import('../data/events.js');
             // Identical call to the prompt builder's — same list, same order.
-            const activeList = getActiveEvents(chatId);
+            const activeList = getTrackedEvents(chatId);
             const byRef = new Map();
             activeList.forEach((ev, i) => byRef.set(`e${i + 1}`, ev));
             const refToEvent = (ref) => byRef.get(String(ref).trim().toLowerCase()) || null;
@@ -841,6 +1213,7 @@ async function applyScanResults(chatId, response, recentMessages) {
                 const ev = refToEvent(ref);
                 if (!ev || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
                 if (ev.tier === 'undetermined') continue;
+                if (ev.scheduledDate || typeof ev.scheduledElapsedStart === 'number') continue;
                 if (!VALID_TIERS.includes(tier) || ev.tier === tier) continue;
                 await updateEvt(chatId, ev.id, { tier });
                 dlog(`[NWST Scanner] Event tier corrected by scan: "${ev.title}" → ${tier}`);
@@ -980,6 +1353,75 @@ async function applyScanResults(chatId, response, recentMessages) {
     return hadUpdates;
 }
 
+async function applyWorldCommunityResults(chatId, result, evidenceSources, recentMessages, communities) {
+    if (!result || result.noChanges === true) {
+        dlog('[NWST Scanner] World/Community call indicated no changes needed.');
+        return false;
+    }
+
+    let hadUpdates = false;
+    const allowedConditions = new Set(['political', 'social', 'spiritual', 'environmental']);
+    const allowedScopes = new Set([
+        'institution', 'faction', 'population', 'community', 'district', 'regional',
+        'cultural', 'environmental', 'spiritual'
+    ]);
+    const recentCastNames = collectRecentCastNames(recentMessages, communities);
+
+    const condUpdates = result.conditionUpdates || {};
+    const currentConditions = getWorldState(chatId).conditions || {};
+    for (const [condName, payload] of Object.entries(condUpdates)) {
+        if (!allowedConditions.has(condName) || !payload || typeof payload !== 'object') continue;
+        if (!currentConditions[condName]?.enabled) continue; // disabled conditions are not tracked
+        if (payload.update !== true) continue;
+        const scope = String(payload.scope || '').toLowerCase().trim();
+        const content = typeof payload.content === 'string' ? payload.content.trim() : '';
+        if (!allowedScopes.has(scope) || !content) {
+            dlog(`[NWST Scanner] Rejected ${condName} condition update with invalid scope/content.`);
+            continue;
+        }
+        const validation = validateWorldConditionPayload(payload, evidenceSources, recentCastNames, condName);
+        if (!validation.ok) {
+            console.warn(`[NWST Scanner] Rejected ${condName} World Condition: ${validation.reason}`);
+            continue;
+        }
+        if (validation.mode === 'ambient') {
+            const existingContent = String(currentConditions[condName]?.content || '').trim();
+            if (existingContent && !isLikelySceneContaminatedCondition(existingContent, recentCastNames, condName)) {
+                dlog(`[NWST Scanner] Preserved existing ${condName} condition; cadence ambient does not churn healthy nonempty state.`);
+                continue;
+            }
+        }
+        await updateConditionContent(chatId, condName, content);
+        hadUpdates = true;
+        dlog(`[NWST Scanner] Updated world condition: ${condName} (${scope}, ${validation.mode})`);
+    }
+
+    const comUpdates = Array.isArray(result.communityUpdates) ? result.communityUpdates : [];
+    for (const update of comUpdates) {
+        if (!update || update.update === false || !update.name || !update.summary) continue;
+        const currentList = getAllCommunities(chatId);
+        const existing = currentList.find(c => c.name.toLowerCase() === String(update.name).toLowerCase());
+        if (existing) {
+            await updateCommunitySummary(chatId, existing.id, String(update.summary).trim());
+            if (typeof update.members === 'string' && update.members.trim()
+                && update.members.trim() !== (existing.members || '').trim()) {
+                await updateCommunityMembers(chatId, existing.id, update.members.trim());
+                dlog(`[NWST Scanner] Updated members for community: ${update.name}`);
+            }
+        } else {
+            await addCommunity(chatId, {
+                name: String(update.name).trim(),
+                members: typeof update.members === 'string' ? update.members.trim() : '',
+                summary: String(update.summary).trim()
+            });
+        }
+        hadUpdates = true;
+        dlog(`[NWST Scanner] Updated community durable state: ${update.name}`);
+    }
+
+    return hadUpdates;
+}
+
 // ── Community synthesis (dedicated richer pass) ───────────────────────────
 
 /**
@@ -997,7 +1439,6 @@ export async function synthesizeCommunities(chatId, messages) {
         if (!profile) return false;
 
         const existingCommunities = getAllCommunities(chatId);
-        const notebook = getNotebook(chatId);
         const settingContext = getSettingContext(chatId);
 
         let userPrompt = '';
@@ -1017,15 +1458,10 @@ export async function synthesizeCommunities(chatId, messages) {
         if (existingCommunities.length > 0) {
             userPrompt += `=== EXISTING COMMUNITIES (update or add as needed) ===\n`;
             for (const com of existingCommunities) {
-                userPrompt += `${com.name}: ${com.summary || '(no summary)'}\n`;
+                userPrompt += `${com.name} | Members: ${com.members || '(unknown)'}\n`;
+                userPrompt += `${com.summary || '(no summary)'}\n`;
             }
             userPrompt += '\n';
-        }
-
-        // Key notebook facts for community analysis
-        const facts = notebook?.mystery?.establishedFacts || [];
-        if (facts.length > 0) {
-            userPrompt += `=== ESTABLISHED FACTS ===\n${facts.map(f => `  - ${f}`).join('\n')}\n\n`;
         }
 
         userPrompt += `Analyze the character interactions and produce rich, analytical community summaries. Identify social groupings, power dynamics, unspoken tensions, and what is really happening beneath the surface. Use bullet points (•) for observations, with each bullet being a specific, concrete observation. Do not pad — output only as many bullets as each community genuinely warrants. An optional 1-2 sentence overview paragraph may precede the bullets.`;
@@ -1035,7 +1471,7 @@ export async function synthesizeCommunities(chatId, messages) {
             { role: 'user', content: userPrompt }
         ];
 
-        const response = await generateWithProfile(profile, llmMessages);
+        const response = await generateWithProfile(profile, llmMessages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
         if (!response) return false;
 
         // Parse response
@@ -1054,6 +1490,10 @@ export async function synthesizeCommunities(chatId, messages) {
             const existing = existingList.find(c => c.name.toLowerCase() === com.name.toLowerCase());
             if (existing) {
                 await updateCommunitySummary(chatId, existing.id, com.summary.trim());
+                if (typeof com.members === 'string' && com.members.trim()
+                    && com.members.trim() !== (existing.members || '').trim()) {
+                    await updateCommunityMembers(chatId, existing.id, com.members.trim());
+                }
             } else {
                 await addCommunity(chatId, {
                     name: com.name,

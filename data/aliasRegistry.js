@@ -4,10 +4,10 @@
 // =============================================================================
 // Resolves the many ways a character/entity can be named in prose down to a
 // single canonical ID. This is the foundation of the prose-based secrets
-// engine: ST stores the card title in msg.name (e.g. "Lord Kellan Vance")
-// but secrets reference short names ("Kellan"), and prose uses every variant
-// in between ("the Silver Fox", "the Lord"). All of these must resolve
-// to one canonical entity: `kellan`.
+// engine: ST may store a full card title in msg.name (e.g. "Captain Renée Dubois")
+// while secrets reference a short name ("Renée"), and prose may use other variants.
+// Automatic normalization handles spelling-form differences; semantic titles or
+// honorific variants should be connected explicitly through manual aliases.
 //
 // TWO SOURCES, MERGED:
 //   1. AUTO-BUILT — names pulled from existing NWST data (whoKnows lists,
@@ -15,7 +15,7 @@
 //      name seen becomes its own canonical entity with itself as an alias.
 //   2. MANUAL — user-defined alias groups via the Alias Manager UI. These
 //      take precedence and let the user collapse variants the auto-builder
-//      can't know are the same person ("the Silver Fox" → kellan).
+//      can't know are the same person ("the Captain" → Renée Dubois).
 //
 // Manual aliases are stored per-chat in chatMetadata under 'nwst:aliasRegistry'.
 // Auto-built entries are computed fresh each call (not persisted) so they
@@ -34,8 +34,9 @@ const ALIAS_KEY = 'nwst:aliasRegistry';
 
 /**
  * Convert a display name into a canonical ID.
- * Lowercase, strip honorifics/titles, collapse whitespace, drop diacritics.
- * "Lord Kellan Vance" → "kellan vance" (then alias-resolved to "kellan")
+ * Lowercase, collapse whitespace, strip punctuation, and drop diacritics.
+ * Titles and honorifics are NOT stripped automatically; map those through manual aliases.
+ * "Renée Dubois" → "renee dubois"
  * @param {string} name
  * @returns {string}
  */
@@ -53,7 +54,7 @@ export function toCanonicalId(name) {
 
 /**
  * Get the manual alias groups for this chat.
- * Shape: [{ canonical: "kellan", display: "Kellan", aliases: ["the silver fox", "captain", "kellan vance"] }]
+ * Shape: [{ canonical: "renee dubois", display: "Renée Dubois", aliases: ["renee", "captain dubois", "the captain"] }]
  * @param {string} chatId
  * @returns {object[]}
  */
@@ -88,7 +89,7 @@ export async function saveManualAliases(chatId, aliasGroups) {
 /**
  * Add a single manual alias group.
  * @param {string} chatId
- * @param {string} displayName - The canonical display name (e.g. "Kellan")
+ * @param {string} displayName - The canonical display name (e.g. "Renée Dubois")
  * @param {string[]} aliases - Alternate names that resolve to it
  */
 export async function addManualAlias(chatId, displayName, aliases) {
@@ -298,7 +299,7 @@ export function buildAliasRegistry(chatId) {
     }
 
     // ── Merge word-order permutation duplicates ────────────────
-    // "Maya Ishikawa" and "Ishikawa Maya" produce different canonical IDs
+    // "Mara Ellis" and "Ellis Mara" produce different canonical IDs
     // (we never reorder words in toCanonicalId, to stay safe). But they are the
     // same person. Detect entities whose canonical token-sets are identical and
     // merge them into the one with the most aliases (most established).
@@ -345,7 +346,7 @@ export function buildAliasRegistry(chatId) {
         /**
          * Resolve any name/alias/prose mention to a canonical ID.
          * Tries exact canonical match first, then substring containment
-         * (so "lord kellan vance" resolves via its "kellan" alias).
+         * (so "captain renee dubois" can resolve via an explicitly registered "renee" alias).
          */
         resolve(name) {
             if (!name) return null;
@@ -402,7 +403,7 @@ export function buildAliasRegistry(chatId) {
         scanProse(text) {
             if (!text) return [];
             // Normalize: lowercase, strip diacritics, convert all apostrophe/quote
-            // variants to a single space so "Kellan's" → "kellan s" and the
+            // variants to a single space so "Renée's" → "renee s" and the
             // name still matches at a word boundary. Replace all non-word chars
             // with spaces so punctuation never blocks a match.
             const normalized = text.toLowerCase()

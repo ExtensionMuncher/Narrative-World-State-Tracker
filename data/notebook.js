@@ -334,6 +334,76 @@ export async function replaceMysteryField(chatId, fieldName, bullets) {
     await saveNotebook(chatId, nb);
 }
 
+
+// ── Secret knowledge-list integrity ───────────────────────────────────────
+
+function normalizeKnowledgeName(name) {
+    return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function knowledgeNamesMatch(a, b) {
+    const na = normalizeKnowledgeName(a);
+    const nb = normalizeKnowledgeName(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+
+    const aTokens = na.split(' ').filter(Boolean);
+    const bTokens = nb.split(' ').filter(Boolean);
+    if (aTokens.length > 1 && bTokens.length > 1) {
+        return [...aTokens].sort().join(' ') === [...bTokens].sort().join(' ');
+    }
+
+    // Safe short/full-name bridge: "Mira" ↔ "Mira Rowan".
+    // Only match whole first/last-name tokens; never arbitrary substrings.
+    const short = aTokens.length === 1 ? aTokens[0] : (bTokens.length === 1 ? bTokens[0] : '');
+    const full = aTokens.length > 1 ? aTokens : (bTokens.length > 1 ? bTokens : []);
+    return short.length >= 3 && full.length > 1 && (full[0] === short || full[full.length - 1] === short);
+}
+
+function dedupeKnowledgeNames(names) {
+    const out = [];
+    for (const raw of Array.isArray(names) ? names : []) {
+        const name = typeof raw === 'string' ? raw.trim() : '';
+        if (!name) continue;
+        if (!out.some(existing => knowledgeNamesMatch(existing, name))) out.push(name);
+    }
+    return out;
+}
+
+function normalizeSecretKnowledgeLists(secret) {
+    const whoKnows = dedupeKnowledgeNames(secret?.whoKnows);
+    const whoDoesNotKnow = dedupeKnowledgeNames(secret?.whoDoesNotKnow)
+        .filter(name => !whoKnows.some(knower => knowledgeNamesMatch(knower, name)));
+    return { whoKnows, whoDoesNotKnow };
+}
+
+/**
+ * Repair impossible knowledge states in existing secrets. whoKnows is
+ * authoritative when the same character appears in both lists.
+ * @param {string} chatId
+ * @returns {Promise<number>} number of secrets repaired
+ */
+export async function repairSecretKnowledgeIntegrity(chatId) {
+    const nb = getNotebook(chatId);
+    if (!Array.isArray(nb.secrets) || nb.secrets.length === 0) return 0;
+    let repaired = 0;
+
+    for (const secret of nb.secrets) {
+        const normalized = normalizeSecretKnowledgeLists(secret);
+        const beforeKnows = JSON.stringify(secret.whoKnows || []);
+        const beforeNot = JSON.stringify(secret.whoDoesNotKnow || []);
+        if (beforeKnows !== JSON.stringify(normalized.whoKnows)
+            || beforeNot !== JSON.stringify(normalized.whoDoesNotKnow)) {
+            secret.whoKnows = normalized.whoKnows;
+            secret.whoDoesNotKnow = normalized.whoDoesNotKnow;
+            repaired++;
+        }
+    }
+
+    if (repaired > 0) await saveNotebook(chatId, nb);
+    return repaired;
+}
+
 // ── Secrets section ───────────────────────────────────────────────────────
 
 /**
@@ -366,15 +436,6 @@ export function getSecretStatus(secret) {
  */
 export function getInjectableSecrets(chatId) {
     return getAllSecrets(chatId).filter(s => getSecretStatus(s) !== 'archived');
-}
-
-/**
- * Get secrets currently awaiting the player's archive decision.
- * @param {string} chatId
- * @returns {object[]}
- */
-export function getPendingArchiveSecrets(chatId) {
-    return getAllSecrets(chatId).filter(s => getSecretStatus(s) === 'pending_archive');
 }
 
 /**
@@ -436,8 +497,8 @@ export async function addSecret(chatId, secretData) {
         type: secretData.type || 'character',
         title: secretData.title || '',
         secret: secretData.secret || '',
-        whoKnows: secretData.whoKnows || [],
-        whoDoesNotKnow: secretData.whoDoesNotKnow || [],
+        whoKnows: normalizeSecretKnowledgeLists(secretData).whoKnows,
+        whoDoesNotKnow: normalizeSecretKnowledgeLists(secretData).whoDoesNotKnow,
         evidenceShown: secretData.evidenceShown || '',
         pressureRisk: secretData.pressureRisk || '',
         revealConditions: secretData.revealConditions || '',
@@ -481,6 +542,9 @@ export async function updateSecret(chatId, secretId, updates) {
     const index = nb.secrets.findIndex(s => s.id === secretId);
     if (index === -1) return null;
     nb.secrets[index] = { ...nb.secrets[index], ...updates };
+    const normalized = normalizeSecretKnowledgeLists(nb.secrets[index]);
+    nb.secrets[index].whoKnows = normalized.whoKnows;
+    nb.secrets[index].whoDoesNotKnow = normalized.whoDoesNotKnow;
     await saveNotebook(chatId, nb);
     return nb.secrets[index];
 }
@@ -513,10 +577,19 @@ export async function addWhoKnows(chatId, secretId, characterName) {
     if (!Array.isArray(nb.secrets)) return null;
     const secret = nb.secrets.find(s => s.id === secretId);
     if (!secret) return null;
-    if (!secret.whoKnows.includes(characterName)) {
-        secret.whoKnows.push(characterName);
-        await saveNotebook(chatId, nb);
+    if (!Array.isArray(secret.whoKnows)) secret.whoKnows = [];
+    if (!Array.isArray(secret.whoDoesNotKnow)) secret.whoDoesNotKnow = [];
+    let changed = false;
+    if (!secret.whoKnows.some(name => knowledgeNamesMatch(name, characterName))) {
+        secret.whoKnows.push(characterName.trim());
+        changed = true;
     }
+    const filtered = secret.whoDoesNotKnow.filter(name => !knowledgeNamesMatch(name, characterName));
+    if (filtered.length !== secret.whoDoesNotKnow.length) {
+        secret.whoDoesNotKnow = filtered;
+        changed = true;
+    }
+    if (changed) await saveNotebook(chatId, nb);
     return secret;
 }
 
@@ -549,10 +622,19 @@ export async function addWhoDoesNotKnow(chatId, secretId, characterName) {
     if (!Array.isArray(nb.secrets)) return null;
     const secret = nb.secrets.find(s => s.id === secretId);
     if (!secret) return null;
-    if (!secret.whoDoesNotKnow.includes(characterName)) {
-        secret.whoDoesNotKnow.push(characterName);
-        await saveNotebook(chatId, nb);
+    if (!Array.isArray(secret.whoKnows)) secret.whoKnows = [];
+    if (!Array.isArray(secret.whoDoesNotKnow)) secret.whoDoesNotKnow = [];
+    let changed = false;
+    if (!secret.whoDoesNotKnow.some(name => knowledgeNamesMatch(name, characterName))) {
+        secret.whoDoesNotKnow.push(characterName.trim());
+        changed = true;
     }
+    const filtered = secret.whoKnows.filter(name => !knowledgeNamesMatch(name, characterName));
+    if (filtered.length !== secret.whoKnows.length) {
+        secret.whoKnows = filtered;
+        changed = true;
+    }
+    if (changed) await saveNotebook(chatId, nb);
     return secret;
 }
 
@@ -571,32 +653,6 @@ export async function removeWhoDoesNotKnow(chatId, secretId, characterName) {
     secret.whoDoesNotKnow = secret.whoDoesNotKnow.filter(n => n !== characterName);
     await saveNotebook(chatId, nb);
     return secret;
-}
-
-/**
- * Get all secrets where a specific character is in the whoKnows list.
- * Used by narrativeConsistency.js for selective secret injection.
- * @param {string} chatId
- * @param {string} characterName
- * @returns {object[]} Array of secrets where the character knows
- */
-export function getSecretsKnownBy(chatId, characterName) {
-    const nb = getNotebook(chatId);
-    if (!Array.isArray(nb.secrets)) return [];
-    return nb.secrets.filter(s => s.whoKnows.includes(characterName));
-}
-
-/**
- * Get all secrets where a specific character is in the whoDoesNotKnow list.
- * Used by narrativeConsistency.js to enforce knowledge boundaries.
- * @param {string} chatId
- * @param {string} characterName
- * @returns {object[]} Array of secrets the character must NOT know
- */
-export function getSecretsUnknownTo(chatId, characterName) {
-    const nb = getNotebook(chatId);
-    if (!Array.isArray(nb.secrets)) return [];
-    return nb.secrets.filter(s => s.whoDoesNotKnow.includes(characterName));
 }
 
 // ── Relevance keyword extraction ───────────────────────────────────────────

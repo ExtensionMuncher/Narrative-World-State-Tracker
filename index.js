@@ -13,18 +13,18 @@
 //     pattern — this is how the extension appears in the dropdown menu.
 //   • Chat change detection uses ST's native CHAT_CHANGED event — NOT polling.
 //   • Settings stored in extensionSettings (global prefs, not per-chat).
-//   • Per-chat narrative data stored in extensionSettings.nwst.chatData (namespaced under chatId).
+//   • Per-chat narrative data stored in SillyTavern chatMetadata.
 //
 // ── DATA STORAGE SPLIT ────────────────────────────────────────────────────
 //
 //   GLOBAL (extensionSettings — stored once, shared across all chats):
 //     • enabled, scanPaused, debugMode
-//     • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM)
+//     • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM, secretsSidecarLLM)
 //     • scanFrequency
 //     • injection settings
 //     • plannerPrompt
 //
-//   PER-CHAT (extensionSettings.nwst.chatData[chatId]):
+//   PER-CHAT (SillyTavern chatMetadata):
 //     • settingContext       — world climate/geography description
 //     • worldState           — currentDay, forecast, moonPhases, conditions
 //     • events               — all event objects
@@ -135,12 +135,12 @@ const defaultSettings = {
     // Scanner cadence
     scanFrequency: 20,
     scanMinimumMessages: 10,  // Warmup floor — initial scan fires after this many messages
-    maxSnapshotCount: 30,       // Maximum snapshots stored per chat — oldest are pruned when exceeded
+    maxSnapshotCount: 30,       // Snapshot retention target; protected landmark snapshots are never pruned
 
     // Event Horizon Compaction — stale resolved/missed events are compacted
     // into the Notebook's doNotForget section and removed from active events
-    // after this many story days past their resolveDay.
-    eventCompactionThreshold: 3,
+    // after this many elapsed story days past their resolveElapsedDay marker.
+    eventCompactionThreshold: 0,
 
     // Event→Secret Promotion — when a resolved/missed event has participants
     // with information asymmetry, automatically promote it to a structured
@@ -150,6 +150,10 @@ const defaultSettings = {
     // Day advancement: ask the Planning LLM whether any active event's premise
     // has become impossible/moot; flags for player review (never auto-removes)
     eventValidityReview: true,
+
+    // International date entry: read slash dates day-first (10/4/26 = April 10th).
+    // Used by the Starting Date parser in the deterministic date engine.
+    dateFormatDMY: false,
 
     // Moon cycle configuration (fantasy worlds can override the 29.53-day cycle)
     moonCycleDays: 29.53,
@@ -215,7 +219,8 @@ const defaultSettings = {
         },
     },
 
-    // The ONLY user-editable LLM prompt in the extension
+    // Internal planner instruction. Not exposed for user editing because it coordinates
+    // too many subsystems for arbitrary prompt changes to be safe.
     plannerPrompt: `You are maintaining a living narrative world state for an ongoing roleplay. On each scan, review the recent messages and update: the current day block (season, weather, spiritual climate if applicable), upcoming events, and active world conditions. Write with atmospheric detail — this is a living document, not a spreadsheet. Do not invent events that contradict established facts. Flag any contradictions you detect in the inconsistencies field.`,
 };
 
@@ -615,12 +620,31 @@ async function onChatChanged() {
             if (legacyMigrated) {
                 log(`Legacy data migrated for chat: ${chatId}`);
             }
+            const { ensureMoonConfigMigrated } = await import('./data/moons.js');
+            const moonMigrated = await ensureMoonConfigMigrated(chatId);
+            if (moonMigrated) log(`Moon configuration migrated to per-chat storage for ${chatId}.`);
 
             // Migrate event data to ensure all events have latest fields
-            const { migrateEventData } = await import('./data/events.js');
+            const { migrateEventData, cleanupPromotedConcludedEvents } = await import('./data/events.js');
             const eventsMigrated = await migrateEventData(chatId);
             if (eventsMigrated > 0) {
                 log(`Event data migration: ${eventsMigrated} events updated for chat ${chatId}`);
+            }
+            const promotedEventsCleaned = await cleanupPromotedConcludedEvents(chatId);
+            if (promotedEventsCleaned > 0) {
+                log(`Promoted Event cleanup: ${promotedEventsCleaned} concluded event(s) moved to Past Events.`);
+            }
+
+            const { migrateTemporalState } = await import('./data/timeMigration.js');
+            const temporal = await migrateTemporalState(chatId);
+            if (temporal.changed) {
+                log(`Temporal state migration: dayCount ${temporal.dayCount}, elapsed story days ${temporal.elapsedStoryDays}.`);
+            }
+
+            const { repairSecretKnowledgeIntegrity } = await import('./data/notebook.js');
+            const repairedSecrets = await repairSecretKnowledgeIntegrity(chatId);
+            if (repairedSecrets > 0) {
+                log(`Secret knowledge integrity repair: ${repairedSecrets} secret(s) normalized.`);
             }
         } catch (e) {
             console.warn('[NWST] Migration check failed (non-fatal):', e);
@@ -671,12 +695,27 @@ async function init() {
             const { migrateLegacyData } = await import('./data/storage.js');
             const legacyMigrated = await migrateLegacyData(chatId);
             if (legacyMigrated) log(`Legacy data migrated for current chat: ${chatId}`);
+            const { ensureMoonConfigMigrated } = await import('./data/moons.js');
+            const moonMigrated = await ensureMoonConfigMigrated(chatId);
+            if (moonMigrated) log(`Moon configuration migrated to per-chat storage for current chat.`);
 
             // Migrate event data to ensure all events have the latest fields
-            // (participants, promotedSecretId, knowledgeSummary, resolveDay)
-            const { migrateEventData } = await import('./data/events.js');
+            // (participants, promotion metadata, and temporal bookkeeping fields)
+            const { migrateEventData, cleanupPromotedConcludedEvents } = await import('./data/events.js');
             const eventsMigrated = await migrateEventData(chatId);
             if (eventsMigrated > 0) log(`Event data migration: ${eventsMigrated} events updated for chat ${chatId}`);
+            const promotedEventsCleaned = await cleanupPromotedConcludedEvents(chatId);
+            if (promotedEventsCleaned > 0) log(`Promoted Event cleanup: ${promotedEventsCleaned} concluded event(s) moved to Past Events.`);
+
+
+            const { migrateTemporalState } = await import('./data/timeMigration.js');
+            const temporal = await migrateTemporalState(chatId);
+            if (temporal.changed) log(`Temporal state migration: dayCount ${temporal.dayCount}, elapsed story days ${temporal.elapsedStoryDays}.`);
+
+
+            const { repairSecretKnowledgeIntegrity } = await import('./data/notebook.js');
+            const repairedSecrets = await repairSecretKnowledgeIntegrity(chatId);
+            if (repairedSecrets > 0) log(`Secret knowledge integrity repair: ${repairedSecrets} secret(s) normalized.`);
         }
     } catch (e) {
         console.warn('[NWST] Init migration check failed (non-fatal):', e);

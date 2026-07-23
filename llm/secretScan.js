@@ -19,6 +19,7 @@
 
 import { getChatId, nwstToast } from '../utils.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { getNotebook, addSecret } from '../data/notebook.js';
 import { dlog } from "../lib/debug.js";
 
@@ -64,7 +65,7 @@ Each secret object must follow this exact schema:
   "whoKnows": ["Character name who knows this secret"],
   "whoDoesNotKnow": ["Character name who does NOT know this secret"],
   "evidenceShown": "What evidence has been shown in the chat so far (if any)",
-  "pressureRisk": "A concrete 1-2 sentence description of the SPECIFIC consequences if revealed — who is hurt, what breaks, what escalates. Narrative, not a severity label. Bad: 'high risk'. Good: 'If Victor makes a violent move, it could trigger Kellan's possessive instincts, leading to gang violence and police involvement via Rowan.'",
+  "pressureRisk": "A concrete 1-2 sentence description of the SPECIFIC consequences if revealed — who is hurt, what breaks, what escalates. Narrative, not a severity label. Bad: 'high risk'. Good: 'If Caleb makes a violent move, it could trigger Rowan's retaliation, escalating the conflict and drawing police attention through Daniel.'",
   "revealConditions": "Under what circumstances this secret might be revealed",
   "injectionPriority": "high" | "normal" | "low",
   "triggerAnchors": ["3-7 distinctive words or short phrases UNIQUE to this secret that, if they appear in the prose, signal the scene is about this secret. Include the subject's name and specific concepts/objects/places. AVOID generic words and AVOID broad themes shared with other secrets (e.g. prefer 'tattoo, courier, debt' over 'syndicate, surveillance'). e.g. for a secret about a character's hidden affiliation: their name, 'affiliate', 'courier', 'tattoo'"]
@@ -74,11 +75,12 @@ IMPORTANT RULES:
 1. Only generate secrets that are SUPPORTED BY the chat messages. Do not invent unrelated secrets.
 2. Do NOT duplicate any secrets already in the "EXISTING SECRETS" list provided to you.
 3. A secret must have at least one character who knows it (or be a dramatic irony known only to the reader).
-4. "whoKnows" and "whoDoesNotKnow" must reference actual character names from the chat.
-5. Do NOT include the literal label "User" (the real-world typist, not the PC) in whoKnows or whoDoesNotKnow. The named {{user}} character IS acceptable — only the fallback "User" label should be excluded.
-6. If no new secrets are found, return an empty array [].
-7. Quality over quantity — 2-5 high-quality, well-developed secrets are better than 10 shallow ones.
-8. Consider secrets from ALL parts of the chat — early messages may contain setup and reveals.
+4. "whoKnows" and "whoDoesNotKnow" must reference actual character names from the chat. Never place the same character in both lists.
+5. Knowledge state must reflect the evidence in the chat itself. If a character personally investigated, witnessed, or discovered evidence and understood the secret's core fact, they belong in whoKnows even if a finer detail remains only inferred. Split the unconfirmed finer detail into an "unconfirmed_suspicion" rather than incorrectly listing the investigator as unaware of the confirmed core fact.
+6. Do NOT include the literal label "User" (the real-world typist, not the PC) in whoKnows or whoDoesNotKnow. The named {{user}} character IS acceptable — only the fallback "User" label should be excluded.
+7. If no new secrets are found, return an empty array [].
+8. Quality over quantity — 2-5 high-quality, well-developed secrets are better than 10 shallow ones.
+9. Consider secrets from ALL parts of the chat — early messages may contain setup and reveals.
 
 TYPE GUIDE:
 - "character": A secret one character keeps from another (e.g. betrayal, hidden identity, true motives)
@@ -328,7 +330,7 @@ export async function scanForSecrets(chatId) {
             { role: 'user', content: chunkText }
         ];
 
-        const response = await generateWithProfile(profile, llmMessages);
+        const response = await generateWithProfile(profile, llmMessages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
         if (response) {
             accumulatedContext += `\n--- Chunk ${i + 1}/${chunks.length} Analysis ---\n${response}\n`;
         }
@@ -344,7 +346,7 @@ export async function scanForSecrets(chatId) {
         { role: 'user', content: synthesisPrompt }
     ];
 
-    const response = await generateWithProfile(profile, synthMessages, { maxTokens: 4096 });
+    const response = await generateWithProfile(profile, synthMessages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
 
     if (!response) {
         nwstToast('Secret scan completed but no structured data was returned.', 'warning');

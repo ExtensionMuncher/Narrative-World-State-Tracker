@@ -9,7 +9,7 @@
 //
 //   GLOBAL SETTINGS (extensionSettings.nwst):
 //     User preferences — connection profiles, scan frequency, injection
-//     settings, planner prompt, enable/pause state.
+//     settings, internal planner prompt, enable/pause state.
 //     Written via saveSettingsDebounced(). Shared across all chats.
 //
 //   PER-CHAT NARRATIVE DATA (chatMetadata):
@@ -63,7 +63,8 @@ const DEFAULT_WORLD_STATE = {
         fauna: '',
         spiritualClimate: '',
         lunarAngle: 0,
-        dayCount: 0
+        dayCount: 0,
+        elapsedStoryDays: 0
     },
     forecast: [],
     moonPhases: [],
@@ -101,20 +102,52 @@ const DEFAULT_SEASON_CONFIG = {
     mode: 'auto',
     yearLength: 365,
     seasons: [
-        { name: 'Spring', startDay: 0,   endDay: 91  },
+        { name: 'Spring', startDay: 1,   endDay: 91  },
         { name: 'Summer', startDay: 92,  endDay: 185 },
         { name: 'Autumn', startDay: 186, endDay: 275 },
-        { name: 'Winter', startDay: 276, endDay: 364 }
+        { name: 'Winter', startDay: 276, endDay: 365 }
     ]
 };
+
+const DEFAULT_MOON_CONFIG = {
+    enableMoons: true,
+    enableMoonPhenomena: true,
+    moonCycleDays: 29.53,
+    moons: [
+        { id: 'primary', name: 'The Moon', cycleDays: 29.53, enabled: true }
+    ]
+};
+
+const DEFAULT_MOON_PHENOMENON_OVERRIDES = [];
 
 const DEFAULT_CALENDAR_CONFIG = {
     enabled: false,
     months: 12,
     monthNames: ['January','February','March','April','May','June','July','August','September','October','November','December'],
     monthDays: [31,28,31,30,31,30,31,31,30,31,30,31],
-    weekDays: ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+    weekDays: ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'],
+    // Optional era label for CUSTOM calendars (e.g. "Third Age" or "Third Age {year}").
+    // Substituted into the dateSub line by the deterministic date engine.
+    eraName: '',
+    // Leap-year toggle for the default (Gregorian) calendar — adds Feb 29 in
+    // leap years so real-world dates stay true. Ignored by custom calendars.
+    leapYears: true
 };
+
+// Player-pinned era label for REAL-WORLD calendars (e.g. "Meiji 12"). Set from
+// Settings when the LLM read the era wrong or had nothing to read. Seeds the
+// sub-date immediately; day advancement treats the era line as player-verified
+// from then on (maintaining era-relative year numbers at rollovers). Custom
+// calendars ignore this — their era comes from calendarConfig.eraName.
+const DEFAULT_ERA_PIN = '';
+
+// Starting Date is the elapsed-story-duration baseline. elapsedStoryDays is 0
+// on this date and counts upward only as canonical story days pass. Legacy
+// anchorDayCount/anchorDate fields are retained for backward compatibility with
+// older exports and the Adopt Computed Dates debug tool; they do not drive the
+// cyclical calendar. source 'scan' entries remain correctable, while a confirmed
+// player entry locks.
+const DEFAULT_START_DATE = null;
 
 const DEFAULT_SNAPSHOTS = {};
 const DEFAULT_ALIAS_REGISTRY = [];
@@ -132,6 +165,10 @@ const DEFAULTS = {
     settingContext: DEFAULT_SETTING_CONTEXT,
     seasonConfig:   DEFAULT_SEASON_CONFIG,
     calendarConfig: DEFAULT_CALENDAR_CONFIG,
+    moonConfig:     DEFAULT_MOON_CONFIG,
+    moonPhenomenonOverrides: DEFAULT_MOON_PHENOMENON_OVERRIDES,
+    startDate:      DEFAULT_START_DATE,
+    eraPin:         DEFAULT_ERA_PIN,
     snapshots:      DEFAULT_SNAPSHOTS,
     aliasRegistry:  DEFAULT_ALIAS_REGISTRY,
     secretsSidecarState: DEFAULT_SECRETS_SIDECAR_STATE,
@@ -462,6 +499,10 @@ export {
     DEFAULT_SETTING_CONTEXT,
     DEFAULT_SEASON_CONFIG,
     DEFAULT_CALENDAR_CONFIG,
+    DEFAULT_MOON_CONFIG,
+    DEFAULT_MOON_PHENOMENON_OVERRIDES,
+    DEFAULT_START_DATE,
+    DEFAULT_ERA_PIN,
     DEFAULT_SNAPSHOTS,
     DEFAULT_ALIAS_REGISTRY,
     DEFAULT_SECRETS_SIDECAR_STATE,

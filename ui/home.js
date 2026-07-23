@@ -18,7 +18,6 @@
 import {
     getChatId,
     nwstToast,
-    getSetting,
     updateStatusLabel,
     updatePauseButton
 } from '../index.js';
@@ -33,23 +32,36 @@ import {
     replaceMoonPhases,
     getDayBoundarySnapshots,
     getSeasonConfig
-} from '../data/worldState.js';
+, getExtraMoons } from '../data/worldState.js';
 import { getEventsGroupedByTier } from '../data/events.js';
-import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getMoonPhenomena, getMoonPhaseNames, getMoonPhaseForAngle, computeSeason } from '../llm/dayAdvancement.js';
+import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getMoonPhaseNames, getMoonPhaseForAngle, computeSeason, buildMoonPhenomenaOptions, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
 import { executeTimeSkip } from '../llm/timeskip.js';
 import { synthesizeCurrentDay } from '../llm/currentDaySynth.js';
+import { getMoonConfig } from '../data/moons.js';
+import { getScannerHealth } from '../llm/scanner.js';
 
 // ── Moon phenomenon descriptions (UI-only — NOT injected into prompts) ────
 const MOON_PHENOMENA_DESCRIPTIONS = {
-    '🌕 Super Moon': 'Full moon at closest orbital point — appears larger and brighter than usual',
-    '🌕 Blood Moon': 'Full moon darkened to a deep red by atmospheric scattering during alignment',
-    '🌕 Micro Moon': 'Full moon at farthest orbital point — appears smaller and dimmer than usual',
-    '🌾 Harvest Moon': 'Full moon nearest the autumnal equinox — rises soon after sunset for several consecutive nights',
-    '🏹 Hunter Moon': 'The full moon following the Harvest Moon — historically marked the start of hunting season',
-    '☀️ Solar Eclipse': 'Moon passes directly between Earth and Sun, casting a shadow across the land',
-    '🌑 Lunar Eclipse': 'Earth passes between Sun and Moon, bathing the moon in a deep red shadow',
-    '🌌 Moonbow': 'A nighttime rainbow formed by moonlight refracting through water droplets in the air',
-    '🌙 Lunar Ring': 'A luminous halo of ice crystals refracting moonlight at high altitude'
+    '🔵 Blue Moon': 'The second mathematically detected full moon within the same active calendar month — usually not blue in color',
+    '🌕 Super Moon': 'Full moon near the simulated closest orbital point — appears somewhat larger and brighter than usual',
+    '🌕 Blood Moon': 'The reddish appearance of the moon during a total lunar eclipse',
+    '🌕 Micro Moon': 'Full moon near the simulated farthest orbital point — appears somewhat smaller and dimmer than usual',
+    '☀️ Partial Solar Eclipse': 'The moon covers only part of the sun from the observer’s location',
+    '☀️ Annular Solar Eclipse': 'The moon passes in front of the sun but leaves a bright ring visible around it',
+    '☀️ Total Solar Eclipse': 'The moon completely covers the sun along the narrow path of totality',
+    '☀️ Hybrid Solar Eclipse': 'An eclipse that appears total in some locations and annular in others',
+    '🌑 Penumbral Lunar Eclipse': 'The moon passes through Earth’s faint outer shadow and dims subtly',
+    '🌑 Partial Lunar Eclipse': 'Only part of the moon enters Earth’s dark central shadow',
+    '🌑 Total Lunar Eclipse': 'The entire moon passes through Earth’s dark central shadow',
+    '🌌 Moonbow': 'A nighttime rainbow formed when bright moonlight refracts through water droplets',
+    '🌘 Earthshine': 'Earth-reflected sunlight faintly illuminates the dark portion of a crescent moon',
+    '🌈 Lunar Corona': 'Small colored rings close to the moon caused by diffraction through fine cloud droplets',
+    '✨ Moondogs': 'Bright spots beside the moon produced by moonlight passing through aligned ice crystals',
+    '🕯️ Moon Pillar': 'A vertical column of moonlight reflected by plate-shaped ice crystals',
+    '🌙 Lunar Halo': 'A broad luminous halo around the moon formed by refraction through high-altitude ice crystals',
+    '🌕 Moon Illusion': 'The moon appears unusually large near the horizon even though its angular size is nearly unchanged',
+    '🟠 Amber Moonrise': 'A low moon appears orange or amber as its light travels through more atmosphere',
+    '✨ Lunar Occultation': 'The moon temporarily passes in front of a visible star or planet'
 };
 
 // ── Build the Home tab HTML ───────────────────────────────────────────────
@@ -85,6 +97,11 @@ export function buildHomeTab() {
                 <input type="text" id="nwst-timeskip-input" placeholder="e.g. Three weeks later, end of harvest season…" style="flex:1">
                 <button class="menu_button nwst-btn-regen" id="nwst-timeskip-jump">Jump →</button>
             </div>
+        </div>
+
+        <div class="nwst-scan-health" id="nwst-scan-health" data-status="idle" title="Cadence scan status">
+            <span class="nwst-scan-health-dot">●</span>
+            <span id="nwst-scan-health-text">Cadence status unavailable.</span>
         </div>
 
         <div class="nwst-div"></div>
@@ -155,14 +172,14 @@ export function buildHomeTab() {
         </div>
 
         <!-- ── Pending Events Review ──────────────────────────────── -->
-        <!-- Only shown when scanner has detected NPC events awaiting approval -->
+        <!-- Only shown when detected or generated event proposals await approval -->
         <div id="nwst-pending-events-section" style="display:none;margin-bottom:10px">
             <div class="nwst-lbl" style="margin-bottom:6px">
-                Pending event detections
+                Pending event proposals
                 <span class="nwst-badge nwst-badge-week" id="nwst-pending-events-count" style="text-transform:none;letter-spacing:0;font-weight:400;margin-left:6px"></span>
             </div>
             <div class="nwst-info-box" style="margin-bottom:8px">
-                The scanner detected these events from recent chat. Review and approve any that should be added to the event horizon, or dismiss them.
+                NWST proposed these events from recent chat or Generate Events. Review and approve any that should be added to the event horizon, or dismiss them.
             </div>
             <div id="nwst-pending-events-list"></div>
             <div class="nwst-btn-row" style="margin-top:8px">
@@ -187,6 +204,9 @@ let _snapshotCycleList = [];
 let _dayNavInProgress = false;
 
 function wireHomeEvents() {
+    window.removeEventListener('nwst:scan-health-changed', refreshScanHealthDisplay);
+    window.addEventListener('nwst:scan-health-changed', refreshScanHealthDisplay);
+
     const prevDayBtn = document.getElementById('nwst-prev-day-btn');
     const nextDayBtn = document.getElementById('nwst-next-day-btn');
 
@@ -202,6 +222,31 @@ function wireHomeEvents() {
         _dayNavInProgress = false;
         if (prevDayBtn) prevDayBtn.disabled = false;
         if (nextDayBtn) nextDayBtn.disabled = false;
+    }
+
+    // ── Approve / Dismiss all pending event proposals ─────────
+    // (Functions existed fully implemented but were never attached.)
+    const approveAllBtn = document.getElementById('nwst-approve-all-pending');
+    if (approveAllBtn) {
+        approveAllBtn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            await approveAllPending();
+        });
+    }
+    const dismissAllBtn = document.getElementById('nwst-dismiss-all-pending');
+    if (dismissAllBtn) {
+        dismissAllBtn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            const ctx = SillyTavern.getContext();
+            const pending = ctx.chatMetadata?.['nwst:pendingEvents'] || [];
+            if (pending.length === 0) return;
+            const confirmed = await ctx.callGenericPopup(
+                `Dismiss all ${pending.length} pending event proposal(s)? Detected or generated events may be proposed again later.`,
+                ctx.POPUP_TYPE.CONFIRM, ''
+            );
+            if (!confirmed) return;
+            await dismissAllPending();
+        });
     }
 
     // ── Previous Day ───────────────────────────────────────────
@@ -447,19 +492,15 @@ function wireHomeEvents() {
                 const doMoonPhaseRegen = async () => {
                     // Build context for phenomena computation so they're stored at generation time
                     const currentDay = getCurrentDay(chatId);
-                    const cycleDays = getSetting('moonCycleDays') || 29.53;
-                    const phenOptions = {
-                        season: currentDay?.season || '',
-                        weatherToday: currentDay?.weatherToday || '',
-                        cycleDays
-                    };
+                    const cycleDays = getMoonConfig(chatId).moonCycleDays || 29.53058867;
+                    const phenOptions = buildMoonPhenomenaOptions(chatId, currentDay, { cycleDays });
 
                     if (source === 'date') {
                         // Read from the text input the user typed — avoids ambiguous
                         // automatic parsing of the existing date display text
                         const userText = window._nwstRegenDateText || '';
                         if (userText) {
-                            regenerateMoonPhasesFromDate(chatId, userText);
+                            await regenerateMoonPhasesFromDate(chatId, userText);
                         } else {
                             nwstToast('No date text entered. Using stored angle.', 'warning');
                             const storedAngle = getLunarAngle(chatId);
@@ -468,7 +509,7 @@ function wireHomeEvents() {
                         }
                     } else if (source === 'manual') {
                         const selectedPhase = window._nwstRegenPhase || phaseNames[0];
-                        setMoonPhaseAnchor(chatId, selectedPhase);
+                        await setMoonPhaseAnchor(chatId, selectedPhase);
                         nwstToast(`Moon phase set to "${selectedPhase}".`, 'success');
                     } else {
                         // 'stored' — use the direct stored angle without date parsing
@@ -481,10 +522,10 @@ function wireHomeEvents() {
                 if (scope === 'forecast') {
                     await regenerateForecastOnly();
                 } else if (scope === 'moonPhases') {
-                    doMoonPhaseRegen();
+                    await doMoonPhaseRegen();
                 } else {
                     // 'all' — regen moon phases first, then weather
-                    doMoonPhaseRegen();
+                    await doMoonPhaseRegen();
                     await regenerateForecastOnly();
                 }
                 refreshHomeUI();
@@ -661,12 +702,8 @@ async function saveCurrentDayEdit() {
         const phaseInfo = getMoonPhaseForAngle(newAngle);
         setLunarAngle(chatId, newAngle);
         // Compute phenomena in context of the edited day
-        const cycleDays = getSetting('moonCycleDays') || 29.53;
-        const phenOptions = {
-            season: day.season || '',
-            weatherToday: day.weatherToday || '',
-            cycleDays
-        };
+        const cycleDays = getMoonConfig(chatId).moonCycleDays || 29.53058867;
+        const phenOptions = buildMoonPhenomenaOptions(chatId, day, { cycleDays });
         const newMoonPhases = generateMoonPhases(newAngle, 7, 0, phenOptions);
         await replaceMoonPhases(chatId, newMoonPhases);
         nwstToast(`Date changed — moon phases recalculated from date text. Anchored as "${phaseInfo.phaseName}" (${newAngle.toFixed(1)}°).`, 'info');
@@ -702,19 +739,6 @@ function _setHtmlIfChanged(id, html) {
     return true;
 }
 
-/**
- * Invalidate the HTML cache for a specific container or all containers.
- * Call this when you KNOW data has changed and want to force a re-render.
- * @param {string} [id] - Optional container ID to invalidate; omit to clear all
- */
-export function invalidateCache(id) {
-    if (id) {
-        delete _prevHtml[id];
-    } else {
-        Object.keys(_prevHtml).forEach(k => delete _prevHtml[k]);
-    }
-}
-
 // ── Debounce ──────────────────────────────────────────────────────────────
 // Coalesces rapid successive refresh calls into a single render at the end
 // of the burst. 50ms is short enough to feel instant, long enough to skip
@@ -734,11 +758,51 @@ export function refreshHomeUI() {
         _refreshTimer = null;
         updateStatusLabel();
         updatePauseButton();
+        refreshScanHealthDisplay();
         refreshCurrentDayDisplay();
         refreshForecastDisplay();
         refreshMoonDisplay();
         refreshEventsDigest();
     }, 50);
+}
+
+function refreshScanHealthDisplay() {
+    const row = document.getElementById('nwst-scan-health');
+    const text = document.getElementById('nwst-scan-health-text');
+    if (!row || !text) return;
+
+    const health = getScannerHealth();
+    const status = health?.status || 'idle';
+    row.dataset.status = status;
+
+    let label = '';
+    if (status === 'disabled') {
+        label = 'Cadence scanner disabled.';
+    } else if (status === 'paused') {
+        label = 'Cadence scanner paused.';
+    } else if (status === 'scanning') {
+        label = `Cadence scan running · ${health.backlog || 0} message${health.backlog === 1 ? '' : 's'} queued`;
+    } else if (status === 'warmup') {
+        const progress = Math.min(health.warmupProgress || 0, health.warmupFloor || 0);
+        label = `Scanner warmup ${progress}/${health.warmupFloor} · first scan in ${health.nextIn} message${health.nextIn === 1 ? '' : 's'}`;
+    } else if (status === 'failed') {
+        const retry = health.nextIn > 0 ? ` · retry in ${health.nextIn} message${health.nextIn === 1 ? '' : 's'}` : ' · retry pending';
+        label = `Last cadence scan failed${retry} · backlog ${health.backlog}`;
+    } else if (status === 'backlog') {
+        label = `Cadence backlog: ${health.backlog} messages · next pass pending`;
+    } else if (health.lastSuccessMessageCount > 0) {
+        label = `Last cadence scan: message ${health.lastSuccessMessageCount} · next in ${health.nextIn} message${health.nextIn === 1 ? '' : 's'}`;
+    } else {
+        label = `Cadence ready · next scan in ${health.nextIn} message${health.nextIn === 1 ? '' : 's'}`;
+    }
+
+    text.textContent = label;
+    const time = health.lastSuccessAt ? new Date(health.lastSuccessAt).toLocaleString() : 'No successful cadence scan recorded yet';
+    const range = Number.isInteger(health.lastRangeStart) && Number.isInteger(health.lastRangeEnd)
+        ? `Processed message range ${health.lastRangeStart + 1}–${health.lastRangeEnd}.`
+        : '';
+    const failure = health.lastFailureReason ? ` Last failure: ${health.lastFailureReason}` : '';
+    row.title = `${time}. ${range} Current unscanned backlog: ${health.backlog}.${failure}`.trim();
 }
 
 // ── Current Day display ───────────────────────────────────────────────────
@@ -758,7 +822,7 @@ function refreshCurrentDayDisplay() {
     // When the seasonal engine is active (mode 'auto' or 'static'), the
     // computed season from the configured seasonal calendar OVERRIDES
     // whatever is stored in day.season. This ensures custom season names
-    // (e.g. "Haru 春") appear in the UI even if the stored data was
+    // (e.g. "Springtide") appear in the UI even if the stored data was
     // written by the LLM before seasonal config was set up.
     const seasonConfig = getSeasonConfig(chatId);
     const computedSeason = computeSeason(day.dayCount || 0, seasonConfig);
@@ -890,7 +954,8 @@ function refreshMoonDisplay() {
 
     const chatId = getChatId();
     const moonPhases = getMoonPhases(chatId);
-    const enableMoons = getSetting('enableMoons');
+    const moonConfig = getMoonConfig(chatId);
+    const enableMoons = moonConfig.enableMoons;
 
     if (enableMoons === false) {
         _setHtmlIfChanged('nwst-moon-strip', '<div class="nwst-nb-empty" style="color:#999">🌙 Moons are disabled. Enable them in Settings.</div>');
@@ -902,46 +967,68 @@ function refreshMoonDisplay() {
         return;
     }
 
-    let html = '';
-    for (let i = 0; i < moonPhases.length; i++) {
-        const moon = moonPhases[i];
-        const isToday = i === 0;
-        const todayClass = isToday ? ' nwst-today' : '';
-
-        // Read phenomena from STORED data (computed at generation time in generateMoonPhases)
-        // If the phase entry has stored phenomena, use them. Otherwise fall back to
-        // computing fresh (backward compatibility with old data).
+    // Build one day-cell. legacyFallback only applies to the PRIMARY moon —
+    // extra moons' phenomena are always stored at generation time, and the
+    // fallback math uses the primary lunar angle which would be wrong for them.
+    const buildMoonDay = (moon, i, legacyFallback) => {
+        const todayClass = i === 0 ? ' nwst-today' : '';
         let phenomena = [];
         if (moon.phenomena && Array.isArray(moon.phenomena)) {
-            phenomena = moon.phenomena;
-        } else {
-            // Legacy fallback — compute fresh for old data that didn't store phenomena
+            const manualLabels = Array.isArray(moon.manualPhenomena) ? moon.manualPhenomena : [];
+            phenomena = normalizeMoonPhenomena(moon.phenomena, {
+                allowStandaloneBloodMoon: manualLabels.includes('🌕 Blood Moon')
+            });
+        } else if (legacyFallback) {
+            // Legacy fallback — regenerate the strip through the same calendar-aware
+            // pipeline and take this day's stored result.
             const day = getCurrentDay(chatId);
             const lunarAngle = getLunarAngle(chatId);
-            const cycleDays = getSetting('moonCycleDays') || 29.53;
-            const degPerDay = 360 / cycleDays;
-            const dayAngle = (lunarAngle + i * degPerDay) % 360;
-            const phenOptions = {
-                season: day.season || '',
-                weatherToday: day.weatherToday || '',
-                cycleDays
-            };
-            phenomena = getMoonPhenomena(dayAngle, i, cycleDays, phenOptions);
+            const cycleDays = getMoonConfig(chatId).moonCycleDays || 29.53058867;
+            const phenOptions = buildMoonPhenomenaOptions(chatId, day, { cycleDays });
+            phenomena = generateMoonPhases(lunarAngle, 7, 0, phenOptions)[i]?.phenomena || [];
         }
-
-        // Build phenomena tags
         let phenHtml = '';
         if (phenomena.length > 0) {
-            phenHtml = `<div class="nwst-mn-phenomena">${phenomena.map(p => `<span class="nwst-phen-tag">${escapeHTML(p)}</span>`).join('')}</div>`;
+            const details = moon.phenomenaDetails && typeof moon.phenomenaDetails === 'object' ? moon.phenomenaDetails : {};
+            phenHtml = `<div class="nwst-mn-phenomena">${phenomena.map(p => {
+                const descAttr = details[p] ? ` data-description="${escapeHTML(details[p])}"` : '';
+                return `<span class="nwst-phen-tag"${descAttr}>${escapeHTML(p)}</span>`;
+            }).join('')}</div>`;
         }
-
-        html += `
+        return `
         <div class="nwst-moon-day${todayClass}">
             <div class="nwst-mn-name">${escapeHTML(moon.label || `Day ${i + 1}`)}</div>
             <div class="nwst-mn-icon">${escapeHTML(moon.icon || '—')}</div>
             <div class="nwst-mn-label">${escapeHTML(moon.phaseName || '')}</div>
             ${phenHtml}
         </div>`;
+    };
+
+    const extraMoons = getExtraMoons(chatId);
+    const multiMoon = extraMoons.length > 0;
+
+    let html = '';
+    if (multiMoon) {
+        // Multiple moons: each gets a labeled full-width row
+        const configured = moonConfig.moons || [];
+        const primaryName = (configured[0] && configured[0].name) || 'The Moon';
+        html += `<div style="flex-basis:100%;font-size:11px;color:#888;font-weight:600;margin:2px 0 0">${escapeHTML(primaryName)}</div>`;
+        html += `<div style="flex-basis:100%;display:flex;gap:6px;overflow-x:auto">`;
+        for (let i = 0; i < moonPhases.length; i++) html += buildMoonDay(moonPhases[i], i, true);
+        html += `</div>`;
+        for (const em of extraMoons) {
+            if (!em || !Array.isArray(em.phases) || em.phases.length === 0) continue;
+            html += `<div style="flex-basis:100%;font-size:11px;color:#888;font-weight:600;margin:6px 0 0">${escapeHTML(em.name || 'Moon')}</div>`;
+            html += `<div style="flex-basis:100%;display:flex;gap:6px;overflow-x:auto">`;
+            for (let i = 0; i < em.phases.length; i++) html += buildMoonDay(em.phases[i], i, false);
+            html += `</div>`;
+        }
+        // The container is display:flex — let the rows stack
+        html = `<div style="display:flex;flex-wrap:wrap;width:100%">${html}</div>`;
+    } else {
+        for (let i = 0; i < moonPhases.length; i++) {
+            html += buildMoonDay(moonPhases[i], i, true);
+        }
     }
 
     // Only update DOM and re-wire events if the HTML actually changed
@@ -963,7 +1050,7 @@ function refreshMoonDisplay() {
             }
 
             const phenText = this.textContent.trim();
-            const desc = MOON_PHENOMENA_DESCRIPTIONS[phenText];
+            const desc = this.dataset.description || MOON_PHENOMENA_DESCRIPTIONS[phenText];
             if (!desc) return;
 
             // Create tooltip element
@@ -1069,7 +1156,7 @@ function refreshPendingEvents() {
     // Determine section visibility and badge text
     const isEmpty = pending.length === 0;
     const sectionDisplay = isEmpty ? 'none' : 'block';
-    const badgeText = isEmpty ? '' : `${pending.length} detected`;
+    const badgeText = isEmpty ? '' : `${pending.length} pending`;
 
     // Cache section visibility — only update if changed
     const sectionKey = 'nwst-pending-events-section';
@@ -1088,10 +1175,12 @@ function refreshPendingEvents() {
         const tierLabel = ev.tier === 'immediate' ? 'Immediate' :
                           ev.tier === 'week' ? 'This week' :
                           ev.tier === 'month' ? 'This month' : 'Undetermined';
+        const sourceLabel = ev.origin === 'generated' ? 'Generated' : 'Detected';
         html += `
         <div class="nwst-char-pending" style="margin-bottom:8px;border:0.5px solid #AFA9EC;border-radius:8px;overflow:hidden" data-pending-id="${ev.id}">
             <div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:#EEEDFE">
                 <span class="nwst-badge nwst-badge-week" style="flex-shrink:0">${escapeHTML(tierLabel)}</span>
+                <span style="font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.4px">${escapeHTML(sourceLabel)}</span>
                 <span style="font-weight:500;font-size:13px;flex:1">${escapeHTML(ev.title)}</span>
             </div>
             <div style="padding:8px 12px;font-size:12px;color:#555;line-height:1.5">${escapeHTML(ev.description)}</div>
@@ -1113,17 +1202,19 @@ async function approvePendingEvent(pendingId) {
         if (!ev) return;
 
         const chatId = getChatId();
-        const { addEvent } = await import('../data/events.js');
+        const { addEvent, getActiveEvents, getStructuralTierForScheduledDate } = await import('../data/events.js');
         const { getMaxActiveEvents } = await import('../settings.js');
-        const { getAllEvents } = await import('../data/events.js');
 
-        // Check pool cap
+        // Detected events are facts extracted from chat and remain cap-exempt.
+        // Generated proposals respect the configured active-event pool cap.
+        const isDetected = ev.origin === 'detected' || ev.npcOrigin === 'detected';
         const poolCap = getMaxActiveEvents();
-        const currentActive = getAllEvents(chatId).filter(e =>
-            e.status === 'pending' || e.status === 'inprogress'
-        ).length;
+        const currentActive = getActiveEvents(chatId).length;
 
-        if (currentActive >= poolCap) {
+        const proposalTier = ev.scheduledDate ? getStructuralTierForScheduledDate(chatId, ev.scheduledDate).tier : null;
+        const isFutureProposal = proposalTier === 'future';
+
+        if (!isDetected && !isFutureProposal && currentActive >= poolCap) {
             nwstToast(`Event pool is full (${poolCap} active events). Resolve or dismiss existing events first.`, 'warning');
             return;
         }
@@ -1133,9 +1224,9 @@ async function approvePendingEvent(pendingId) {
             description: ev.description,
             tier: ev.tier || 'undetermined',
             status: 'pending',
-            isNPC: true,
-            npcOrigin: 'detected',
-            origin: 'detected',
+            isNPC: Boolean(ev.isNPC),
+            npcOrigin: ev.isNPC ? (ev.npcOrigin || (isDetected ? 'detected' : 'generated')) : null,
+            origin: isDetected ? 'detected' : 'generated',
             scheduledDate: ev.scheduledDate || null
         });
 
@@ -1173,35 +1264,35 @@ async function approveAllPending() {
         if (pending.length === 0) return;
 
         const chatId = getChatId();
-        const { addEvent, getAllEvents } = await import('../data/events.js');
+        const { addEvent, getActiveEvents, getStructuralTierForScheduledDate } = await import('../data/events.js');
         const { getMaxActiveEvents } = await import('../settings.js');
 
         const poolCap = getMaxActiveEvents();
-        let currentActive = getAllEvents(chatId).filter(e =>
-            e.status === 'pending' || e.status === 'inprogress'
-        ).length;
+        let currentActive = getActiveEvents(chatId).length;
 
         let added = 0;
         const remaining = [];
 
         for (const ev of pending) {
-            // Detected NPC events always bypass pool cap — they are facts from chat
-            const isDetected = ev.npcOrigin === 'detected';
-            if (!isDetected && currentActive >= poolCap) {
+            // Detected events always bypass pool cap — they are facts from chat.
+            const isDetected = ev.origin === 'detected' || ev.npcOrigin === 'detected';
+            const proposalTier = ev.scheduledDate ? getStructuralTierForScheduledDate(chatId, ev.scheduledDate).tier : null;
+            const isFutureProposal = proposalTier === 'future';
+            if (!isDetected && !isFutureProposal && currentActive >= poolCap) {
                 remaining.push(ev);
                 continue;
             }
-            await addEvent(chatId, {
+            const addedEvent = await addEvent(chatId, {
                 title: ev.title,
                 description: ev.description,
                 tier: ev.tier || 'undetermined',
                 status: 'pending',
-                isNPC: true,
-                npcOrigin: 'detected',
-                origin: 'detected',
+                isNPC: Boolean(ev.isNPC),
+                npcOrigin: ev.isNPC ? (ev.npcOrigin || (isDetected ? 'detected' : 'generated')) : null,
+                origin: isDetected ? 'detected' : 'generated',
                 scheduledDate: ev.scheduledDate || null
             });
-            if (!isDetected) currentActive++;
+            if (!isDetected && addedEvent?.tier !== 'future') currentActive++;
             added++;
         }
 

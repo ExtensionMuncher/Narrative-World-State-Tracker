@@ -14,6 +14,7 @@
 
 import { getChatId, nwstToast } from '../utils.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
+import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { getAllSecrets, updateSecret } from '../data/notebook.js';
 import { dlog } from '../lib/debug.js';
 
@@ -21,9 +22,9 @@ const ANCHOR_SYSTEM_PROMPT = `You assign trigger anchors to a roleplay secret. T
 
 RULES:
 - Anchors must be DISTINCTIVE to this secret. Prefer the secret's subject name and specific concepts/objects/places tied uniquely to it.
-- Prefer MULTI-WORD phrases over single common words. "courier work" and "ravenshade affiliate" are good; "tattoo" and "syndicate" alone are bad because they collide with innocent uses and shared themes.
+- Prefer MULTI-WORD phrases over single common words. "courier work" and "east gate contact" are good; "tattoo" and "syndicate" alone are bad because they collide with innocent uses and shared themes.
 - AVOID generic words (information, situation, behavior) and AVOID broad themes likely shared with other secrets.
-- Output ONLY a JSON array of strings. No prose, no markdown fences. Example: ["harborline affiliate", "ravenshade courier", "debt settlement", "informant role"]`;
+- Output ONLY a JSON array of strings. No prose, no markdown fences. Example: ["mara courier", "east gate contact", "debt settlement", "informant role"]`;
 
 /**
  * Generate anchors for a single secret via the Planning LLM.
@@ -46,7 +47,7 @@ async function generateAnchorsForSecret(secret, profile) {
         { role: 'user', content: userPrompt }
     ];
 
-    const response = await generateWithProfile(profile, messages);
+    const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.SMALL });
     if (!response) return null;
 
     try {
