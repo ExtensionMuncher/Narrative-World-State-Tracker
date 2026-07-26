@@ -783,7 +783,7 @@ async function init() {
  */
 async function registerSlashCommands() {
     try {
-        const { SlashCommandParser, SlashCommand, ARGUMENT_TYPE, SlashCommandArgument } =
+        const { SlashCommandParser, SlashCommand } =
             SillyTavern.getContext();
 
         if (!SlashCommandParser || !SlashCommand) {

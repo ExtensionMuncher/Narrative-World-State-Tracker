@@ -799,11 +799,6 @@
     font-weight: 500;
 }
 
-.nwst-event-meta {
-    font-size: 11px;
-    color: #999;
-    flex-shrink: 0;
-}
 
 .nwst-event-time {
     font-size: 11px;
@@ -1286,40 +1281,6 @@
 .nwst-loading {
     opacity: 0.6;
     pointer-events: none;
-}
-
-/* ── Utility ─────────────────────────────────────────────────────────────── */
-.nwst-flex {
-    display: flex;
-}
-
-.nwst-flex-col {
-    display: flex;
-    flex-direction: column;
-}
-
-.nwst-gap-8 {
-    gap: 8px;
-}
-
-.nwst-flex-1 {
-    flex: 1;
-}
-
-.nwst-text-center {
-    text-align: center;
-}
-
-.nwst-mt-8 {
-    margin-top: 8px;
-}
-
-.nwst-mb-8 {
-    margin-bottom: 8px;
-}
-
-.nwst-mb-14 {
-    margin-bottom: 14px;
 }
 
 /* ── Accordion Sections (Settings) ──────────────────────────────────────── */

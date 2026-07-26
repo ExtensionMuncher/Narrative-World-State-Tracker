@@ -190,6 +190,10 @@ export async function runNotebookReconcile(chatId) {
     let response;
     try {
         response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
+        if (getChatId() !== chatId) {
+            dlog('[NWST Reconcile] Active chat changed during reconciliation; discarding stale result.');
+            return summary;
+        }
     } catch (e) {
         console.error('[NWST Reconcile] LLM call failed:', e);
         nwstToast('Notebook reconciliation failed — see console.', 'error');

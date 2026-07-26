@@ -23,15 +23,77 @@
 
 import {
     getSetting,
-    setSetting,
-    defaultSettings
+    setSetting
 } from './index.js';
 
 import {
     getAllChatData,
-    setAllChatData,
-    chatHasData
+    setAllChatData
 } from './data/storage.js';
+
+// A handful of NWST runtime records intentionally live as standalone metadata
+// rather than in storage.js's typed narrative bundle. Full Export All / Import
+// All must still carry them or a restore can silently lose pending proposals,
+// notebook history, or scanner cadence state.
+const STANDALONE_CHAT_META_KEYS = [
+    'nwst:notebookHistory',
+    'nwst:pendingEvents',
+    'nwst:scannerState',
+    'nwst:scansSinceReconcile'
+];
+
+function cloneJson(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function getActiveChatContext(expectedChatId, operation = 'operate on chat data') {
+    try {
+        const ctx = SillyTavern.getContext();
+        const activeChatId = String(ctx?.chatId || '');
+        if (!expectedChatId || activeChatId !== String(expectedChatId)) {
+            console.warn(`[NWST Settings] Refused to ${operation}: active chat changed.`);
+            return null;
+        }
+        return ctx;
+    } catch (e) {
+        console.warn(`[NWST Settings] Could not ${operation}:`, e);
+        return null;
+    }
+}
+
+function getStandaloneChatMeta(chatId) {
+    try {
+        const ctx = getActiveChatContext(chatId, 'export standalone chat metadata');
+        if (!ctx) return {};
+        const meta = ctx.chatMetadata || {};
+        const out = {};
+        for (const key of STANDALONE_CHAT_META_KEYS) {
+            if (Object.prototype.hasOwnProperty.call(meta, key)) out[key] = cloneJson(meta[key]);
+        }
+        return out;
+    } catch (e) {
+        console.warn('[NWST Settings] Could not read standalone chat metadata for export:', e);
+        return {};
+    }
+}
+
+async function restoreStandaloneChatMeta(chatId, snapshot = {}) {
+    const ctx = getActiveChatContext(chatId, 'restore standalone chat metadata');
+    if (!ctx) return false;
+    const meta = ctx.chatMetadata || {};
+    // Full import is overwrite semantics. Clear current standalone NWST state
+    // first so an older bundle that lacks these fields cannot leave unrelated
+    // pending/scanner data from the destination chat behind.
+    for (const key of STANDALONE_CHAT_META_KEYS) delete meta[key];
+    if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+        for (const key of STANDALONE_CHAT_META_KEYS) {
+            if (Object.prototype.hasOwnProperty.call(snapshot, key)) meta[key] = cloneJson(snapshot[key]);
+        }
+    }
+    if (!getActiveChatContext(chatId, 'finish restoring standalone chat metadata')) return false;
+    await ctx.saveMetadata();
+    return true;
+}
 
 // ── Core toggles ──────────────────────────────────────────────────────────
 
@@ -309,11 +371,13 @@ export function exportChatData(chatId) {
  * @param {string} jsonString
  * @returns {boolean} True on success
  */
-export function importChatData(chatId, jsonString) {
+export async function importChatData(chatId, jsonString) {
     try {
+        if (!getActiveChatContext(chatId, 'import chat data')) return false;
         const data = JSON.parse(jsonString);
-        if (typeof data !== 'object' || data === null) return false;
-        setAllChatData(chatId, data);
+        if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
+        await setAllChatData(chatId, data);
+        if (!getActiveChatContext(chatId, 'finish importing chat data')) return false;
         return true;
     } catch (e) {
         console.error('[NWST Settings] Import chat data failed:', e);
@@ -333,11 +397,13 @@ export function importChatData(chatId, jsonString) {
  */
 export function exportAll(chatId) {
     try {
+        if (!getActiveChatContext(chatId, 'export all data')) return null;
         const bundle = {
-            version: '1.0.0',
+            version: '1.0.2',
             exportedAt: new Date().toISOString(),
             globalSettings: JSON.parse(exportGlobalSettings()),
-            chatData: getAllChatData(chatId)
+            chatData: getAllChatData(chatId),
+            standaloneChatMeta: getStandaloneChatMeta(chatId)
         };
         return JSON.stringify(bundle, null, 2);
     } catch (e) {
@@ -356,6 +422,7 @@ export function exportAll(chatId) {
  */
 export async function importAll(chatId, jsonString) {
     try {
+        if (!getActiveChatContext(chatId, 'import all data')) return false;
         const bundle = JSON.parse(jsonString);
         if (typeof bundle !== 'object' || bundle === null) {
             console.error('[NWST Settings] Import all: parsed bundle is not an object');
@@ -371,9 +438,12 @@ export async function importAll(chatId, jsonString) {
         // fires before data is actually persisted (and failures stay silent).
         if (bundle.chatData) {
             await setAllChatData(chatId, bundle.chatData);
+            if (!getActiveChatContext(chatId, 'continue importing all data')) return false;
+            const restoredMeta = await restoreStandaloneChatMeta(chatId, bundle.standaloneChatMeta || {});
+            if (!restoredMeta) return false;
         }
 
-        return true;
+        return Boolean(getActiveChatContext(chatId, 'finish importing all data'));
     } catch (e) {
         console.error('[NWST Settings] Import all failed:', e);
         return false;

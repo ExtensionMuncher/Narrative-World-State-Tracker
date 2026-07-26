@@ -24,7 +24,6 @@ import { getChatId } from '../utils.js';
 import { isEnabled, isPaused } from '../settings.js';
 import { selectSecretsForInjection } from './secretsScoring.js';
 import { buildAliasRegistry } from '../data/aliasRegistry.js';
-import { getSceneContext } from './secretsSidecar.js';
 import { dlog } from '../lib/debug.js';
 
 /**
@@ -65,7 +64,7 @@ export function buildSecretsInjection(chatId) {
         }
 
         // Current relevance — translate scoring reasons into plain narrator cue
-        const relevance = describeRelevance(reasons, secret);
+        const relevance = describeRelevance(reasons);
         if (relevance) block += `Current relevance: ${relevance}\n`;
     }
 
@@ -79,7 +78,7 @@ export function buildSecretsInjection(chatId) {
  * Translate scoring reasons into a short plain-language relevance cue for the
  * narrator. Keeps the most meaningful signal rather than dumping the raw math.
  */
-function describeRelevance(reasons, secret) {
+function describeRelevance(reasons) {
     if (!reasons || reasons.length === 0) return '';
 
     // Prefer the most narratively meaningful reasons

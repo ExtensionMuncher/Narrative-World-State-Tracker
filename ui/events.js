@@ -326,7 +326,7 @@ function wireEventItemEvents() {
                 const npcCheckbox = document.getElementById('nwst-add-event-isnpc');
                 const isNPC = npcCheckbox ? npcCheckbox.checked : false;
                 const scheduledDate = window._nwstAddEventScheduled?.trim() || null;
-                const newEvent = await addEvent(chatId, {
+                await addEvent(chatId, {
                     title: title,
                     description: description,
                     tier: tier,

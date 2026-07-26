@@ -28,14 +28,14 @@
 
 import {
     getChatData,
-    setChatData,
-    deleteChatData
+    setChatData
 } from './storage.js';
 
 import { getCurrentDay, getCalendarConfig } from './worldState.js';
 import { extractYearFromText, dateFromDayCount, resolveScheduledElapsedWindow, parseCurrentCalendarDate, monthLengthsFor, weekdayIndexFromDisplay } from '../lib/calendarMath.js';
-import { getNotebook, addCoreBullet, saveNotebook } from './notebook.js';
+import { getNotebook } from './notebook.js';
 import { dlog } from "../lib/debug.js";
+import { getChatId } from '../utils.js';
 
 // ── Unique ID generator ───────────────────────────────────────────────────
 
@@ -439,7 +439,7 @@ export async function promoteEventToSecret(chatId, eventId, options = {}) {
         let { whoKnows, whoDoesNotKnow } = options;
 
         if (options.autoPromoted && (!whoKnows || !whoDoesNotKnow)) {
-            const llmResult = await inferKnowledgeDistribution(event);
+            const llmResult = await inferKnowledgeDistribution(chatId, event);
             if (llmResult) {
                 whoKnows = llmResult.whoKnows;
                 whoDoesNotKnow = llmResult.whoDoesNotKnow;
@@ -528,12 +528,15 @@ export async function promoteEventToSecret(chatId, eventId, options = {}) {
  * a resolved/missed event's outcome. This replaces the naive "all participants
  * know" approach with actual narrative analysis.
  *
+ * @param {string} chatId - Chat that owns the event
  * @param {object} event - The event object being promoted
  * @returns {Promise<{whoKnows: string[], whoDoesNotKnow: string[], knowledgeSummary: string}|null>}
  *   Parsed result from the LLM, or null if the call fails or is unavailable
  */
-async function inferKnowledgeDistribution(event) {
+async function inferKnowledgeDistribution(chatId, event) {
     try {
+        if (getChatId() !== chatId) return null;
+
         const { resolveProfile, generateWithProfile } = await import('../llm/connections.js');
         const { LLM_TOKEN_BUDGETS } = await import('../llm/tokenBudgets.js');
 
@@ -575,7 +578,7 @@ async function inferKnowledgeDistribution(event) {
                 `{`,
                 `  "whoKnows": ["character1", "character2"],`,
                 `  "whoDoesNotKnow": ["character3"],`,
-                `  "knowledgeSummary": "Brief explanation of who knows what and why"`
+                `  "knowledgeSummary": "Brief explanation of who knows what and why"`,
                 `}`
             ].filter(Boolean).join('\n')
         };
@@ -583,6 +586,10 @@ async function inferKnowledgeDistribution(event) {
         const response = await generateWithProfile(profile, [systemMessage, userMessage], {
             maxTokens: LLM_TOKEN_BUDGETS.SMALL
         });
+        if (getChatId() !== chatId) {
+            dlog('[NWST Events] Discarded stale knowledge-distribution result because the active chat changed.');
+            return null;
+        }
 
         if (!response) {
             console.warn('[NWST Events] LLM returned empty response for knowledge distribution.');
@@ -874,7 +881,7 @@ export async function cleanupPromotedConcludedEvents(chatId) {
  * @param {string} chatId
  * @param {number} [thresholdDays=0] - Story days after which a resolved/missed
  *   event is eligible for compaction.
- * @returns {{ compacted: number, summaries: string[] }} Result info
+ * @returns {Promise<{ compacted: number, summaries: string[], error?: string }>} Result info
  */
 export async function compactEventHorizon(chatId, thresholdDays = 0) {
     try {

@@ -17,7 +17,7 @@
 //      take precedence and let the user collapse variants the auto-builder
 //      can't know are the same person ("the Captain" → Renée Dubois).
 //
-// Manual aliases are stored per-chat in chatMetadata under 'nwst:aliasRegistry'.
+// Manual aliases are stored per-chat through NWST's guarded storage layer.
 // Auto-built entries are computed fresh each call (not persisted) so they
 // always reflect current data.
 // =============================================================================
@@ -27,8 +27,7 @@ import { getAllSecrets } from './notebook.js';
 import { getAllEvents } from './events.js';
 import { getAllCommunities } from './communities.js';
 import { getUserCharacterIdentity } from './secretsMeta.js';
-
-const ALIAS_KEY = 'nwst:aliasRegistry';
+import { getChatData, setChatData } from './storage.js';
 
 // ── Canonical ID generation ───────────────────────────────────────────────
 
@@ -61,12 +60,8 @@ export function toCanonicalId(name) {
 export function getManualAliases(chatId) {
     if (!chatId) chatId = getChatId();
     if (!chatId) return [];
-    try {
-        const { chatMetadata } = SillyTavern.getContext();
-        return chatMetadata?.[ALIAS_KEY] || [];
-    } catch (e) {
-        return [];
-    }
+    const groups = getChatData(chatId, 'aliasRegistry');
+    return Array.isArray(groups) ? groups : [];
 }
 
 /**
@@ -78,9 +73,7 @@ export async function saveManualAliases(chatId, aliasGroups) {
     if (!chatId) chatId = getChatId();
     if (!chatId) return;
     try {
-        const ctx = SillyTavern.getContext();
-        ctx.chatMetadata[ALIAS_KEY] = aliasGroups;
-        await ctx.saveMetadata();
+        await setChatData(chatId, 'aliasRegistry', Array.isArray(aliasGroups) ? aliasGroups : []);
     } catch (e) {
         console.error('[NWST AliasRegistry] Failed to save manual aliases:', e);
     }

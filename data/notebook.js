@@ -39,8 +39,7 @@
 import {
     getChatData,
     setChatData,
-    deleteChatData,
-    DEFAULT_NOTEBOOK
+    deleteChatData
 } from './storage.js';
 
 // ── Unique ID generator ───────────────────────────────────────────────────
@@ -65,7 +64,7 @@ function generateSecretId() {
  */
 export function getNotebook(chatId) {
     const nb = getChatData(chatId, 'notebook');
-    // Merge with DEFAULT_NOTEBOOK to ensure all fields exist
+    // Normalize all known notebook fields so older chat data remains compatible.
     // (handles migration for chats stored before secrets feature was added)
     return {
         core: {

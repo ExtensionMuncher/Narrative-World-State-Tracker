@@ -22,13 +22,16 @@ import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 
 import { getChatId, nwstToast } from '../utils.js';
 import { chatHasData } from '../data/storage.js';
-import { getWorldState, saveSnapshot, getSettingContext, getCalendarConfig, getSeasonConfig, getStartDate, saveStartDate, getEraPin } from '../data/worldState.js';
-import { computeDeterministicDate, dayOfYearFor, parseUserDate, parseCurrentCalendarDate, daysBetweenCalendarDates, startWeekdayForAnchor } from '../lib/calendarMath.js';
-import { getAllEvents } from '../data/events.js';
-import { getNotebook } from '../data/notebook.js';
+import { getSettingContext, getCalendarConfig, getSeasonConfig, getStartDate, saveStartDate, getEraPin } from '../data/worldState.js';
+import { computeDeterministicDate, dayOfYearFor, parseCurrentCalendarDate, daysBetweenCalendarDates, startWeekdayForAnchor } from '../lib/calendarMath.js';
 import { resolveProfile } from './connections.js';
 import { regenerateForecast, computeSeason } from './dayAdvancement.js';
 import { dlog } from "../lib/debug.js";
+import { ensureNagerHolidayCacheForCurrentWindow } from '../data/nagerDate.js';
+
+function isActiveBatchChat(chatId) {
+    return Boolean(chatId) && getChatId() === chatId;
+}
 
 // ── Date computation helper ─────────────────────────────────────────────────
 
@@ -550,6 +553,10 @@ export async function runBatchScan() {
     } catch (e) {
         console.warn('[NWST BatchScan] DIAG logging failed:', e);
     }
+    if (!isActiveBatchChat(chatId)) {
+        dlog('[NWST BatchScan] Active chat changed during startup; aborting stale batch scan.');
+        return false;
+    }
 
     if (hasData) {
         nwstToast('Batch scan has already been run for this chat. Existing data will not be overwritten.', 'warning');
@@ -644,6 +651,10 @@ export async function runBatchScan() {
             ];
 
             const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+            if (!isActiveBatchChat(chatId)) {
+                dlog('[NWST BatchScan] Active chat changed during chunk analysis; aborting stale batch scan.');
+                return false;
+            }
             if (response) {
                 // Accumulate with structured scene headers
                 const sceneCount = detectChunkScenes(chunk).length;
@@ -686,7 +697,11 @@ export async function runBatchScan() {
 
         // Synthesize final structured results
         nwstToast('Synthesizing world state from full analysis...', 'info');
-        await synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages, settingContext);
+        const synthesized = await synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages, settingContext);
+        if (!synthesized || !isActiveBatchChat(chatId)) {
+            dlog('[NWST BatchScan] Batch synthesis was cancelled or became stale.');
+            return false;
+        }
 
         nwstToast('Batch scan complete.', 'success');
         if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
@@ -700,6 +715,10 @@ export async function runBatchScan() {
             }
         } catch (e) {
             console.warn('[NWST BatchScan] Secrets scan failed (non-fatal):', e);
+        }
+        if (!isActiveBatchChat(chatId)) {
+            dlog('[NWST BatchScan] Active chat changed after secret scan; suppressing stale completion actions.');
+            return false;
         }
 
         // Notify the scanner that batch scan is done.
@@ -983,7 +1002,7 @@ function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg, setti
 // ── Final Synthesis ───────────────────────────────────────────────────────
 
 async function synthesizeBatchResults(chatId, profile, accumulatedContext, allMessages, settingContext) {
-    const synthesisPrompt = buildSynthesisPrompt(accumulatedContext, allMessages.length, settingContext);
+    const synthesisPrompt = buildSynthesisPrompt(chatId, accumulatedContext, allMessages.length, settingContext);
 
     const messages = [
         { role: 'system', content: BATCH_SYNTHESIS_SYSTEM_PROMPT },
@@ -991,21 +1010,26 @@ async function synthesizeBatchResults(chatId, profile, accumulatedContext, allMe
     ];
 
     const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.BULK });
+    if (!isActiveBatchChat(chatId)) {
+        dlog('[NWST BatchScan] Discarded stale synthesis result because the active chat changed.');
+        return false;
+    }
 
     if (!response) {
         nwstToast('Synthesis completed but no structured data was returned. Try running again.', 'warning');
-        return;
+        return false;
     }
 
     const result = parseBatchSynthesis(response);
     if (result) {
-        await applyBatchResults(chatId, result);
-    } else {
-        nwstToast('Could not parse batch scan results. The LLM may have returned an invalid format.', 'error');
+        return await applyBatchResults(chatId, result);
     }
+
+    nwstToast('Could not parse batch scan results. The LLM may have returned an invalid format.', 'error');
+    return false;
 }
 
-function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) {
+function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingContext) {
     // ── Synthesis Budget ────────────────────────────────────────────
     // Scale output quantity based on chat volume to prevent bloated or
     // sparse initial world states. Longer chats produce more material.
@@ -1069,7 +1093,7 @@ function buildSynthesisPrompt(accumulatedContext, messageCount, settingContext) 
     }
 
     // Inject calendar month names if configured
-    const calConfig = getCalendarConfig(getChatId());
+    const calConfig = getCalendarConfig(chatId);
     if (calConfig.enabled) {
         const monthList = calConfig.monthNames.map((name, i) =>
             `${name} (${calConfig.monthDays[i]} days)`
@@ -1227,6 +1251,10 @@ function parseBatchSynthesis(response) {
 // ── Apply batch results to storage ────────────────────────────────────────
 
 async function applyBatchResults(chatId, result) {
+    if (!isActiveBatchChat(chatId)) {
+        dlog('[NWST BatchScan] Refusing to apply stale batch results to a different active chat.');
+        return false;
+    }
     // ── Process secrets first (before notebook saves, since secrets live in notebook) ──
     if (result.secrets && Array.isArray(result.secrets) && result.secrets.length > 0) {
         const { addSecret } = await import('../data/notebook.js');
@@ -1335,29 +1363,6 @@ async function applyBatchResults(chatId, result) {
                 }
             }
         }
-        if (result.currentDay.season && typeof result.currentDay.season === 'string') {
-            const seasonText = result.currentDay.season.trim();
-            // If more than 3 words or contains punctuation that suggests multiple clauses
-            if (seasonText.split(' ').length > 3 || /[,;.—]/.test(seasonText)) {
-                // Extract first recognized season word if present, otherwise take first sentence
-                const seasonWords = ['spring', 'summer', 'autumn', 'fall', 'winter'];
-                const lower = seasonText.toLowerCase();
-                const foundSeason = seasonWords.find(sw => {
-                    // Match as whole word, not substring
-                    const regex = new RegExp(`\\b${sw}\\b`, 'i');
-                    return regex.test(lower);
-                });
-                if (foundSeason) {
-                    result.currentDay.season = foundSeason.charAt(0).toUpperCase() + foundSeason.slice(1);
-                    dlog(`[NWST BatchScan] Normalized season from verbose description to "${result.currentDay.season}"`);
-                } else {
-                    // No recognized season word — take just first sentence
-                    const firstSentence = seasonText.split(/[.\n;]/)[0].trim();
-                    result.currentDay.season = firstSentence;
-                    dlog(`[NWST BatchScan] Trimmed season to first segment: "${result.currentDay.season.substring(0, 60)}"`);
-                }
-            }
-        }
 
         // ── Override season with configured value ────────────────────
         // When the seasonal engine is active (mode 'auto' or 'static'), the
@@ -1448,6 +1453,18 @@ async function applyBatchResults(chatId, result) {
 
         await replaceCurrentDay(chatId, result.currentDay);
         nwstToast('Current Day block generated.', 'info');
+
+        // If real-world holidays were enabled before warmup, the scan may be
+        // the first moment NWST has a parseable story year. Seed the cache now;
+        // failures stay uncached and will retry on future day advancement.
+        try {
+            const holidayResult = await ensureNagerHolidayCacheForCurrentWindow(chatId);
+            if (!holidayResult.ok && holidayResult.failedYears?.length) {
+                nwstToast(`Nager.Date holiday fetch failed for ${holidayResult.failedYears.join(', ')}. NWST will retry when the story date advances. Check F12 for details.`, 'error');
+            }
+        } catch (holidayErr) {
+            console.error('[NWST BatchScan] Nager.Date holiday refresh failed:', holidayErr);
+        }
     }
 
     if (result.events && Array.isArray(result.events)) {
@@ -1580,6 +1597,10 @@ async function applyBatchResults(chatId, result) {
     }
 
     // Seed the 7-day forecast via Day Advancement LLM
+    if (!isActiveBatchChat(chatId)) {
+        dlog('[NWST BatchScan] Active chat changed before forecast seeding; stopping stale batch apply.');
+        return false;
+    }
     nwstToast('Generating initial 7-day forecast...', 'info');
     try {
         await regenerateForecast();
@@ -1593,6 +1614,7 @@ async function applyBatchResults(chatId, result) {
     // BOTH detected events (from chat analysis) AND world-level events (from setting/conditions/season)
     // in a SINGLE pass. No separate world event generation call is needed.
     dlog('[NWST BatchScan] Events generated in single synthesis pass (no separate world event call).');
+    return isActiveBatchChat(chatId);
 }
 
 // ── Loading UI ─────────────────────────────────────────────────────────────
@@ -1621,7 +1643,9 @@ function showBatchScanLoading(show) {
  * @returns {Promise<{reviewed: number, updated: number}>}
  */
 export async function reviewEventParticipants(chatId) {
-    const { getAllEvents, updateEvent, saveAllEvents } = await import('../data/events.js');
+    if (!chatId || !isActiveBatchChat(chatId)) return { reviewed: 0, updated: 0 };
+    const { getAllEvents, saveAllEvents } = await import('../data/events.js');
+    if (!isActiveBatchChat(chatId)) return { reviewed: 0, updated: 0 };
 
     const events = getAllEvents(chatId);
     if (!events || events.length === 0) {
@@ -1688,6 +1712,10 @@ export async function reviewEventParticipants(chatId) {
             const response = await generateWithProfile(profile, [systemMessage, userMessage], {
                 maxTokens: LLM_TOKEN_BUDGETS.SMALL
             });
+            if (!isActiveBatchChat(chatId)) {
+                dlog('[NWST BatchScan] Active chat changed during participant review; stopping stale review.');
+                return { reviewed: needsReview.length, updated };
+            }
 
             if (!response) continue;
 
@@ -1714,7 +1742,7 @@ export async function reviewEventParticipants(chatId) {
     }
 
     // Save all updated events
-    if (updated > 0) {
+    if (updated > 0 && isActiveBatchChat(chatId)) {
         await saveAllEvents(chatId, events);
     }
 

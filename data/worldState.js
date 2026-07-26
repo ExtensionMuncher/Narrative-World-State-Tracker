@@ -25,8 +25,6 @@
 import {
     getChatData,
     setChatData,
-    deleteChatData,
-    DEFAULT_WORLD_STATE,
     DEFAULT_SEASON_CONFIG,
     DEFAULT_CALENDAR_CONFIG
 } from './storage.js';
@@ -237,23 +235,125 @@ export function getEnabledConditions(chatId) {
 
 // ── Setting Context (per-chat) ────────────────────────────────────────────
 
-/**
- * Get the setting context for a chat (world climate/geography description).
- * NOTE: settingContext is stored per-chat, not globally.
- * @param {string} chatId
- * @returns {string} The setting context text
- */
-export function getSettingContext(chatId) {
-    return getChatData(chatId, 'settingContext');
+function _newSettingProfileId() {
+    return `setting_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 /**
- * Save the setting context for a chat.
- * @param {string} chatId
- * @param {string} context - The setting context text
+ * Get the saved Setting Context profile library for this chat.
+ * Legacy chats that only have the old settingContext string are exposed as a
+ * virtual "Default Setting" profile until the next save, preserving backwards
+ * compatibility without requiring a migration pass during every prompt read.
+ */
+export function getSettingContextProfiles(chatId) {
+    const stored = getChatData(chatId, 'settingContextProfiles');
+    const profiles = (Array.isArray(stored?.profiles) ? stored.profiles : [])
+        .filter(p => p && typeof p === 'object' && !Array.isArray(p))
+        .map((p, index) => ({
+            id: String(p.id || `setting_profile_${index + 1}`),
+            name: String(p.name || 'Untitled Setting').trim() || 'Untitled Setting',
+            content: String(p.content || '')
+        }));
+    let activeProfileId = stored?.activeProfileId || null;
+
+    if (profiles.length > 0) {
+        if (!profiles.some(p => p.id === activeProfileId)) activeProfileId = profiles[0].id;
+        return { activeProfileId, profiles };
+    }
+
+    const legacy = getChatData(chatId, 'settingContext') || '';
+    if (String(legacy).trim()) {
+        const profile = { id: 'setting_legacy_default', name: 'Default Setting', content: String(legacy) };
+        return { activeProfileId: profile.id, profiles: [profile], virtualLegacy: true };
+    }
+
+    return { activeProfileId: null, profiles: [] };
+}
+
+export async function saveSettingContextProfiles(chatId, library) {
+    const normalized = {
+        activeProfileId: library?.activeProfileId || null,
+        profiles: Array.isArray(library?.profiles)
+            ? library.profiles
+                .filter(p => p && typeof p === 'object' && !Array.isArray(p))
+                .map(p => ({
+                    id: p.id || _newSettingProfileId(),
+                    name: String(p.name || 'Untitled Setting').trim() || 'Untitled Setting',
+                    content: String(p.content || '')
+                }))
+            : []
+    };
+    if (normalized.activeProfileId && !normalized.profiles.some(p => p.id === normalized.activeProfileId)) {
+        normalized.activeProfileId = normalized.profiles[0]?.id || null;
+    }
+    await setChatData(chatId, 'settingContextProfiles', normalized);
+    const active = normalized.profiles.find(p => p.id === normalized.activeProfileId);
+    // Keep the legacy key mirrored because older NWST exports/builds and some
+    // third-party tools still expect a simple settingContext string.
+    await setChatData(chatId, 'settingContext', active?.content || '');
+    return normalized;
+}
+
+export async function ensureSettingContextProfiles(chatId) {
+    const library = getSettingContextProfiles(chatId);
+    if (!library.virtualLegacy) return library;
+    const persisted = { activeProfileId: library.activeProfileId, profiles: library.profiles };
+    await saveSettingContextProfiles(chatId, persisted);
+    return persisted;
+}
+
+/** Get the currently active setting-context text. */
+export function getSettingContext(chatId) {
+    const library = getSettingContextProfiles(chatId);
+    const active = library.profiles.find(p => p.id === library.activeProfileId);
+    if (active) return active.content || '';
+    return getChatData(chatId, 'settingContext') || '';
+}
+
+/**
+ * Save the active setting context. If the chat has never used profiles before,
+ * this transparently creates its first profile rather than discarding the
+ * existing simple-text workflow.
  */
 export async function saveSettingContext(chatId, context) {
-    await setChatData(chatId, 'settingContext', context);
+    let library = getSettingContextProfiles(chatId);
+    if (library.virtualLegacy) library = { activeProfileId: library.activeProfileId, profiles: library.profiles };
+    let active = library.profiles.find(p => p.id === library.activeProfileId);
+    if (!active) {
+        active = { id: _newSettingProfileId(), name: 'Default Setting', content: '' };
+        library.profiles.push(active);
+        library.activeProfileId = active.id;
+    }
+    active.content = String(context || '');
+    await saveSettingContextProfiles(chatId, library);
+}
+
+export async function createSettingContextProfile(chatId, name = 'New Setting', content = '', activate = true) {
+    let library = getSettingContextProfiles(chatId);
+    if (library.virtualLegacy) library = { activeProfileId: library.activeProfileId, profiles: library.profiles };
+    const profile = { id: _newSettingProfileId(), name: String(name || 'New Setting').trim() || 'New Setting', content: String(content || '') };
+    library.profiles.push(profile);
+    if (activate) library.activeProfileId = profile.id;
+    await saveSettingContextProfiles(chatId, library);
+    return profile;
+}
+
+export async function setActiveSettingContextProfile(chatId, profileId) {
+    let library = getSettingContextProfiles(chatId);
+    if (library.virtualLegacy) library = { activeProfileId: library.activeProfileId, profiles: library.profiles };
+    if (!library.profiles.some(p => p.id === profileId)) return false;
+    library.activeProfileId = profileId;
+    await saveSettingContextProfiles(chatId, library);
+    return true;
+}
+
+export async function deleteSettingContextProfile(chatId, profileId) {
+    let library = getSettingContextProfiles(chatId);
+    if (library.virtualLegacy) library = { activeProfileId: library.activeProfileId, profiles: library.profiles };
+    library.profiles = library.profiles.filter(p => p.id !== profileId);
+    if (library.activeProfileId === profileId) library.activeProfileId = library.profiles[0]?.id || null;
+    await saveSettingContextProfiles(chatId, library);
+    return library;
 }
 
 // ── Season Configuration (per-chat) ───────────────────────────────────────
@@ -299,6 +399,12 @@ export async function saveSeasonConfig(chatId, config) {
 export function getCalendarConfig(chatId) {
     const stored = getChatData(chatId, 'calendarConfig');
     if (stored && typeof stored === 'object') {
+        const storedNager = stored.nagerDate && typeof stored.nagerDate === 'object' ? stored.nagerDate : {};
+        const allowedHolidayTypes = ['Public', 'Bank', 'School', 'Authorities', 'Optional', 'Observance'];
+        const holidayTypes = Array.isArray(storedNager.holidayTypes)
+            ? storedNager.holidayTypes.filter(type => allowedHolidayTypes.includes(type))
+            : ['Public'];
+        const upcomingDaysRaw = Number(storedNager.upcomingDays);
         return {
             enabled: stored.enabled || false,
             months: stored.months || 12,
@@ -320,12 +426,50 @@ export function getCalendarConfig(chatId) {
             specialDays: Array.isArray(stored.specialDays) ? stored.specialDays : [],
             // Optional era label for custom calendars ("Third Age {year}").
             eraName: typeof stored.eraName === 'string' ? stored.eraName : '',
+            // Calendar engine. Existing chats default to standard/static month
+            // lengths; lunisolar mode dynamically supplies 29/30-day months and
+            // intercalary months while preserving the configured display names.
+            calendarSystem: stored.calendarSystem === 'lunisolar' ? 'lunisolar' : 'standard',
+            lunisolar: {
+                engine: 'east_asian',
+                leapMonthLabel: (typeof stored.lunisolar?.leapMonthLabel === 'string' && stored.lunisolar.leapMonthLabel.trim())
+                    ? stored.lunisolar.leapMonthLabel.trim()
+                    : 'Intercalary {month}'
+            },
             // Gregorian leap-year toggle. Defaults ON so real-world dates stay
-            // true; ignored entirely when a custom calendar is enabled.
-            leapYears: stored.leapYears !== false
+            // true; renamed Gregorian-compatible custom calendars honor it too.
+            leapYears: stored.leapYears !== false,
+            nagerDate: {
+                enabled: storedNager.enabled === true,
+                countryCode: typeof storedNager.countryCode === 'string' ? storedNager.countryCode.trim().toUpperCase() : '',
+                subdivisionCode: typeof storedNager.subdivisionCode === 'string' ? storedNager.subdivisionCode.trim().toUpperCase() : '',
+                holidayTypes: holidayTypes.length > 0 ? holidayTypes : ['Public'],
+                showOnCalendar: storedNager.showOnCalendar !== false,
+                includeInPrompt: storedNager.includeInPrompt !== false,
+                upcomingDays: Number.isInteger(upcomingDaysRaw) ? Math.max(0, Math.min(30, upcomingDaysRaw)) : 7,
+                cache: storedNager.cache && typeof storedNager.cache === 'object' ? storedNager.cache : {}
+            }
         };
     }
-    return { ...DEFAULT_CALENDAR_CONFIG, monthNames: [...DEFAULT_CALENDAR_CONFIG.monthNames], monthDays: [...DEFAULT_CALENDAR_CONFIG.monthDays], weekDays: [...DEFAULT_CALENDAR_CONFIG.weekDays], startWeekday: 1, specialDays: [], eraName: '', leapYears: true };
+    return {
+        ...DEFAULT_CALENDAR_CONFIG,
+        monthNames: [...DEFAULT_CALENDAR_CONFIG.monthNames],
+        monthDays: [...DEFAULT_CALENDAR_CONFIG.monthDays],
+        weekDays: [...DEFAULT_CALENDAR_CONFIG.weekDays],
+        startWeekday: 1,
+        specialDays: [],
+        eraName: '',
+        calendarSystem: 'standard',
+        lunisolar: {
+            ...DEFAULT_CALENDAR_CONFIG.lunisolar
+        },
+        leapYears: true,
+        nagerDate: {
+            ...DEFAULT_CALENDAR_CONFIG.nagerDate,
+            holidayTypes: [...DEFAULT_CALENDAR_CONFIG.nagerDate.holidayTypes],
+            cache: {}
+        }
+    };
 }
 
 /**
@@ -435,6 +579,19 @@ export async function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsS
         worldStateSnapshot,
         eventsSnapshot,
         notebookSnapshot,
+        activeSettingContextProfileId: getSettingContextProfiles(chatId)?.activeProfileId || null,
+        activeWeatherProfileId: getChatData(chatId, 'weatherProfiles')?.activeProfileId || null,
+        weatherSimulationSnapshot: (() => {
+            const weather = getChatData(chatId, 'weatherProfiles');
+            return {
+                activeProfileId: weather?.activeProfileId || null,
+                profileStates: Array.isArray(weather?.profiles) ? weather.profiles.map(p => ({
+                    id: p.id,
+                    activeSystem: p.activeSystem || null,
+                    history: Array.isArray(p.history) ? p.history : []
+                })) : []
+            };
+        })(),
         savedAt: Date.now()
     };
 

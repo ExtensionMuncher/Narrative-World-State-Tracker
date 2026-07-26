@@ -10,7 +10,6 @@
 // Import from here instead of index.js for these utilities.
 // =============================================================================
 
-const MODULE_NAME = 'nwst';
 const TOAST_PREFIX = 'Narrative World State Tracker';
 
 /**

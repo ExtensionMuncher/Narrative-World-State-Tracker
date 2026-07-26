@@ -16,7 +16,6 @@ import { undoLastMutation, redoNextMutation, getHistoryStatus } from '../data/no
 import { runNotebookReconcile } from '../llm/notebookReconcile.js';
 import {
 
-    getNotebook,
     getCoreFields, addCoreBullet, updateCoreBullet, deleteCoreBullet,
     getMysteryFields, addMysteryBullet, updateMysteryBullet, deleteMysteryBullet,
     getAllSecrets, addSecret, updateSecret, deleteSecret, resolveArchiveDecision,

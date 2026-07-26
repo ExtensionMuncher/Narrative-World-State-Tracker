@@ -31,7 +31,7 @@
 // IT DOES NOT decide injection. It only produces scene comprehension.
 // =============================================================================
 
-import { getChatId, nwstToast } from '../utils.js';
+import { getChatId } from '../utils.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { isEnabled, isPaused, getSidecarScanRange } from '../settings.js';
@@ -39,8 +39,7 @@ import { getAllSecrets } from '../data/notebook.js';
 import { buildAliasRegistry } from '../data/aliasRegistry.js';
 import { getUserCharacterIdentity } from '../data/secretsMeta.js';
 import { dlog } from '../lib/debug.js';
-
-const SIDECAR_STATE_KEY = 'nwst:secretsSidecarState';
+import { getChatData, setChatData } from '../data/storage.js';
 
 // ── Sidecar system prompt ─────────────────────────────────────────────────
 
@@ -182,21 +181,14 @@ function parseSidecarResponse(response, registry) {
 export function getSidecarState(chatId) {
     if (!chatId) chatId = getChatId();
     if (!chatId) return null;
-    try {
-        const { chatMetadata } = SillyTavern.getContext();
-        return chatMetadata?.[SIDECAR_STATE_KEY] || null;
-    } catch (e) {
-        return null;
-    }
+    return getChatData(chatId, 'secretsSidecarState');
 }
 
 async function saveSidecarState(chatId, state) {
     if (!chatId) chatId = getChatId();
     if (!chatId) return;
     try {
-        const ctx = SillyTavern.getContext();
-        ctx.chatMetadata[SIDECAR_STATE_KEY] = state;
-        await ctx.saveMetadata();
+        await setChatData(chatId, 'secretsSidecarState', state);
     } catch (e) {
         dlog('[NWST SecretsSidecar] Failed to save state:', e);
     }
@@ -244,6 +236,10 @@ export async function runSecretsSidecar() {
 
         dlog(`[NWST SecretsSidecar] Running scene analysis on last ${recentMessages.length}/${scanRange} prose messages...`);
         const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
+        if (getChatId() !== chatId) {
+            dlog('[NWST SecretsSidecar] Active chat changed during analysis; discarding stale sidecar result.');
+            return null;
+        }
         if (!response) return null;
 
         const analysis = parseSidecarResponse(response, registry);

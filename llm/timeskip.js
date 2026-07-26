@@ -19,13 +19,12 @@ import { getChatId, nwstToast } from '../utils.js';
 import { getSetting } from '../index.js';
 import {
     getWorldState, saveWorldState, getCurrentDay, replaceCurrentDay,
-    getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
+    getForecast, replaceMoonPhases,
     getConditions, updateConditionContent, getSettingContext,
     saveSnapshot, getSeasonConfig, getCalendarConfig
 } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, addEvent, classifyScheduledEventTier } from '../data/events.js';
 import { getNotebook, saveNotebook } from '../data/notebook.js';
-import { getPlannerPrompt } from '../settings.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle, computeLunarAngleFromDate, getMoonPhaseForAngle, computeSeason, refreshExtraMoons, buildMoonPhenomenaOptions } from './dayAdvancement.js';
@@ -33,6 +32,7 @@ import { getEraPin } from '../data/worldState.js';
 import { advanceCurrentCalendarDate, parseCurrentCalendarDate, dayOfYearFor, daysBetweenCalendarDates, wrapDayCount, extractYearFromText, computeDeterministicDate } from '../lib/calendarMath.js';
 import { dlog } from "../lib/debug.js";
 import { getMoonConfig } from '../data/moons.js';
+import { ensureNagerHolidayCacheForCurrentWindow } from '../data/nagerDate.js';
 
 // ── Internal prompt ───────────────────────────────────────────────────────
 
@@ -366,7 +366,7 @@ export async function executeTimeSkip(skipDescription) {
 
             // Normalize and store
             newAngle = ((newAngle % 360) + 360) % 360;
-            setLunarAngle(chatId, newAngle);
+            await setLunarAngle(chatId, newAngle);
 
             // Extra moons advance by the best-known skip length: exact when
             // the deterministic engine ran, else estimated from date strings.
@@ -396,6 +396,24 @@ export async function executeTimeSkip(skipDescription) {
             console.warn('[NWST Timeskip] Moon phase recalculation failed (non-fatal):', moonErr);
         }
 
+        // Severe Weather: a time skip is still a legitimate story-date advance.
+        // We roll once for the landing day (not once per skipped day) so long skips
+        // do not become a hidden weather-gacha loop. Forecast regeneration below
+        // then renders the stored system without rerolling it.
+        try {
+            const { prepareSevereWeatherAdvance, commitPreparedWeather } = await import('../data/severeWeather.js');
+            const landed = getCurrentDay(chatId);
+            const preparedWeather = prepareSevereWeatherAdvance(chatId, {
+                targetElapsedDay: Number.isInteger(landed?.elapsedStoryDays) ? landed.elapsedStoryDays : 0,
+                season: landed?.season || '',
+                dayCount: landed?.dayCount || 1,
+            });
+            await commitPreparedWeather(chatId, preparedWeather);
+            if (preparedWeather?.toast) nwstToast(preparedWeather.toast, preparedWeather.system?.source === 'override' ? 'info' : 'warning');
+        } catch (weatherErr) {
+            console.warn('[NWST Timeskip] Severe-weather roll failed (non-fatal):', weatherErr);
+        }
+
         // ── 8. Regenerate weather forecast ──────────────────────────
         try {
             const { regenerateForecast } = await import('./dayAdvancement.js');
@@ -405,6 +423,19 @@ export async function executeTimeSkip(skipDescription) {
             console.warn('[NWST Timeskip] Forecast regeneration failed (non-fatal):', forecastErr);
         }
 
+        // Refresh the optional real-world holiday cache after the deterministic
+        // calendar lands on its new date. Failure is non-fatal and deliberately
+        // uncached so the next story-day advancement retries.
+        try {
+            const holidayResult = await ensureNagerHolidayCacheForCurrentWindow(chatId);
+            if (!holidayResult.ok && holidayResult.failedYears?.length) {
+                nwstToast(`Nager.Date holiday fetch failed for ${holidayResult.failedYears.join(', ')}. NWST will retry when the story date advances. Check F12 for details.`, 'error');
+            }
+        } catch (holidayErr) {
+            console.error('[NWST Timeskip] Nager.Date holiday refresh failed:', holidayErr);
+            nwstToast('Nager.Date holiday fetch failed. NWST will retry when the story date advances. Check F12 for details.', 'error');
+        }
+
         nwstToast('Time skip complete.', 'success');
         if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
         return true;
@@ -412,6 +443,10 @@ export async function executeTimeSkip(skipDescription) {
     } catch (err) {
         // ── FAILURE RECOVERY: Roll back to pre-skip snapshot ────
         console.error('[NWST Timeskip] FAILED — rolling back:', err);
+        if (getChatId() !== chatId) {
+            dlog('[NWST Timeskip] Active chat changed; abandoning stale time skip without rollback or UI changes.');
+            return false;
+        }
 
         try {
             await saveWorldState(chatId, preSkipSnapshot.worldState);

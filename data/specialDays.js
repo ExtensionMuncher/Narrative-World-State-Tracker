@@ -36,7 +36,7 @@
 import { getAllEvents, addEvent } from './events.js';
 import { getCurrentDay, getCalendarConfig } from './worldState.js';
 import { dlog } from '../lib/debug.js';
-import { monthLengthsFor, parseCurrentCalendarDate, weekdayIndexFromDisplay, dateFromDayCount, daysBetweenCalendarDates, extractYearFromText } from '../lib/calendarMath.js';
+import { monthLengthsFor, parseCurrentCalendarDate, weekdayIndexFromDisplay, dateFromDayCount, daysBetweenCalendarDates, extractYearFromText, calendarDateForBaseMonthDay, dayOfYearFor } from '../lib/calendarMath.js';
 
 /**
  * Category registry: key → { label, chip }. The chip renders on the event
@@ -82,15 +82,14 @@ function getYearLength(cfg, year = 1) {
     return monthLengthsFor(cfg, year).reduce((a, b) => a + (parseInt(b, 10) || 0), 0) || 365;
 }
 
-/** Day-of-year (1-based) for a 1-based month + day-in-month. Null if invalid. */
+/**
+ * Day-of-year (1-based) for a stored Special Day month + day. Stored month
+ * numbers always mean the regular/base month, so an intercalary month inserted
+ * earlier in a lunisolar year never shifts birthdays or recurring observances.
+ */
 export function dayOfYearFromMonthDay(month, day, cfg, year = 1) {
-    const monthDays = monthLengthsFor(cfg, year);
-    const m = parseInt(month, 10), d = parseInt(day, 10);
-    if (!Number.isInteger(m) || m < 1 || m > monthDays.length) return null;
-    if (!Number.isInteger(d) || d < 1 || d > (parseInt(monthDays[m - 1], 10) || 0)) return null;
-    let doy = d;
-    for (let i = 0; i < m - 1; i++) doy += parseInt(monthDays[i], 10) || 0;
-    return doy;
+    const date = calendarDateForBaseMonthDay(year, parseInt(month, 10), parseInt(day, 10), cfg, false);
+    return date ? dayOfYearFor(date, cfg) : null;
 }
 
 /** 1-based month index containing a given day-of-year. */
@@ -109,9 +108,9 @@ function prevCalendarYear(year) { return year === 1 ? -1 : year - 1; }
 
 /** Build a concrete Special Day occurrence range for one calendar year. */
 function buildOccurrenceRange(specialDay, startYear, cfg) {
-    const startDOY = dayOfYearFromMonthDay(specialDay.month, specialDay.day, cfg, startYear);
-    if (startDOY === null) return null;
-    const startDate = { year: startYear, month: specialDay.month, day: specialDay.day };
+    const startDate = calendarDateForBaseMonthDay(startYear, specialDay.month, specialDay.day, cfg, false);
+    if (!startDate) return null;
+    const startDOY = dayOfYearFor(startDate, cfg);
 
     let endYear = startYear;
     let endDate = startDate;
@@ -120,8 +119,8 @@ function buildOccurrenceRange(specialDay, startYear, cfg) {
             || (specialDay.endMonth === specialDay.month && specialDay.endDay < specialDay.day)) {
             endYear = nextCalendarYear(startYear);
         }
-        const endDOY = dayOfYearFromMonthDay(specialDay.endMonth, specialDay.endDay, cfg, endYear);
-        if (endDOY !== null) endDate = { year: endYear, month: specialDay.endMonth, day: specialDay.endDay };
+        const candidateEnd = calendarDateForBaseMonthDay(endYear, specialDay.endMonth, specialDay.endDay, cfg, false);
+        if (candidateEnd) endDate = candidateEnd;
     }
 
     const rangeLen = daysBetweenCalendarDates(startDate, endDate, cfg);
@@ -130,7 +129,7 @@ function buildOccurrenceRange(specialDay, startYear, cfg) {
         startDate,
         endDate,
         startDOY,
-        endDOY: dayOfYearFromMonthDay(endDate.month, endDate.day, cfg, endDate.year),
+        endDOY: dayOfYearFor(endDate, cfg),
         rangeLen,
         occurrenceYear: startYear
     };

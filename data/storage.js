@@ -13,7 +13,8 @@
 //     Written via saveSettingsDebounced(). Shared across all chats.
 //
 //   PER-CHAT NARRATIVE DATA (chatMetadata):
-//     World state, events, notebook, communities, snapshots, settingContext.
+//     World state, events, notebook, communities, snapshots, Setting Context
+//     profile library, Weather Profile library, calendar/season state.
 //     Written via saveMetadata() (async). Scoped to the active chat by ST.
 //     Switching chats automatically changes chatMetadata — zero crossover.
 //
@@ -36,8 +37,11 @@
 //   chatMetadata["nwst:events"]
 //   chatMetadata["nwst:notebook"]
 //   chatMetadata["nwst:communities"]
-//   chatMetadata["nwst:settingContext"]
-//   chatMetadata["nwst:snapshots"]
+//   chatMetadata["nwst:settingContext"]              (legacy active-text mirror)
+//   chatMetadata["nwst:settingContextProfiles"]       (per-chat save slots)
+//   chatMetadata["nwst:weatherProfiles"]              (per-chat severe-weather regions/state)
+//   chatMetadata["nwst:snapshots"]                  (day/rewind history)
+//   chatMetadata["nwst:contextSnapshots"]           (manual profile/context undo history)
 import { dlog } from "../lib/debug.js";
 //   chatMetadata["nwst:seasonConfig"]
 //   chatMetadata["nwst:calendarConfig"]
@@ -98,6 +102,19 @@ const DEFAULT_NOTEBOOK = {
 const DEFAULT_COMMUNITIES = [];
 const DEFAULT_SETTING_CONTEXT = '';
 
+const DEFAULT_SETTING_CONTEXT_PROFILES = {
+    activeProfileId: null,
+    profiles: []
+};
+
+const DEFAULT_WEATHER_PROFILES = {
+    enabled: false,
+    affectForecast: true,
+    showOnHome: true,
+    activeProfileId: null,
+    profiles: []
+};
+
 const DEFAULT_SEASON_CONFIG = {
     mode: 'auto',
     yearLength: 365,
@@ -129,9 +146,33 @@ const DEFAULT_CALENDAR_CONFIG = {
     // Optional era label for CUSTOM calendars (e.g. "Third Age" or "Third Age {year}").
     // Substituted into the dateSub line by the deterministic date engine.
     eraName: '',
-    // Leap-year toggle for the default (Gregorian) calendar — adds Feb 29 in
-    // leap years so real-world dates stay true. Ignored by custom calendars.
-    leapYears: true
+    // Calendar system. 'standard' uses the configured static month lengths;
+    // 'lunisolar' uses NWST's dynamic East-Asian lunisolar year layouts while
+    // retaining these configured month names as the display labels.
+    calendarSystem: 'standard',
+    lunisolar: {
+        engine: 'east_asian',
+        leapMonthLabel: 'Intercalary {month}'
+    },
+    // Leap-year toggle for Gregorian-compatible standard calendars — adds Feb 29
+    // in leap years so real-world dates stay true, including renamed custom sets.
+    // Ignored while the lunisolar engine is active.
+    leapYears: true,
+    // Optional Nager.Date real-world holiday layer. Active for the default
+    // Gregorian calendar and custom calendars that preserve Gregorian month/day
+    // structure (renamed month/weekday labels are fine).
+    // Raw responses are cached once per country + year inside this same
+    // per-chat calendar config so region/type filter changes stay local.
+    nagerDate: {
+        enabled: false,
+        countryCode: '',
+        subdivisionCode: '',
+        holidayTypes: ['Public'],
+        showOnCalendar: true,
+        includeInPrompt: true,
+        upcomingDays: 7,
+        cache: {}
+    }
 };
 
 // Player-pinned era label for REAL-WORLD calendars (e.g. "Meiji 12"). Set from
@@ -150,6 +191,8 @@ const DEFAULT_ERA_PIN = '';
 const DEFAULT_START_DATE = null;
 
 const DEFAULT_SNAPSHOTS = {};
+// Separate manual context/profile undo history. Never used by Previous Day.
+const DEFAULT_CONTEXT_SNAPSHOTS = [];
 const DEFAULT_ALIAS_REGISTRY = [];
 const DEFAULT_SECRETS_SIDECAR_STATE = null;
 const DEFAULT_SECRETS_META = {
@@ -163,6 +206,8 @@ const DEFAULTS = {
     notebook:       DEFAULT_NOTEBOOK,
     communities:    DEFAULT_COMMUNITIES,
     settingContext: DEFAULT_SETTING_CONTEXT,
+    settingContextProfiles: DEFAULT_SETTING_CONTEXT_PROFILES,
+    weatherProfiles: DEFAULT_WEATHER_PROFILES,
     seasonConfig:   DEFAULT_SEASON_CONFIG,
     calendarConfig: DEFAULT_CALENDAR_CONFIG,
     moonConfig:     DEFAULT_MOON_CONFIG,
@@ -170,6 +215,7 @@ const DEFAULTS = {
     startDate:      DEFAULT_START_DATE,
     eraPin:         DEFAULT_ERA_PIN,
     snapshots:      DEFAULT_SNAPSHOTS,
+    contextSnapshots: DEFAULT_CONTEXT_SNAPSHOTS,
     aliasRegistry:  DEFAULT_ALIAS_REGISTRY,
     secretsSidecarState: DEFAULT_SECRETS_SIDECAR_STATE,
     secretsMeta:    DEFAULT_SECRETS_META
@@ -200,10 +246,18 @@ function metaKey(dataType) {
  *
  * @returns {object|null} The chatMetadata object, or null if unavailable
  */
-function getChatMeta() {
+function getChatMeta(expectedChatId = null, operation = 'read') {
     try {
-        const { chatMetadata } = SillyTavern.getContext();
-        return chatMetadata || null;
+        const ctx = SillyTavern.getContext();
+        const currentChatId = ctx?.chatId || null;
+        // Long-running LLM/scanner operations capture a chatId before awaiting.
+        // If the user switches chats while that work is in flight, never let the
+        // stale operation read from or write into the newly active chat.
+        if (expectedChatId && currentChatId && String(expectedChatId) !== String(currentChatId)) {
+            console.warn(`[NWST Storage] Blocked stale ${operation}: expected chat "${expectedChatId}", active chat is "${currentChatId}".`);
+            return null;
+        }
+        return ctx?.chatMetadata || null;
     } catch (e) {
         console.error('[NWST Storage] Could not access chatMetadata:', e);
         return null;
@@ -217,9 +271,15 @@ function getChatMeta() {
  *
  * @returns {Promise<void>}
  */
-async function persistMeta() {
+async function persistMeta(expectedChatId = null) {
     try {
-        await SillyTavern.getContext().saveMetadata();
+        const ctx = SillyTavern.getContext();
+        const currentChatId = ctx?.chatId || null;
+        if (expectedChatId && currentChatId && String(expectedChatId) !== String(currentChatId)) {
+            console.warn(`[NWST Storage] Skipped stale metadata save: expected chat "${expectedChatId}", active chat is "${currentChatId}".`);
+            return;
+        }
+        await ctx.saveMetadata();
     } catch (e) {
         console.error('[NWST Storage] saveMetadata() failed:', e);
     }
@@ -228,9 +288,9 @@ async function persistMeta() {
 // ── Public API ────────────────────────────────────────────────────────────
 // The public signature (chatId, dataType) is preserved for compatibility
 // with all callers in worldState.js, events.js, notebook.js, communities.js.
-// The chatId parameter is accepted but no longer used as a storage key —
-// chatMetadata is already scoped to the current chat by ST. The parameter
-// is retained so calling code does not need to change.
+// chatMetadata is already scoped to the active chat by ST. The chatId
+// parameter is retained as a safety token: reads/writes are rejected when a
+// long-running operation's captured chatId no longer matches the active chat.
 
 /**
  * Get a specific data type for the current chat.
@@ -242,7 +302,7 @@ async function persistMeta() {
  * @returns {*} The data (deep cloned), or default if not found
  */
 function getChatData(chatId, dataType) {
-    const meta = getChatMeta();
+    const meta = getChatMeta(chatId, `read ${dataType}`);
     if (!meta) return deepClone(DEFAULTS[dataType] ?? null);
 
     const stored = meta[metaKey(dataType)];
@@ -264,14 +324,14 @@ function getChatData(chatId, dataType) {
  * @returns {Promise<void>}
  */
 async function setChatData(chatId, dataType, value) {
-    const meta = getChatMeta();
+    const meta = getChatMeta(chatId, `write ${dataType}`);
     if (!meta) {
-        console.error(`[NWST Storage] setChatData("${dataType}"): chatMetadata unavailable`);
+        console.error(`[NWST Storage] setChatData("${dataType}"): chatMetadata unavailable or chat changed`);
         return;
     }
 
     meta[metaKey(dataType)] = deepClone(value);
-    await persistMeta();
+    await persistMeta(chatId);
 }
 
 /**
@@ -283,11 +343,11 @@ async function setChatData(chatId, dataType, value) {
  * @returns {Promise<void>}
  */
 async function deleteChatData(chatId, dataType) {
-    const meta = getChatMeta();
+    const meta = getChatMeta(chatId, `delete ${dataType}`);
     if (!meta) return;
 
     delete meta[metaKey(dataType)];
-    await persistMeta();
+    await persistMeta(chatId);
 }
 
 /**
@@ -298,7 +358,7 @@ async function deleteChatData(chatId, dataType) {
  * @returns {boolean}
  */
 function chatDataExists(chatId, dataType) {
-    const meta = getChatMeta();
+    const meta = getChatMeta(chatId, `exists ${dataType}`);
     if (!meta) return false;
     return meta[metaKey(dataType)] !== undefined;
 }
@@ -330,7 +390,7 @@ function getAllChatData(chatId) {
 async function setAllChatData(chatId, dataBundle) {
     if (!dataBundle) return;
 
-    const meta = getChatMeta();
+    const meta = getChatMeta(chatId, 'bulk write');
     if (!meta) {
         console.error('[NWST Storage] setAllChatData: chatMetadata unavailable');
         return;
@@ -342,7 +402,7 @@ async function setAllChatData(chatId, dataBundle) {
         }
     }
 
-    await persistMeta();
+    await persistMeta(chatId);
 }
 
 /**
@@ -353,7 +413,7 @@ async function setAllChatData(chatId, dataBundle) {
  * @returns {Promise<void>}
  */
 async function deleteAllChatData(chatId) {
-    const meta = getChatMeta();
+    const meta = getChatMeta(chatId, 'delete all');
     if (!meta) return;
 
     for (const dataType of Object.keys(DEFAULTS)) {
@@ -374,7 +434,7 @@ async function deleteAllChatData(chatId) {
         delete meta[key];
     }
 
-    await persistMeta();
+    await persistMeta(chatId);
 }
 
 /**
@@ -387,7 +447,7 @@ async function deleteAllChatData(chatId) {
  * @returns {boolean}
  */
 function chatHasData(chatId) {
-    const meta = getChatMeta();
+    const meta = getChatMeta(chatId, 'has data');
     if (!meta) {
         dlog('[NWST Storage] chatHasData: chatMetadata unavailable, returning false');
         return false;
@@ -497,6 +557,8 @@ export {
     DEFAULT_NOTEBOOK,
     DEFAULT_COMMUNITIES,
     DEFAULT_SETTING_CONTEXT,
+    DEFAULT_SETTING_CONTEXT_PROFILES,
+    DEFAULT_WEATHER_PROFILES,
     DEFAULT_SEASON_CONFIG,
     DEFAULT_CALENDAR_CONFIG,
     DEFAULT_MOON_CONFIG,
@@ -504,6 +566,7 @@ export {
     DEFAULT_START_DATE,
     DEFAULT_ERA_PIN,
     DEFAULT_SNAPSHOTS,
+    DEFAULT_CONTEXT_SNAPSHOTS,
     DEFAULT_ALIAS_REGISTRY,
     DEFAULT_SECRETS_SIDECAR_STATE,
     DEFAULT_SECRETS_META,

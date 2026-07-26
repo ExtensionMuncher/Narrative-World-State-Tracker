@@ -22,7 +22,7 @@ import { getScanFrequency, getScanMinimumMessages, isPaused, isEnabled } from '.
 import { chatHasData } from '../data/storage.js';
 import { getWorldState, getSettingContext, updateConditionContent, getCalendarConfig } from '../data/worldState.js';
 import { getTrackedEvents } from '../data/events.js';
-import { getNotebook, addCoreBullet, addMysteryBullet, replaceMysteryField, replaceMysteryFieldDiff, getCoreField, getMysteryField, addSecret, getAllSecrets, flagSecretForArchive, getSecretStatus, getInjectableSecrets } from '../data/notebook.js';
+import { getNotebook, addCoreBullet, addMysteryBullet, replaceMysteryFieldDiff, getCoreField, getMysteryField, addSecret, getAllSecrets, flagSecretForArchive, getSecretStatus, getInjectableSecrets } from '../data/notebook.js';
 import { beginMutationBatch, recordMutation, commitMutationBatch } from '../data/notebookHistory.js';
 import { replaceCoreField as replaceCoreFieldQuiet } from '../data/notebook.js';
 import { getAllCommunities, updateCommunitySummary, updateCommunityMembers, addCommunity } from '../data/communities.js';
@@ -76,6 +76,11 @@ let _lastScanRangeEnd = null;
 // 20-message countdown from scratch even if the scanner was at message 18.
 
 const SCANNER_STATE_KEY = 'nwst:scannerState';
+const SCAN_ABORTED_CHAT_CHANGE = 'chat-changed';
+
+function isExpectedChat(chatId) {
+    return Boolean(chatId) && getChatId() === chatId;
+}
 
 function saveScannerState() {
     try {
@@ -577,6 +582,8 @@ export function notifyBatchScanComplete() {
 async function checkAndScan() {
     if (!isEnabled() || isPaused() || isScanning) { emitScannerHealth(); return; }
 
+    const invocationChatId = getChatId();
+    if (!invocationChatId) return;
     const currentCount = getCurrentMessageCount();
     emitScannerHealth();
 
@@ -624,6 +631,10 @@ async function checkAndScan() {
         nwstToast('Running initial world state scan...', 'info');
         const initialWindow = Math.min(messagesSinceStart, 60);
         const initialOk = await runScan(initialWindow, warmupMessageCount);
+        if (initialOk === SCAN_ABORTED_CHAT_CHANGE || getChatId() !== invocationChatId) {
+            dlog('[NWST Scanner] Initial scan cancelled because the active chat changed.');
+            return;
+        }
 
         // Transition to cadence phase. If the warmup gap somehow exceeded the
         // 60-message safety window, advance only through the slice we actually
@@ -660,6 +671,10 @@ async function checkAndScan() {
         const scanWindow = Math.min(messagesSinceLastScan, 60);
         const scanStart = messageCountAtLastScan;
         const success = await runScan(scanWindow, scanStart);
+        if (success === SCAN_ABORTED_CHAT_CHANGE || getChatId() !== invocationChatId) {
+            dlog('[NWST Scanner] Cadence scan cancelled because the active chat changed.');
+            return;
+        }
         if (success) {
             _lastScanFailureCount = 0;
             messageCountAtLastScan += scanWindow;
@@ -682,9 +697,9 @@ export async function runScan(windowSize = 0, startIndex = null) {
     isScanning = true;
     emitScannerHealth();
     dlog('[NWST Scanner] Running scan...');
+    const chatId = getChatId();
 
     try {
-        const chatId = getChatId();
         if (!chatId) { markScanFailure('No active chat detected.'); return false; }
 
         const profile = resolveProfile('planningLLM');
@@ -709,13 +724,17 @@ export async function runScan(windowSize = 0, startIndex = null) {
 
         const userPrompt = buildScannerPrompt(recentMessages, worldState, notebook, activeEvents, settingContext);
         const worldEvidenceSources = buildWorldEvidenceSources(recentMessages, worldState.currentDay, settingContext);
-        const worldCommunityPrompt = buildWorldCommunityPrompt(recentMessages, worldState, communities, settingContext, worldEvidenceSources);
+        const worldCommunityPrompt = buildWorldCommunityPrompt(worldState, communities, worldEvidenceSources);
 
         dlog('[NWST Scanner] Calling Planning LLM for detailed continuity...');
         const response = await generateWithProfile(profile, [
             { role: 'system', content: SCANNER_SYSTEM_PROMPT },
             { role: 'user', content: userPrompt }
         ], { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+        if (!isExpectedChat(chatId)) {
+            dlog('[NWST Scanner] Active chat changed during detailed scan; discarding stale result.');
+            return SCAN_ABORTED_CHAT_CHANGE;
+        }
         if (!response) {
             dlog('[NWST Scanner] Empty detailed-continuity response.');
             markScanFailure('Planning LLM returned an empty detailed-continuity response.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + effectiveWindow : null);
@@ -727,6 +746,10 @@ export async function runScan(windowSize = 0, startIndex = null) {
             { role: 'system', content: WORLD_COMMUNITY_SYSTEM_PROMPT },
             { role: 'user', content: worldCommunityPrompt }
         ], { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+        if (!isExpectedChat(chatId)) {
+            dlog('[NWST Scanner] Active chat changed during World/Community scan; discarding stale result.');
+            return SCAN_ABORTED_CHAT_CHANGE;
+        }
         if (!worldCommunityResponse) {
             dlog('[NWST Scanner] Empty World/Community response.');
             markScanFailure('Planning LLM returned an empty World/Community response.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + effectiveWindow : null);
@@ -743,8 +766,10 @@ export async function runScan(windowSize = 0, startIndex = null) {
             return false;
         }
 
-        const detailedUpdates = await applyScanResults(chatId, parsedScan, recentMessages);
+        const detailedUpdates = await applyScanResults(chatId, parsedScan);
+        if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
         const worldCommunityUpdates = await applyWorldCommunityResults(chatId, parsedWorldCommunity, worldEvidenceSources, recentMessages, communities);
+        if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
         const hadUpdates = detailedUpdates || worldCommunityUpdates;
 
         if (hadUpdates) {
@@ -755,14 +780,15 @@ export async function runScan(windowSize = 0, startIndex = null) {
         }
 
         // Run narrative consistency check (secrets monitoring)
-        await runConsistencyCheck();
+        await runConsistencyCheck({ expectedChatId: chatId });
+        if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
 
         // ── Auto-reconcile cadence (Tier 3) ────────────────────────────────
         // Runs the notebook tidy pass every N scans, if enabled (0 = off, manual
         // only). Counted in chatMetadata so it survives reloads.
         try {
             const reconcileCadence = getReconcileCadence();
-            if (reconcileCadence > 0) {
+            if (reconcileCadence > 0 && isExpectedChat(chatId)) {
                 const ctx = SillyTavern.getContext();
                 const meta = ctx?.chatMetadata;
                 if (meta) {
@@ -784,12 +810,18 @@ export async function runScan(windowSize = 0, startIndex = null) {
             console.error('[NWST Scanner] Auto-reconcile failed:', e);
         }
 
+        if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
         dlog('[NWST Scanner] Scan complete.');
         const rangeStart = Number.isInteger(startIndex) ? startIndex : Math.max(0, getCurrentMessageCount() - effectiveWindow);
         markScanSuccess(rangeStart, rangeStart + effectiveWindow);
         return true;
 
     } catch (err) {
+        const activeChatId = getChatId();
+        if (chatId && activeChatId !== chatId) {
+            dlog('[NWST Scanner] Scan aborted after chat change; stale error/state ignored.');
+            return SCAN_ABORTED_CHAT_CHANGE;
+        }
         console.error('[NWST Scanner] Scan failed:', err);
         markScanFailure(err?.message || 'Unexpected cadence scan error.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + (windowSize || 0) : null);
         return false;
@@ -915,7 +947,7 @@ function buildScannerPrompt(recentMessages, worldState, notebook, activeEvents, 
     return prompt;
 }
 
-function buildWorldCommunityPrompt(recentMessages, worldState, communities, settingContext, evidenceSources) {
+function buildWorldCommunityPrompt(worldState, communities, evidenceSources) {
     let prompt = '';
 
     prompt += `=== LABELED WORLD EVIDENCE SOURCES ===\n`;
@@ -1063,7 +1095,7 @@ async function upsertAliasAwareMysteryBullet(chatId, field, bullet) {
 }
 
 /** Apply the detailed continuity result after both cadence calls parsed. */
-async function applyScanResults(chatId, result, recentMessages) {
+async function applyScanResults(chatId, result) {
     if (!result || result.noChanges === true) {
         dlog('[NWST Scanner] Detailed continuity call indicated no changes needed.');
         return false;
@@ -1231,6 +1263,7 @@ async function applyScanResults(chatId, result, recentMessages) {
         // Store proposed events in a staging area for UI review
         // The UI will display these with approve/dismiss options
         try {
+            if (!isExpectedChat(chatId)) return hadUpdates;
             const { chatMetadata, saveMetadata } = SillyTavern.getContext();
             const existing = chatMetadata['nwst:pendingEvents'] || [];
             const existingTitles = new Set(existing.map(e => e.title?.toLowerCase().trim()));
@@ -1435,6 +1468,8 @@ async function applyWorldCommunityResults(chatId, result, evidenceSources, recen
  */
 export async function synthesizeCommunities(chatId, messages) {
     try {
+        if (!isExpectedChat(chatId)) return false;
+
         const profile = resolveProfile('planningLLM');
         if (!profile) return false;
 
@@ -1472,6 +1507,10 @@ export async function synthesizeCommunities(chatId, messages) {
         ];
 
         const response = await generateWithProfile(profile, llmMessages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+        if (!isExpectedChat(chatId)) {
+            dlog('[NWST Scanner] Active chat changed during community synthesis; discarding stale result.');
+            return false;
+        }
         if (!response) return false;
 
         // Parse response

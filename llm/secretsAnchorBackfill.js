@@ -78,7 +78,7 @@ async function generateAnchorsForSecret(secret, profile) {
 export async function backfillSecretAnchors(chatId, options = {}) {
     if (!chatId) chatId = getChatId();
     const result = { filled: 0, skipped: 0, failed: 0 };
-    if (!chatId) return result;
+    if (!chatId || getChatId() !== chatId) return result;
 
     const secrets = getAllSecrets(chatId) || [];
     if (secrets.length === 0) {
@@ -105,6 +105,10 @@ export async function backfillSecretAnchors(chatId, options = {}) {
 
         try {
             const anchors = await generateAnchorsForSecret(secret, profile);
+            if (getChatId() !== chatId) {
+                dlog('[NWST AnchorBackfill] Active chat changed; stopping stale anchor backfill.');
+                return result;
+            }
             if (anchors && anchors.length) {
                 await updateSecret(chatId, secret.id, { triggerAnchors: { phrases: anchors } });
                 result.filled++;

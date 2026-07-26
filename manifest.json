@@ -7,7 +7,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "ExtensionMuncher",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "homePage": "",
     "auto_update": false,
     "description": "Maintains a living narrative world state for ongoing roleplays. Tracks date, weather, seasonal details, upcoming events, and active world conditions (political, social, spiritual/supernatural, environmental). A background LLM scans the chat and keeps all data current."

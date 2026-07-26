@@ -22,23 +22,24 @@ import {
     updatePauseButton
 } from '../index.js';
 
-import { isEnabled, setEnabled, isPaused, setPaused } from '../settings.js';
+import { isEnabled } from '../settings.js';
 import {
     getCurrentDay,
     updateCurrentDay,
     getForecast,
     getMoonPhases,
-    replaceCurrentDay,
     replaceMoonPhases,
     getDayBoundarySnapshots,
-    getSeasonConfig
-, getExtraMoons } from '../data/worldState.js';
+    getSeasonConfig,
+    getExtraMoons,
+    getCondition } from '../data/worldState.js';
 import { getEventsGroupedByTier } from '../data/events.js';
-import { advanceToNextDay, restorePreviousDay, regenerateForecast, regenerateForecastOnly, regenerateMoonPhasesOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getMoonPhaseNames, getMoonPhaseForAngle, computeSeason, buildMoonPhenomenaOptions, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
+import { advanceToNextDay, restorePreviousDay, regenerateForecastOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, generateMoonPhases, getMoonPhaseNames, getMoonPhaseForAngle, computeSeason, buildMoonPhenomenaOptions, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
 import { executeTimeSkip } from '../llm/timeskip.js';
-import { synthesizeCurrentDay } from '../llm/currentDaySynth.js';
 import { getMoonConfig } from '../data/moons.js';
 import { getScannerHealth } from '../llm/scanner.js';
+import { getNagerHolidaysForCurrentDate } from '../data/nagerDate.js';
+import { getWeatherHomeStatus } from '../data/severeWeather.js';
 
 // ── Moon phenomenon descriptions (UI-only — NOT injected into prompts) ────
 const MOON_PHENOMENA_DESCRIPTIONS = {
@@ -86,6 +87,7 @@ export function buildHomeTab() {
                     style="cursor:pointer;border-radius:4px;padding:1px 4px;">—</div>
                 <div class="nwst-date-sub" id="nwst-date-sub" title="Click to edit"
                     style="cursor:pointer;border-radius:4px;padding:1px 4px;">—</div>
+                <div id="nwst-date-holiday" style="display:none;font-size:10px;color:var(--SmartThemeBodyColor,#bbb);opacity:0.85;margin-top:2px"></div>
             </div>
             <button class="nwst-day-nav-btn" id="nwst-next-day-btn" title="Next day">›</button>
         </div>
@@ -142,6 +144,7 @@ export function buildHomeTab() {
                 </div>
             </div>
             <div class="nwst-journal-body">
+                <div id="nwst-severe-weather-status" style="display:none;margin:0 0 8px;padding:7px 9px;border:0.5px solid var(--SmartThemeBorderColor,#ddd);border-radius:6px;font-size:11px;color:var(--SmartThemeBodyColor,#ddd)"></div>
                 <div class="nwst-scroll-wrap">
                     <button class="nwst-scroll-arrow nwst-scroll-left" id="nwst-scroll-left">◀</button>
                     <div class="nwst-weather-strip" id="nwst-forecast-strip">
@@ -224,8 +227,29 @@ function wireHomeEvents() {
         if (nextDayBtn) nextDayBtn.disabled = false;
     }
 
-    // ── Approve / Dismiss all pending event proposals ─────────
-    // (Functions existed fully implemented but were never attached.)
+    // ── Approve / Dismiss pending event proposals ─────────────
+    // Individual rows are rendered dynamically, so use one delegated listener
+    // on the stable list container instead of wiring buttons after every render.
+    const pendingList = document.getElementById('nwst-pending-events-list');
+    if (pendingList && !pendingList.dataset.nwstPendingDelegated) {
+        pendingList.dataset.nwstPendingDelegated = '1';
+        pendingList.addEventListener('click', async (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const approveBtn = target?.closest('.nwst-approve-pending');
+            const dismissBtn = target?.closest('.nwst-dismiss-pending');
+            const button = approveBtn || dismissBtn;
+            if (!button || !pendingList.contains(button)) return;
+
+            event.preventDefault();
+            const pendingId = button.getAttribute('data-pending-id');
+            if (!pendingId) return;
+
+            if (approveBtn) await approvePendingEvent(pendingId);
+            else await dismissPendingEvent(pendingId);
+        });
+    }
+
+    // Bulk actions use stable buttons and can be wired directly.
     const approveAllBtn = document.getElementById('nwst-approve-all-pending');
     if (approveAllBtn) {
         approveAllBtn.addEventListener('click', async (event) => {
@@ -700,7 +724,7 @@ async function saveCurrentDayEdit() {
     if (day.dateDisplay && day.dateDisplay !== oldDateDisplay) {
         const newAngle = computeLunarAngleFromDate(day.dateDisplay);
         const phaseInfo = getMoonPhaseForAngle(newAngle);
-        setLunarAngle(chatId, newAngle);
+        await setLunarAngle(chatId, newAngle);
         // Compute phenomena in context of the edited day
         const cycleDays = getMoonConfig(chatId).moonCycleDays || 29.53058867;
         const phenOptions = buildMoonPhenomenaOptions(chatId, day, { cycleDays });
@@ -760,6 +784,7 @@ export function refreshHomeUI() {
         updatePauseButton();
         refreshScanHealthDisplay();
         refreshCurrentDayDisplay();
+        refreshSevereWeatherStatus();
         refreshForecastDisplay();
         refreshMoonDisplay();
         refreshEventsDigest();
@@ -811,6 +836,7 @@ function refreshCurrentDayDisplay() {
     const container = document.getElementById('nwst-currentday-content');
     const dateDisplay = document.getElementById('nwst-date-display');
     const dateSub = document.getElementById('nwst-date-sub');
+    const dateHoliday = document.getElementById('nwst-date-holiday');
     const enableToggle = document.getElementById('nwst-enable-toggle');
 
     if (enableToggle) enableToggle.checked = isEnabled();
@@ -833,6 +859,16 @@ function refreshCurrentDayDisplay() {
     // Update date fields in nav bar
     if (dateDisplay) dateDisplay.textContent = day.dateDisplay || '—';
     if (dateSub) dateSub.textContent = day.dateSub || '—';
+    if (dateHoliday) {
+        const holidays = getNagerHolidaysForCurrentDate(chatId);
+        if (holidays.length > 0) {
+            dateHoliday.textContent = `🎉 ${holidays.map(h => h.name).join(' · ')}`;
+            dateHoliday.style.display = 'block';
+        } else {
+            dateHoliday.textContent = '';
+            dateHoliday.style.display = 'none';
+        }
+    }
 
     if (!container) return;
 
@@ -869,22 +905,17 @@ function refreshCurrentDayDisplay() {
     _setHtmlIfChanged('nwst-currentday-content', html);
 }
 
-/**
- * Import condition check for Spiritual Climate visibility.
- * We use a lazy import to avoid circular dependency.
- */
-function getCondition(chatId, conditionName) {
-    // Dynamic import to avoid circular dependency
-    // For now, default to enabled if we can't check
-    try {
-        // We'll access this through the stored data directly
-        return { enabled: true };
-    } catch (e) {
-        return { enabled: true };
-    }
-}
-
 // ── Forecast display ──────────────────────────────────────────────────────
+
+function refreshSevereWeatherStatus() {
+    const el = document.getElementById('nwst-severe-weather-status');
+    if (!el) return;
+    const status = getWeatherHomeStatus(getChatId());
+    if (!status) { el.style.display = 'none'; el.textContent = ''; return; }
+    el.style.display = 'block';
+    const profile = status.profileName ? ` · ${status.profileName}` : '';
+    el.textContent = `${status.icon || '🌩️'} ${status.text}${profile}`;
+}
 
 function refreshForecastDisplay() {
     const strip = document.getElementById('nwst-forecast-strip');
@@ -1159,7 +1190,6 @@ function refreshPendingEvents() {
     const badgeText = isEmpty ? '' : `${pending.length} pending`;
 
     // Cache section visibility — only update if changed
-    const sectionKey = 'nwst-pending-events-section';
     if (section.style.display !== sectionDisplay) {
         section.style.display = sectionDisplay;
         // Invalidate list cache when visibility changes so content re-renders

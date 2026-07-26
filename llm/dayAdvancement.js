@@ -15,21 +15,21 @@
 
 import { getChatId, nwstToast } from '../utils.js';
 import { getSetting } from '../index.js';
-import { getSettingContext, getCurrentDay, replaceCurrentDay, updateCurrentDay,
+import { getSettingContext, getCurrentDay, updateCurrentDay,
          getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
          saveSnapshot, getLatestSnapshot, getSnapshots, getWorldState,
          getSeasonConfig, getCalendarConfig, getEraPin,
          getExtraMoons, saveExtraMoons } from '../data/worldState.js';
 import { computeDeterministicDate, advanceCurrentCalendarDate, applyForecastLabelsFromWeekday, parseCurrentCalendarDate, weekdayIndexFromDisplay, wrapDayCount, extractYearFromText, dateFromDayCount, resolveScheduledElapsedWindow, addDaysToDate, daysBetweenCalendarDates } from '../lib/calendarMath.js';
-import { getAllEvents, saveAllEvents, getActiveEvents, rollEventHorizon, compactEventHorizon, classifyScheduledEventTier } from '../data/events.js';
+import { getAllEvents, saveAllEvents, rollEventHorizon, compactEventHorizon, classifyScheduledEventTier } from '../data/events.js';
 import { runEventValidityReview } from './eventValidity.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
-import { getPlannerPrompt, getScanFrequency } from '../settings.js';
-import { computeDayOfYearFromDate } from './batchScan.js';
 import { dlog } from "../lib/debug.js";
 import { getMoonConfig, getMoonPhenomenonOverrides, getOverrideDisplayLabel } from '../data/moons.js';
+import { ensureNagerHolidayCacheForCurrentWindow } from '../data/nagerDate.js';
+import { prepareSevereWeatherAdvance, commitPreparedWeather, formatSystemConstraint, getSevereWeatherConstraint, getWeatherProfileForecastContext } from '../data/severeWeather.js';
 
 
 // ── Moon phase calculation (programmatic — no LLM involvement) ────────────
@@ -778,8 +778,7 @@ export async function regenerateMoonPhasesFromDate(chatId, dateText) {
 
     if (!text) {
         nwstToast('No date text provided. Using stored angle.', 'warning');
-        regenerateMoonPhasesOnly();
-        return false;
+        return await regenerateMoonPhasesOnly();
     }
 
     // Compute angle from date text
@@ -994,7 +993,7 @@ export async function regenerateForecast(mode = 'all') {
 
             // Normalize and store the computed angle
             anchorAngle = ((anchorAngle % 360) + 360) % 360;
-            setLunarAngle(chatId, anchorAngle);
+            await setLunarAngle(chatId, anchorAngle);
 
             const cycleDays = getMoonConfig(chatId).moonCycleDays || 29.53058867;
             const phenOptions = buildMoonPhenomenaOptions(chatId, currentDay, { cycleDays });
@@ -1016,7 +1015,9 @@ export async function regenerateForecast(mode = 'all') {
                 : FORECAST_REGEN_SYSTEM_PROMPT;
             // Pass computed season so the LLM knows what season the system has determined
             const computedSeason = getComputedSeason(chatId);
-            const userPrompt = buildForecastOnlyPrompt(currentDay, settingContext, currentForecast, computedSeason);
+            const weatherProfileContext = getWeatherProfileForecastContext(chatId);
+            const weatherConstraint = getSevereWeatherConstraint(chatId, currentDay?.elapsedStoryDays || 0);
+            const userPrompt = buildForecastOnlyPrompt(currentDay, settingContext, currentForecast, computedSeason, weatherConstraint, weatherProfileContext);
 
             const response = await callLLM(profile, systemPrompt, userPrompt);
             if (!response) {
@@ -1130,9 +1131,24 @@ export async function advanceToNextDay() {
             ? detDate.dayOfYear
             : wrapDayCount((currentDay.dayCount || 0) + 1, calendarConfig, currentYear);
         const nextComputedSeason = computeSeason(nextDayCount, seasonConfig);
+        const newElapsedStoryDays = (Number.isInteger(currentDay.elapsedStoryDays) ? currentDay.elapsedStoryDays : 0) + 1;
+
+        // Severe weather is decided BEFORE the forecast LLM call, but not persisted
+        // until the day advancement succeeds. This prevents failed API calls from
+        // advancing the weather simulation without advancing the story date.
+        const preparedWeather = prepareSevereWeatherAdvance(chatId, {
+            targetElapsedDay: newElapsedStoryDays,
+            season: nextComputedSeason || currentDay.season || '',
+            dayCount: nextDayCount,
+        });
+        const preparedProfile = preparedWeather?.state?.profiles?.find(p => p.id === preparedWeather.state.activeProfileId) || null;
+        const weatherConstraint = preparedWeather?.system
+            ? formatSystemConstraint(preparedWeather.system, newElapsedStoryDays, preparedProfile)
+            : '';
 
         // 3. Build the LLM prompt (moon phases excluded — calculated programmatically)
-        const userPrompt = buildDayAdvancementPrompt(currentDay, settingContext, currentForecast, nextComputedSeason, detDate, eraPin);
+        const weatherProfileContext = getWeatherProfileForecastContext(chatId);
+        const userPrompt = buildDayAdvancementPrompt(currentDay, settingContext, currentForecast, nextComputedSeason, detDate, eraPin, weatherConstraint, weatherProfileContext);
 
         // 4. Call the Day Advancement LLM
         const systemPrompt = detDate ? DAY_ADVANCEMENT_DETERMINISTIC_SYSTEM_PROMPT : DAY_ADVANCEMENT_SYSTEM_PROMPT;
@@ -1168,7 +1184,6 @@ export async function advanceToNextDay() {
         //    The LLM receives the computed season as context and writes evocative
         //    prose *about* that season — the engine is the authority.
         const newDayCount = nextDayCount;
-        const newElapsedStoryDays = (Number.isInteger(currentDay.elapsedStoryDays) ? currentDay.elapsedStoryDays : 0) + 1;
         // seasonConfig was already declared above — reuse it. nextComputedSeason
         // was computed from the cyclical calendar position for this same day.
         const computedSeason = nextComputedSeason;
@@ -1181,6 +1196,9 @@ export async function advanceToNextDay() {
             dayCount: newDayCount,
             elapsedStoryDays: newElapsedStoryDays
         });
+
+        await commitPreparedWeather(chatId, preparedWeather);
+        if (preparedWeather?.toast) nwstToast(preparedWeather.toast, preparedWeather.system?.source === 'override' ? 'info' : 'warning');
 
         // ★ PRESERVE EXISTING FORECAST if LLM returned empty/invalid
         if (result.forecast && result.forecast.length > 0) {
@@ -1272,7 +1290,7 @@ export async function advanceToNextDay() {
         }
 
         await replaceMoonPhases(chatId, newMoonPhases);
-        setLunarAngle(chatId, newAngle);
+        await setLunarAngle(chatId, newAngle);
 
         // Every additional configured moon advances by one day of its OWN cycle
         await refreshExtraMoons(chatId, 1, phenOptions);
@@ -1309,6 +1327,22 @@ export async function advanceToNextDay() {
             }
         } catch (sdErr) {
             console.warn('[NWST DayAdvancement] Special day materialization failed (non-fatal):', sdErr);
+        }
+
+        // 9.3 Real-world holiday cache. Failed requests remain uncached by
+        // design, so the next story-day advancement retries automatically.
+        // Near New Year this may fetch both years so the 7-day prompt window
+        // can see early-January holidays while the story is still in December.
+        try {
+            const holidayResult = await ensureNagerHolidayCacheForCurrentWindow(chatId);
+            if (!holidayResult.ok && holidayResult.failedYears?.length) {
+                nwstToast(`Nager.Date holiday fetch failed for ${holidayResult.failedYears.join(', ')}. NWST will retry on the next story-day advance. Check F12 for details.`, 'error');
+            } else if (holidayResult.fetchedYears?.length) {
+                dlog(`[NWST Nager.Date] Cached holiday data for ${holidayResult.fetchedYears.join(', ')}.`);
+            }
+        } catch (holidayErr) {
+            console.error('[NWST Nager.Date] Holiday refresh failed:', holidayErr);
+            nwstToast('Nager.Date holiday fetch failed. NWST will retry on the next story-day advance. Check F12 for details.', 'error');
         }
 
         // 9.5 Event validity review — the Planning LLM checks whether the story
@@ -1406,6 +1440,37 @@ export async function restorePreviousDay(snapshotKey) {
             await nbModule.saveNotebook(chatId, snapshot.notebookSnapshot);
         }
 
+        // Restore the manually selected context/weather regions when the
+        // snapshot recorded them. Older snapshots simply omit these fields.
+        if (snapshot.activeSettingContextProfileId) {
+            try {
+                const { setActiveSettingContextProfile } = await import('../data/worldState.js');
+                await setActiveSettingContextProfile(chatId, snapshot.activeSettingContextProfileId);
+            } catch (e) { console.warn('[NWST DayAdvancement] Could not restore Setting Context profile:', e); }
+        }
+        if (snapshot.weatherSimulationSnapshot) {
+            try {
+                const { getWeatherProfilesState, saveWeatherProfilesState } = await import('../data/severeWeather.js');
+                const weather = getWeatherProfilesState(chatId);
+                const snapWeather = snapshot.weatherSimulationSnapshot;
+                if (snapWeather.activeProfileId && weather.profiles.some(p => p.id === snapWeather.activeProfileId)) {
+                    weather.activeProfileId = snapWeather.activeProfileId;
+                }
+                for (const saved of (snapWeather.profileStates || [])) {
+                    const profile = weather.profiles.find(p => p.id === saved.id);
+                    if (!profile) continue;
+                    profile.activeSystem = saved.activeSystem || null;
+                    profile.history = Array.isArray(saved.history) ? saved.history : [];
+                }
+                await saveWeatherProfilesState(chatId, weather);
+            } catch (e) { console.warn('[NWST DayAdvancement] Could not restore severe-weather simulation state:', e); }
+        } else if (snapshot.activeWeatherProfileId) {
+            try {
+                const { setActiveWeatherProfile } = await import('../data/severeWeather.js');
+                await setActiveWeatherProfile(chatId, snapshot.activeWeatherProfileId);
+            } catch (e) { console.warn('[NWST DayAdvancement] Could not restore Weather Profile:', e); }
+        }
+
         // Older snapshots predate elapsedStoryDays and elapsed event markers.
         // Normalize immediately after restoration so rewinding into legacy data
         // cannot reset duration bookkeeping or leave dayCount monotonic.
@@ -1426,7 +1491,7 @@ export async function restorePreviousDay(snapshotKey) {
 
 // ── Prompt building ───────────────────────────────────────────────────────
 
-function buildDayAdvancementPrompt(currentDay, settingContext, forecast, computedSeason, detDate = null, eraPin = '') {
+function buildDayAdvancementPrompt(currentDay, settingContext, forecast, computedSeason, detDate = null, eraPin = '', weatherConstraint = '', weatherProfileContext = '') {
     let prompt = '';
 
     prompt += `Current Date Display: ${currentDay.dateDisplay || '(not set)'}\n`;
@@ -1446,6 +1511,12 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast, compute
 
     if (settingContext) {
         prompt += `Setting Context (world climate/geography):\n${settingContext}\n\n`;
+    }
+    if (weatherProfileContext) {
+        prompt += `${weatherProfileContext}\n\n`;
+    }
+    if (weatherConstraint) {
+        prompt += `${weatherConstraint}\n\n`;
     }
 
     // Inject calendar config (months + week days) if configured
@@ -1480,7 +1551,7 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast, compute
  * Build a prompt for regenerating ONLY the weather forecast.
  * Excludes moon phase data entirely.
  */
-function buildForecastOnlyPrompt(currentDay, settingContext, forecast, computedSeason) {
+function buildForecastOnlyPrompt(currentDay, settingContext, forecast, computedSeason, weatherConstraint = '', weatherProfileContext = '') {
     let prompt = '';
 
     prompt += `Current Date Display: ${currentDay.dateDisplay || '(not set)'}\n`;
@@ -1493,6 +1564,12 @@ function buildForecastOnlyPrompt(currentDay, settingContext, forecast, computedS
 
     if (settingContext) {
         prompt += `Setting Context (world climate/geography):\n${settingContext}\n\n`;
+    }
+    if (weatherProfileContext) {
+        prompt += `${weatherProfileContext}\n\n`;
+    }
+    if (weatherConstraint) {
+        prompt += `${weatherConstraint}\n\n`;
     }
 
     // Inject calendar config (months + week days) if configured
@@ -1680,7 +1757,6 @@ async function rollEventHorizonForward(chatId) {
     // passes. Duration bookkeeping never drives the calendar itself.
     const events = getAllEvents(chatId);
     const currentDay = getCurrentDay(chatId);
-    const dayCount = currentDay.dayCount || 1;
     const elapsedStoryDays = Number.isInteger(currentDay.elapsedStoryDays) ? currentDay.elapsedStoryDays : 0;
     const calendarConfig = getCalendarConfig(chatId);
     const changes = {};
@@ -1739,19 +1815,6 @@ function getScheduledElapsedRange(event, calendarConfig, currentDay) {
     return { startElapsed: resolved.start, endElapsed: resolved.end };
 }
 
-/**
- * Check if a scheduledDate string refers to a day in the future, relative to
- * the current dayCount.
- *
- * Parses the primary "Day #" format (e.g. "Day 105", "Day 14").
- * For other formats (e.g. "Month 3/15"), returns false — the event will
- * be subject to normal rolling since we can't reliably compare without
- * full calendar config context.
- *
- * @param {string} scheduledDate - Free-form date string from the event
- * @param {number} currentDayCount - The current story day number
- * @returns {boolean} true if the event is scheduled for a future day
- */
 // ── Snapshot ──────────────────────────────────────────────────────────────
 
 async function saveDayBoundarySnapshot(chatId) {

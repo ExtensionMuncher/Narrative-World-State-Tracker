@@ -60,8 +60,9 @@ OUTPUT (JSON only, no markdown fences, no commentary):
  * @param {object} [options]
  * @param {boolean} [options.visibleOnly=false] - Only read messages currently
  *        visible in the chat (excludes /hide-hidden and system messages).
- * @param {boolean} [options.manual=false] - Manual run: always toasts a result
- *        summary, even when nothing was found.
+ * @param {boolean} [options.manual=false]
+ * @param {boolean} [options.deepScan=false] - Manual run: scan the full visible history.
+ * @param {string|null} [options.expectedChatId=null] - Safety token for background scanner calls.
  * @returns {Promise<{ran:boolean, knowledgeChanges:number, reveals:number, contradictions:number}>}
  */
 export async function runConsistencyCheck(options = {}) {
@@ -69,6 +70,7 @@ export async function runConsistencyCheck(options = {}) {
     if (!isEnabled() || isPaused()) return summary;
     const chatId = getChatId();
     if (!chatId) return summary;
+    if (options.expectedChatId && options.expectedChatId !== chatId) return summary;
 
     try {
         const profile = resolveProfile('narrativeConsistencyLLM');
@@ -99,6 +101,10 @@ export async function runConsistencyCheck(options = {}) {
 
         dlog('[NWST NarrativeConsistency] Running consistency check...');
         const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
+        if (getChatId() !== chatId || (options.expectedChatId && options.expectedChatId !== chatId)) {
+            dlog('[NWST NarrativeConsistency] Active chat changed during scan; discarding stale result.');
+            return summary;
+        }
         if (!response) {
             if (options.manual) nwstToast('Consistency scan got no response from the LLM.', 'warning');
             return summary;
@@ -223,8 +229,6 @@ async function applyKnowledgeChange(chatId, secret, learners) {
 
     for (const learner of learners) {
         if (typeof learner !== 'string' || !learner.trim()) continue;
-        const l = learner.trim().toLowerCase();
-
         // Match exact names, reversed full-name order, or a safe whole
         // first/last-name token. Never use arbitrary substring containment.
         const matchIdx = whoDoesNotKnow.findIndex(n => knowledgeNamesMatch(n, learner));

@@ -28,9 +28,9 @@ import {
     addCommunity, updateCommunity, deleteCommunity,
     updateCommunitySummary
 } from '../data/communities.js';
-import { isInjectWorldConditions } from '../settings.js';
 import { resolveProfile, generateWithProfile } from '../llm/connections.js';
 import { LLM_TOKEN_BUDGETS } from '../llm/tokenBudgets.js';
+import { dlog } from '../lib/debug.js';
 import { buildWorldEvidenceSources, formatWorldEvidenceSources, collectRecentCastNames, validateWorldConditionPayload } from '../llm/worldConditionEvidence.js';
 
 // ── Dedicated system prompt for single-condition regeneration ──────────────
@@ -321,9 +321,9 @@ function wireConditionEvents() {
  * @param {string} condKey - 'political' | 'social' | 'spiritual' | 'environmental'
  * @param {string} condLabel - Human-readable label (e.g. 'Political')
  */
-async function regenCondition(condKey, condLabel) {
-    const chatId = getChatId();
-    if (!chatId) return;
+async function regenCondition(condKey, condLabel, options = {}) {
+    const chatId = options.expectedChatId || getChatId();
+    if (!chatId || getChatId() !== chatId) return false;
 
     // Resolve planning LLM profile
     const profile = resolveProfile('planningLLM');
@@ -339,7 +339,10 @@ async function regenCondition(condKey, condLabel) {
     const currentDay = getCurrentDay(chatId);
     const recentMessages = getRecentChatMessages(10);
     const communities = getAllCommunities(chatId);
-    const evidenceSources = buildWorldEvidenceSources([], currentDay, settingContext);
+    const evidenceDay = options.settingChange
+        ? { dateDisplay: currentDay?.dateDisplay || '', season: currentDay?.season || '' }
+        : currentDay;
+    const evidenceSources = buildWorldEvidenceSources([], evidenceDay, settingContext);
     const recentCastNames = collectRecentCastNames(recentMessages, communities);
 
     let userPrompt = `=== WORLD FRAME ===\n`;
@@ -367,6 +370,10 @@ async function regenCondition(condKey, condLabel) {
         ];
 
         const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+        if (getChatId() !== chatId) {
+            dlog(`[NWST] Discarded stale ${condKey} condition result because the active chat changed.`);
+            return false;
+        }
         if (!response || !response.trim()) {
             nwstToast('LLM returned empty response for condition regen.', 'error');
             return;
@@ -393,6 +400,7 @@ async function regenCondition(condKey, condLabel) {
         await updateConditionContent(chatId, condKey, newContent);
         refreshConditionsUI();
         nwstToast(`${condLabel} condition regenerated (${validation.mode}).`, 'success');
+        return true;
 
     } catch (err) {
         console.error(`[NWST] Condition regen failed for ${condKey}:`, err);
@@ -400,6 +408,22 @@ async function regenCondition(condKey, condLabel) {
     } finally {
         if (row) row.classList.remove('nwst-loading');
     }
+}
+
+/**
+ * Rebuild all setting-dependent World Conditions after an intentional Setting
+ * Context switch. This mode deliberately excludes old location-specific Current
+ * Day prose from evidence so the previous setting cannot contaminate the rebuild.
+ */
+export async function regenerateAllWorldConditionsForSettingChange(expectedChatId = getChatId()) {
+    if (!expectedChatId || getChatId() !== expectedChatId) return false;
+    const conditions = getConditions(expectedChatId);
+    for (const def of CONDITION_DEFS) {
+        if (getChatId() !== expectedChatId) return false;
+        if (conditions?.[def.key]?.enabled === false) continue;
+        await regenCondition(def.key, def.label, { settingChange: true, expectedChatId });
+    }
+    return getChatId() === expectedChatId;
 }
 
 /**
@@ -634,6 +658,10 @@ async function regenCommunitySummary(communityId) {
         ];
 
         const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+        if (getChatId() !== chatId) {
+            dlog('[NWST] Discarded stale community summary because the active chat changed.');
+            return;
+        }
         if (!response || !response.trim()) {
             nwstToast('LLM returned empty response for community regen.', 'error');
             return;

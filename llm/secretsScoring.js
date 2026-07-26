@@ -28,7 +28,7 @@
 // =============================================================================
 
 import { getChatId } from '../utils.js';
-import { getAllSecrets, getInjectableSecrets } from '../data/notebook.js';
+import { getInjectableSecrets } from '../data/notebook.js';
 import { getSceneContext } from './secretsSidecar.js';
 import {
     getScoringWeights, getInjectionThreshold,
@@ -244,7 +244,6 @@ export function scoreSecret(secret, sceneContext, weights, sharedAnchors = new S
     const distinctiveAnchorHit = explicitAnchorHit || (!_anchors.hasExplicit && inferredAnchorHit);
     const distinctiveAnchorWord = explicitAnchorWord || inferredAnchorWord;
     const anchorHit = explicitAnchorHit || inferredAnchorHit;
-    const anchorHitWord = explicitAnchorWord || inferredAnchorWord;
 
     // Also treat an active-pressure match as subject relevance (computed below
     // sets pressureReferenced). For now, subjectReferenced starts from anchorHit.

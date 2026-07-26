@@ -283,6 +283,12 @@ function deduplicateSecrets(candidates, existingSecrets) {
  * @returns {Promise<number>} Number of new secrets added
  */
 export async function scanForSecrets(chatId) {
+    if (!chatId) chatId = getChatId();
+    if (!chatId || getChatId() !== chatId) {
+        dlog('[NWST SecretScan] Skipped stale secret scan because the active chat changed.');
+        return 0;
+    }
+
     // ── 1. Resolve Planning LLM profile ───────────────────────────────────
     const profile = resolveProfile(PLANNING_ROLE);
     if (!profile) {
@@ -331,6 +337,10 @@ export async function scanForSecrets(chatId) {
         ];
 
         const response = await generateWithProfile(profile, llmMessages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+        if (getChatId() !== chatId) {
+            dlog('[NWST SecretScan] Discarded stale chunk result because the active chat changed.');
+            return 0;
+        }
         if (response) {
             accumulatedContext += `\n--- Chunk ${i + 1}/${chunks.length} Analysis ---\n${response}\n`;
         }
@@ -347,6 +357,10 @@ export async function scanForSecrets(chatId) {
     ];
 
     const response = await generateWithProfile(profile, synthMessages, { maxTokens: LLM_TOKEN_BUDGETS.HEAVY });
+    if (getChatId() !== chatId) {
+        dlog('[NWST SecretScan] Discarded stale synthesis result because the active chat changed.');
+        return 0;
+    }
 
     if (!response) {
         nwstToast('Secret scan completed but no structured data was returned.', 'warning');

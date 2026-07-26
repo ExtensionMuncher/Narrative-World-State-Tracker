@@ -14,8 +14,6 @@
 // =============================================================================
 
 import {
-    isEnabled, setEnabled,
-    isPaused, setPaused,
     isDebugMode, setDebugMode,
     getConnectionProfiles, setConnectionProfile,
     getScanFrequency, setScanFrequency,
@@ -26,21 +24,30 @@ import {
     getMaxSecretsInjected, getSidecarCadence, getSidecarScanRange, getInjectionThreshold,
     getSecretDecayThreshold, getReconcileCadence,
     getScoringWeights, setScoringWeight, setSecretsConfigValue,
-    exportGlobalSettings, importGlobalSettings,
-    exportChatData, importChatData,
     exportAll, importAll
 } from '../settings.js';
 
-import { getSettingContext, saveSettingContext, getSeasonConfig, saveSeasonConfig, getCalendarConfig, saveCalendarConfig, getCurrentDay, updateCurrentDay, getStartDate, saveStartDate, getEraPin, saveEraPin } from '../data/worldState.js';
+import { getSettingContext, saveSettingContext, getSettingContextProfiles, saveSettingContextProfiles, createSettingContextProfile, setActiveSettingContextProfile, deleteSettingContextProfile, getWorldState, saveWorldState, getSeasonConfig, saveSeasonConfig, getCalendarConfig, saveCalendarConfig, getCurrentDay, updateCurrentDay, getStartDate, saveStartDate, getEraPin, saveEraPin } from '../data/worldState.js';
 import { getMoonConfig, saveMoonConfig, updateMoonConfig, getMoonPhenomenonOverrides, saveMoonPhenomenonOverrides, MOON_OVERRIDE_PHENOMENA } from '../data/moons.js';
-import { parseUserDate, parseDisplayDate, parseCurrentCalendarDate, daysBetweenCalendarDates, computeDeterministicDate, advanceCurrentCalendarDate, extractYearFromText, dateFromDayCount, dayOfYearFor, monthLengthsFor, gregorianWeekdayIndex, ordinalSuffix, formatYear, monthNamesFor, yearLengthFor } from '../lib/calendarMath.js';
+import { parseUserDate, parseDisplayDate, parseCurrentCalendarDate, daysBetweenCalendarDates, computeDeterministicDate, advanceCurrentCalendarDate, extractYearFromText, dateFromDayCount, dayOfYearFor, monthLengthsFor, gregorianWeekdayIndex, ordinalSuffix, formatYear, monthNamesFor, yearLengthFor, calendarMonthLayoutFor, calendarDateForBaseMonthDay, calendarMonthInfoForDate, isLunisolarCalendar } from '../lib/calendarMath.js';
 import { SPECIAL_DAY_CATEGORIES } from '../data/specialDays.js';
+import {
+    NAGER_HOLIDAY_TYPES,
+    ensureNagerHolidayCacheForCurrentWindow,
+    getNagerSubdivisionOptions,
+    getNagerCacheStatus,
+    isNagerDateAvailable
+} from '../data/nagerDate.js';
 import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG } from '../data/storage.js';
 import { runBatchScan } from '../llm/batchScan.js';
 import { getSecretsMeta, setSecretsMeta } from '../data/secretsMeta.js';
 import { rebaseElapsedStoryDays } from '../data/timeMigration.js';
+import { getWeatherProfilesState, saveWeatherProfilesState, getActiveWeatherProfile, setActiveWeatherProfile, deleteWeatherProfile, makeDefaultWeatherProfile, upsertWeatherProfile, profileSummary, WEATHER_EVENT_DEFS } from '../data/severeWeather.js';
+import { analyzeSettingContextToWeatherProfile } from '../llm/weatherProfile.js';
+import { getContextSnapshots, getContextSnapshot, saveContextSnapshot, deleteContextSnapshot, clearContextSnapshots } from '../data/contextSnapshots.js';
+import { dlog } from '../lib/debug.js';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
 
@@ -146,12 +153,22 @@ export function buildSettingsTab() {
             <div class="nwst-accordion-body" id="nwst-accordion-context">
                 <div class="nwst-card">
                     <div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">
-                        Describe your world's climate, geography, and setting. The day advancement LLM reads this when generating weather forecasts so it knows what kind of world it's operating in — real-world location, fantasy biome, or anything in between. <strong>This is saved per-chat</strong> — each roleplay can have a completely different setting.
+                        Save and switch between foundational setting/arc contexts for this chat — location, society, geography, supernatural rules, political frame, climate, or anything else NWST should treat as the current world baseline. Future scans, event generation, world conditions, and weather use the active profile. Switching profiles never rewrites stored state automatically; NWST asks whether you want to refresh setting-dependent presentation/state after an intentional switch. <strong>Profiles are saved per-chat and switched manually.</strong>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                        <select id="nwst-setting-contextProfile" style="flex:1;min-width:120px"></select>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-setting-newContextProfile">+ New</button>
+                    </div>
+                    <div class="nwst-btn-row" style="margin-bottom:8px">
+                        <button type="button" class="menu_button nwst-btn" id="nwst-setting-duplicateContextProfile">Duplicate</button>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-setting-renameContextProfile">Rename</button>
+                        <button type="button" class="menu_button nwst-btn-danger" id="nwst-setting-deleteContextProfile">Delete</button>
                     </div>
                     <textarea id="nwst-setting-context" rows="4" style="margin-bottom:8px"
                         placeholder="e.g. Feudal Japan, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
                     <div class="nwst-btn-row">
-                        <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save</button>
+                        <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save Active Profile</button>
+                        <button class="menu_button nwst-btn" id="nwst-setting-refreshContextState">Refresh Setting State…</button>
                     </div>
                     <!-- ── Starting date (deterministic date engine) ── -->
                     <div style="margin-top:14px;padding-top:12px;border-top:1px solid #333">
@@ -187,7 +204,7 @@ export function buildSettingsTab() {
                         <div class="nwst-setting-row">
                             <div>
                                 <div class="nwst-setting-label">Leap years</div>
-                                <div class="nwst-setting-sub">Adds a leap day (Feb 29th) in real-world leap years. Also applies to custom calendars that mirror the real structure (12 months with a 28-day second month); other shapes never leap.</div>
+                                <div class="nwst-setting-sub" id="nwst-leap-years-note">Adds a leap day (Feb 29th) in real-world leap years. Also applies to custom calendars that mirror the real structure (12 months with a 28-day second month); other shapes never leap.</div>
                             </div>
                             <label class="nwst-toggle">
                                 <input type="checkbox" id="nwst-setting-leapYears">
@@ -199,6 +216,65 @@ export function buildSettingsTab() {
                 </div>
             </div>
         </div>
+
+        <!-- ── Severe Weather (Experimental, per-chat) ───────── -->
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-severe-weather">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Severe Weather</span>
+                    <span class="nwst-experimental-badge">Experimental</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-severe-weather">
+                <div class="nwst-card">
+                    <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
+                        Deterministic severe-weather RNG weighted by the active profile's climate, terrain, characteristics, and current season. The RNG decides the system; the Day Advancement LLM only renders that decision into the 7-day forecast. <strong>Weather Profiles are saved per-chat and switched manually.</strong>
+                    </div>
+                    <div class="nwst-setting-row" style="margin-bottom:10px">
+                        <div><div class="nwst-setting-label">Enable Severe Weather</div><div class="nwst-setting-sub">Roll only on story-day advancement. Regenerating the forecast never rerolls weather.</div></div>
+                        <label class="nwst-toggle"><input type="checkbox" id="nwst-weather-enabled"><span class="nwst-slider"></span></label>
+                    </div>
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Active Weather Profile</div>
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                        <select id="nwst-weather-profile-select" style="flex:1;min-width:120px"></select>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-weather-new-profile">+ New</button>
+                    </div>
+                    <div class="nwst-btn-row" style="margin-bottom:10px">
+                        <button type="button" class="menu_button nwst-btn" id="nwst-weather-analyze-setting">Analyze Setting Context</button>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-weather-duplicate-profile">Duplicate</button>
+                        <button type="button" class="menu_button nwst-btn-danger" id="nwst-weather-delete-profile">Delete</button>
+                    </div>
+                    <div id="nwst-weather-profile-editor" style="display:none;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd);padding-top:10px">
+                        <div style="display:flex;gap:8px;margin-bottom:8px">
+                            <div style="flex:1"><div class="nwst-setting-label">Name</div><input id="nwst-weather-name" type="text"></div>
+                            <div style="width:135px"><div class="nwst-setting-label">Frequency</div><select id="nwst-weather-frequency"><option value="rare">Rare</option><option value="occasional">Occasional</option><option value="active">Active</option></select></div>
+                        </div>
+                        <div class="nwst-setting-label">Climate tags</div>
+                        <input id="nwst-weather-climate" type="text" placeholder="temperate, humid, subtropical" style="margin-bottom:8px">
+                        <div class="nwst-setting-label">Terrain tags</div>
+                        <input id="nwst-weather-terrain" type="text" placeholder="urban, mountainous, forested, coastal" style="margin-bottom:8px">
+                        <div class="nwst-setting-label">Characteristics</div>
+                        <input id="nwst-weather-characteristics" type="text" placeholder="harsh winters, humid summers, rainy season" style="margin-bottom:8px">
+                        <div class="nwst-setting-label">Notes</div>
+                        <textarea id="nwst-weather-notes" rows="2" placeholder="Weather-relevant notes for this region/profile"></textarea>
+                        <div class="nwst-btn-row" style="margin-top:8px"><button type="button" class="menu_button nwst-btn" id="nwst-weather-save-profile">Save Weather Profile</button></div>
+                    </div>
+                    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
+                        <div class="nwst-setting-row" style="margin-bottom:8px"><div><div class="nwst-setting-label">Affect 7-Day Forecast</div></div><label class="nwst-toggle"><input type="checkbox" id="nwst-weather-affect-forecast"><span class="nwst-slider"></span></label></div>
+                        <div class="nwst-setting-row"><div><div class="nwst-setting-label">Show current system on Home</div></div><label class="nwst-toggle"><input type="checkbox" id="nwst-weather-show-home"><span class="nwst-slider"></span></label></div>
+                    </div>
+                    <div id="nwst-weather-current-system" style="margin-top:10px;font-size:11px;color:#888"></div>
+                    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
+                        <div class="nwst-setting-label">Weather Overrides</div>
+                        <div class="nwst-setting-sub" style="margin-bottom:8px">Profile-specific manual events. Overrides can ignore climate/season rules because sometimes meteorology deserves to lose.</div>
+                        <div id="nwst-weather-overrides-list"></div>
+                        <div class="nwst-btn-row" style="margin-top:6px"><button type="button" class="menu_button nwst-btn" id="nwst-weather-add-override">+ Add Override</button><button type="button" class="menu_button nwst-btn" id="nwst-weather-clear-system">Clear Generated Weather</button></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
 
         <!-- ── Moon Cycles (Experimental) ─────────────────────── -->
         <div class="nwst-accordion-section">
@@ -333,6 +409,25 @@ export function buildSettingsTab() {
                         </label>
                     </div>
 
+                    <!-- Calendar system -->
+                    <div style="margin-bottom:12px;padding:10px;border:0.5px solid var(--SmartThemeBorderColor,#444);border-radius:6px">
+                        <div style="font-size:12px;color:#666;margin-bottom:5px">Calendar system</div>
+                        <select id="nwst-setting-calendarSystem" style="width:100%;margin-bottom:6px">
+                            <option value="standard">Standard / solar — fixed configured month lengths</option>
+                            <option value="lunisolar">East Asian lunisolar — dynamic 29/30-day months + intercalary months</option>
+                        </select>
+                        <div id="nwst-lunisolar-settings" style="display:none;margin-top:8px">
+                            <div style="font-size:11px;color:#888;line-height:1.45;margin-bottom:7px">
+                                Uses the 12 configured month names as base months. NWST supplies each year's 29/30-day layout and inserts an intercalary month when needed. This is a reusable East-Asian lunisolar engine, not a scholarly reconstruction of every historical calendar method.
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <div style="font-size:11px;color:#888;white-space:nowrap">Intercalary month label</div>
+                                <input type="text" id="nwst-setting-lunisolarLeapLabel" value="Intercalary {month}" placeholder="Intercalary {month}" style="flex:1;min-width:120px">
+                            </div>
+                            <div style="font-size:10px;color:#777;margin-top:3px">Use <b>{month}</b> where the base month name should appear.</div>
+                        </div>
+                    </div>
+
                     <!-- Number of months -->
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
                         <div style="font-size:12px;color:#666;white-space:nowrap">Number of months</div>
@@ -375,6 +470,81 @@ export function buildSettingsTab() {
                         <div id="nwst-special-days-list" style="margin-bottom:8px"></div>
                         <div class="nwst-btn-row" style="margin-bottom:4px">
                             <button type="button" class="menu_button nwst-btn" id="nwst-special-day-add" style="font-size:11px;padding:3px 9px">➕ Add special day</button>
+                        </div>
+                    </div>
+
+                    <!-- Nager.Date real-world holidays -->
+                    <div style="margin-top:14px;padding-top:10px;border-top:1px solid #333">
+                        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                            <span style="font-size:12px;color:#666;text-transform:uppercase;letter-spacing:0.5px">Real-world holidays (Nager.Date)</span>
+                        </div>
+                        <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">
+                            Optional real-world holiday data for Gregorian-compatible calendars, including custom calendars that only rename months or weekdays. Holiday data stays separate from Special Days and does not create Events. Raw results are cached once per country and year; filtered holiday context begins entering the prompt within the configured upcoming window (7 days by default).
+                        </div>
+
+                        <div class="nwst-setting-row" style="margin-bottom:10px">
+                            <div>
+                                <div class="nwst-setting-label">Enable Nager.Date holidays</div>
+                                <div class="nwst-setting-sub" id="nwst-nager-availability-note">Available for Gregorian-compatible calendars, including renamed month/weekday sets.</div>
+                            </div>
+                            <label class="nwst-toggle">
+                                <input type="checkbox" id="nwst-setting-nagerEnabled">
+                                <span class="nwst-slider"></span>
+                            </label>
+                        </div>
+
+                        <div id="nwst-nager-settings" style="display:none;padding:10px;border:0.5px solid var(--SmartThemeBorderColor,#444);border-radius:6px;margin-bottom:10px">
+                            <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-bottom:10px">
+                                <div>
+                                    <div class="nwst-setting-label" style="margin-bottom:4px">Country code</div>
+                                    <input type="text" id="nwst-setting-nagerCountry" maxlength="2" placeholder="e.g. US, JP, GB" style="width:100%;box-sizing:border-box;text-transform:uppercase">
+                                    <div class="nwst-setting-sub" style="margin-top:3px">ISO 3166-1 alpha-2 code.</div>
+                                </div>
+                                <div>
+                                    <div class="nwst-setting-label" style="margin-bottom:4px">Region / subdivision <span style="font-weight:normal;color:#888">(optional)</span></div>
+                                    <input type="text" id="nwst-setting-nagerSubdivision" list="nwst-nager-subdivision-options" placeholder="e.g. US-CA" style="width:100%;box-sizing:border-box;text-transform:uppercase">
+                                    <datalist id="nwst-nager-subdivision-options"></datalist>
+                                    <div class="nwst-setting-sub" style="margin-top:3px">Leave blank for nationwide holidays only. Cached regional codes are suggested after the first fetch.</div>
+                                </div>
+                            </div>
+
+                            <div class="nwst-setting-label" style="margin-bottom:5px">Holiday types</div>
+                            <div id="nwst-nager-types" style="display:flex;flex-wrap:wrap;gap:6px 12px;margin-bottom:10px">
+                                ${NAGER_HOLIDAY_TYPES.map(type => `
+                                    <label style="font-size:11px;display:flex;align-items:center;gap:4px">
+                                        <input type="checkbox" class="nwst-nager-type" value="${type}"> ${type}
+                                    </label>`).join('')}
+                            </div>
+
+                            <div class="nwst-setting-row" style="margin-bottom:8px">
+                                <div>
+                                    <div class="nwst-setting-label">Show holidays on calendar</div>
+                                    <div class="nwst-setting-sub">Shows matching holidays beneath the current date on the Home tab.</div>
+                                </div>
+                                <label class="nwst-toggle">
+                                    <input type="checkbox" id="nwst-setting-nagerShowCalendar">
+                                    <span class="nwst-slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="nwst-setting-row" style="margin-bottom:8px">
+                                <div>
+                                    <div class="nwst-setting-label">Include holidays in prompt context</div>
+                                    <div class="nwst-setting-sub">Injects only holidays that are today or close enough to matter.</div>
+                                </div>
+                                <label class="nwst-toggle">
+                                    <input type="checkbox" id="nwst-setting-nagerInjectPrompt">
+                                    <span class="nwst-slider"></span>
+                                </label>
+                            </div>
+
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                                <div style="font-size:12px;color:#666;white-space:nowrap">Upcoming holiday window</div>
+                                <input type="number" id="nwst-setting-nagerUpcomingDays" value="7" min="0" max="30" style="width:55px;text-align:center">
+                                <span style="font-size:11px;color:#888">days before the holiday</span>
+                            </div>
+
+                            <div id="nwst-nager-cache-status" class="nwst-setting-sub" style="line-height:1.4"></div>
                         </div>
                     </div>
 
@@ -477,6 +647,7 @@ export function buildSettingsTab() {
                 </div>
             </div>
         </div>
+
 
         <!-- ── Injection Settings ──────────────────────────────── -->
         <div class="nwst-accordion-section">
@@ -777,6 +948,15 @@ export function buildSettingsTab() {
                     <button class="menu_button nwst-btn" id="nwst-debug-run-sidecar" title="Run the secrets sidecar scene analyzer now (uses one API call)">🔬 Run sidecar now</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-consistency-scan" title="Deep scan: reads ALL visible chat messages against every secret and applies updates — characters who learned a secret are moved to Who Knows, revealed secrets are flagged for archive review, contradictions are noted. One API call; long chats mean a large prompt.">🩺 Consistency scan (visible)</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-backfill-anchors" title="Generate trigger anchors for secrets that don't have them yet (one Planning LLM call per secret)">🏷️ Generate missing anchors</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-assign-weather-profile" title="Use the Planning LLM to analyze the active Setting Context and create + activate a new Weather Profile for this chat.">🌦️ Assign Weather Profile</button>
+                </div>
+                <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                        <div class="nwst-setting-label" style="flex:1">Context/Profile Snapshots</div>
+                        <button type="button" class="menu_button nwst-btn" id="nwst-debug-clear-context-snapshots" style="font-size:10px;padding:2px 7px">Clear</button>
+                    </div>
+                    <div class="nwst-setting-sub" style="margin-bottom:8px">Manual Setting Context and Weather Profile undo history. Kept completely separate from Previous Day snapshots and never used by story-date rewind.</div>
+                    <div id="nwst-context-snapshot-list"></div>
                 </div>
                 <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
                     <div class="nwst-setting-label" style="margin-bottom:4px">Adjust Secret Priority</div>
@@ -814,6 +994,12 @@ export function buildSettingsTab() {
         <!-- Hidden file input for import -->
         <input type="file" id="nwst-import-file" accept=".json" style="display:none">
     `;
+
+    // Settings UI invariant: Severe Weather is a first-class experimental panel.
+    // If this ever fails, the loaded settings module is stale or the template was corrupted.
+    if (!pane.querySelector('[data-accordion="nwst-accordion-severe-weather"]')) {
+        console.error('[NWST Settings UI] Severe Weather panel failed to render. The loaded settings module may be stale.');
+    }
 
     // Wire accordion toggle behavior
     document.querySelectorAll('.nwst-accordion-header').forEach(header => {
@@ -945,6 +1131,11 @@ function populateCalendarConfigUI() {
 
     setCheckbox('nwst-setting-enableCalendarConfig', config.enabled);
 
+    const systemSelect = document.getElementById('nwst-setting-calendarSystem');
+    if (systemSelect) systemSelect.value = isLunisolarCalendar(config) ? 'lunisolar' : 'standard';
+    const leapLabelInput = document.getElementById('nwst-setting-lunisolarLeapLabel');
+    if (leapLabelInput) leapLabelInput.value = config.lunisolar?.leapMonthLabel || 'Intercalary {month}';
+
     const monthCountInput = document.getElementById('nwst-setting-monthCount');
     if (monthCountInput) {
         monthCountInput.value = config.months || 12;
@@ -958,9 +1149,149 @@ function populateCalendarConfigUI() {
 
     populateStartDateUI();
 
+    applyCalendarSystemUIState(config);
     renderCalendarMonthsList();
     renderCalendarDaysList();
     renderSpecialDaysList();
+    populateNagerDateUI();
+}
+
+function currentCalendarYearForConfig(config) {
+    const chatId = getChatId();
+    if (!chatId) return 1;
+    const day = getCurrentDay(chatId) || {};
+    const parsed = parseCurrentCalendarDate(
+        day.dateDisplay || '', day.dateSub || '', config,
+        getSetting('dateFormatDMY') === true
+    );
+    if (parsed?.year) return parsed.year;
+    const start = getStartDate(chatId);
+    return start?.year || extractYearFromText(day.dateSub || '') || extractYearFromText(day.dateDisplay || '') || 1;
+}
+
+function applyCalendarSystemUIState(config = getCalendarConfig(getChatId())) {
+    const lunisolar = isLunisolarCalendar(config);
+    const monthCountInput = document.getElementById('nwst-setting-monthCount');
+    if (monthCountInput) {
+        if (lunisolar) monthCountInput.value = 12;
+        monthCountInput.disabled = lunisolar;
+        monthCountInput.title = lunisolar ? 'Lunisolar calendars use 12 base months; intercalary months are inserted automatically.' : '';
+    }
+
+    const lunisolarWrap = document.getElementById('nwst-lunisolar-settings');
+    if (lunisolarWrap) lunisolarWrap.style.display = lunisolar ? 'block' : 'none';
+
+    const leapToggle = document.getElementById('nwst-setting-leapYears');
+    if (leapToggle) leapToggle.disabled = lunisolar;
+    const leapNote = document.getElementById('nwst-leap-years-note');
+    if (leapNote) leapNote.textContent = lunisolar
+        ? 'Not used in lunisolar mode — year-specific 29/30-day months and intercalary months handle calendar alignment instead.'
+        : 'Adds a leap day (Feb 29th) in real-world leap years. Also applies to custom calendars that mirror the real structure (12 months with a 28-day second month); other shapes never leap.';
+}
+
+function translateDateAcrossCalendarSystems(date, oldConfig, newConfig) {
+    if (!date || !Number.isInteger(date.year) || !Number.isInteger(date.month) || !Number.isInteger(date.day)) return null;
+    const oldInfo = isLunisolarCalendar(oldConfig) ? calendarMonthInfoForDate(date, oldConfig) : null;
+    const baseMonth = oldInfo?.baseMonth || date.month;
+    if (isLunisolarCalendar(newConfig)) {
+        return calendarDateForBaseMonthDay(date.year, baseMonth, date.day, newConfig, false);
+    }
+    const lengths = monthLengthsFor(newConfig, date.year);
+    if (baseMonth < 1 || baseMonth > lengths.length || date.day < 1 || date.day > lengths[baseMonth - 1]) return null;
+    return { year: date.year, month: baseMonth, day: date.day };
+}
+
+function populateNagerDateUI() {
+    const chatId = getChatId();
+    if (!chatId) return;
+
+    const config = getCalendarConfig(chatId);
+    const nager = config.nagerDate || {};
+    const available = isNagerDateAvailable(config);
+    const enabled = nager.enabled === true;
+
+    const toggle = document.getElementById('nwst-setting-nagerEnabled');
+    if (toggle) {
+        toggle.checked = enabled;
+        toggle.disabled = !available;
+    }
+
+    const note = document.getElementById('nwst-nager-availability-note');
+    if (note) {
+        note.textContent = available
+            ? (config.enabled
+                ? 'Available — this custom calendar keeps Gregorian month lengths and only changes display names.'
+                : 'Available for the default real-world Gregorian calendar.')
+            : (isLunisolarCalendar(config)
+                ? 'Unavailable while Calendar System is Lunisolar; Nager.Date public holidays use Gregorian dates.'
+                : 'Unavailable because this custom calendar changes the Gregorian month/day structure.');
+    }
+
+    const settingsWrap = document.getElementById('nwst-nager-settings');
+    if (settingsWrap) settingsWrap.style.display = (available && enabled) ? 'block' : 'none';
+
+    const country = document.getElementById('nwst-setting-nagerCountry');
+    if (country) country.value = nager.countryCode || '';
+    const subdivision = document.getElementById('nwst-setting-nagerSubdivision');
+    if (subdivision) subdivision.value = nager.subdivisionCode || '';
+    setCheckbox('nwst-setting-nagerShowCalendar', nager.showOnCalendar !== false);
+    setCheckbox('nwst-setting-nagerInjectPrompt', nager.includeInPrompt !== false);
+
+    const upcoming = document.getElementById('nwst-setting-nagerUpcomingDays');
+    if (upcoming) upcoming.value = Number.isInteger(nager.upcomingDays) ? nager.upcomingDays : 7;
+
+    const selectedTypes = new Set(Array.isArray(nager.holidayTypes) && nager.holidayTypes.length ? nager.holidayTypes : ['Public']);
+    document.querySelectorAll('#nwst-nager-types .nwst-nager-type').forEach(cb => {
+        cb.checked = selectedTypes.has(cb.value);
+    });
+
+    const subdivisionList = document.getElementById('nwst-nager-subdivision-options');
+    if (subdivisionList) {
+        subdivisionList.innerHTML = getNagerSubdivisionOptions(chatId)
+            .map(code => `<option value="${code}"></option>`)
+            .join('');
+    }
+
+    const status = document.getElementById('nwst-nager-cache-status');
+    if (status) {
+        if (!available) {
+            status.textContent = isLunisolarCalendar(config)
+                ? 'Nager.Date is paused in Lunisolar mode because the public API uses Gregorian dates.'
+                : 'Nager.Date is paused because this calendar is not structurally Gregorian-compatible.';
+        } else if (!enabled) {
+            status.textContent = 'Holiday integration is off.';
+        } else if (!nager.countryCode) {
+            status.textContent = 'Choose a country code, then save Calendar Config to fetch holidays.';
+        } else {
+            const cache = getNagerCacheStatus(chatId);
+            if (!cache.currentDate) {
+                status.textContent = 'Holiday settings saved. NWST will fetch once the Current Day has a parseable real-world date and year.';
+            } else if (cache.currentYearCached) {
+                status.textContent = `Holiday data cached for ${nager.countryCode} ${cache.currentDate.year}.`;
+            } else {
+                status.textContent = `No cached ${nager.countryCode} holiday data for ${cache.currentDate.year} yet.`;
+            }
+        }
+    }
+}
+
+function readNagerDateConfigFromUI(existing) {
+    const countryCode = document.getElementById('nwst-setting-nagerCountry')?.value?.trim().toUpperCase() || '';
+    const subdivisionCode = document.getElementById('nwst-setting-nagerSubdivision')?.value?.trim().toUpperCase() || '';
+    const holidayTypes = Array.from(document.querySelectorAll('#nwst-nager-types .nwst-nager-type:checked')).map(cb => cb.value);
+    const upcomingRaw = parseInt(document.getElementById('nwst-setting-nagerUpcomingDays')?.value, 10);
+
+    return {
+        ...(existing || {}),
+        enabled: document.getElementById('nwst-setting-nagerEnabled')?.checked === true,
+        countryCode,
+        subdivisionCode,
+        holidayTypes,
+        showOnCalendar: document.getElementById('nwst-setting-nagerShowCalendar')?.checked !== false,
+        includeInPrompt: document.getElementById('nwst-setting-nagerInjectPrompt')?.checked !== false,
+        upcomingDays: Number.isInteger(upcomingRaw) ? Math.max(0, Math.min(30, upcomingRaw)) : 7,
+        cache: existing?.cache && typeof existing.cache === 'object' ? existing.cache : {}
+    };
 }
 
 /**
@@ -993,7 +1324,7 @@ function populateStartDateUI() {
     }
 
     const cfg = getCalendarConfig(chatId);
-    const names = monthNamesFor(cfg);
+    const names = monthNamesFor(cfg, anchor.year);
     const monthName = names[Math.min(anchor.month - 1, names.length - 1)] || `Month ${anchor.month}`;
     input.value = `${monthName} ${anchor.day}${ordinalSuffix(anchor.day)}, ${formatYear(anchor.year)}`;
 
@@ -1022,24 +1353,37 @@ function renderCalendarMonthsList() {
     const template = document.getElementById('nwst-calendar-month-tpl');
     if (!template) return;
 
+    const lunisolar = isLunisolarCalendar(config);
+    const baseMonthCount = lunisolar ? 12 : config.months;
+    const year = currentCalendarYearForConfig(config);
+    const layout = lunisolar ? calendarMonthLayoutFor(config, year) : [];
+    const regularLengths = new Map(
+        layout.filter(entry => !entry.isLeapMonth).map(entry => [entry.baseMonth, entry.days])
+    );
+
     container.innerHTML = '';
 
-    for (let i = 0; i < config.months; i++) {
+    for (let i = 0; i < baseMonthCount; i++) {
         const clone = template.content.cloneNode(true);
 
         const indexSpan = clone.querySelector('.nwst-month-index');
         const nameInput = clone.querySelector('.nwst-month-name-input');
         const daysInput = clone.querySelector('.nwst-month-days-input');
+        const daysLabel = clone.querySelector('.nwst-month-days-label');
 
         indexSpan.textContent = `${i + 1}.`;
         nameInput.value = config.monthNames[i] || `Month ${i + 1}`;
-        daysInput.value = config.monthDays[i] || 30;
+        daysInput.value = lunisolar ? (regularLengths.get(i + 1) || 29) : (config.monthDays[i] || 30);
+        daysInput.disabled = lunisolar;
+        daysInput.title = lunisolar ? `Automatically calculated for calendar year ${formatYear(year)}.` : '';
+        if (daysLabel && lunisolar) daysLabel.textContent = 'days (auto)';
 
-        // Wire live updates to store
+        // Keep display names live-saved as before. Fixed day counts are only
+        // editable in standard mode; lunisolar day lengths come from the year layout.
         const updateMonth = async () => {
             const cfg = getCalendarConfig(chatId);
             cfg.monthNames[i] = nameInput.value.trim() || `Month ${i + 1}`;
-            cfg.monthDays[i] = parseInt(daysInput.value, 10) || 30;
+            if (!isLunisolarCalendar(cfg)) cfg.monthDays[i] = parseInt(daysInput.value, 10) || 30;
             await saveCalendarConfig(chatId, cfg);
             validateCalendarTotal();
         };
@@ -1064,6 +1408,17 @@ function validateCalendarTotal() {
 
     const calendarConfig = getCalendarConfig(chatId);
     const seasonConfig = getSeasonConfig(chatId);
+
+    if (isLunisolarCalendar(calendarConfig)) {
+        const year = currentCalendarYearForConfig(calendarConfig);
+        const layout = calendarMonthLayoutFor(calendarConfig, year);
+        const totalDays = layout.reduce((sum, entry) => sum + entry.days, 0);
+        const leapEntry = layout.find(entry => entry.isLeapMonth);
+        const leapText = leapEntry ? ` · intercalary ${leapEntry.name}` : '';
+        validationEl.innerHTML = `<span class="nwst-validation-ok">✓ Lunisolar ${formatYear(year)}: ${layout.length} months · ${totalDays} days${leapText}</span>`
+            + `<div style="font-size:10px;color:#888;margin-top:3px">Lunisolar year length varies, so NWST does not require it to match the Season configuration year length.</div>`;
+        return;
+    }
 
     const totalDays = calendarConfig.monthDays.slice(0, calendarConfig.months).reduce((sum, d) => sum + (d || 0), 0);
     const yearLength = seasonConfig.yearLength || 365;
@@ -1435,6 +1790,151 @@ function escapeHtmlLocal(str) {
     return d.innerHTML;
 }
 
+
+function splitTagInput(value) {
+    return [...new Set(String(value || '').split(',').map(v => v.trim()).filter(Boolean))];
+}
+
+function renderSettingContextProfileUI() {
+    const chatId = getChatId();
+    const select = document.getElementById('nwst-setting-contextProfile');
+    const textarea = document.getElementById('nwst-setting-context');
+    if (!chatId || !select) return;
+    const lib = getSettingContextProfiles(chatId);
+    select.innerHTML = lib.profiles.length
+        ? lib.profiles.map(p => `<option value="${escapeHtmlLocal(p.id)}">${escapeHtmlLocal(p.name)}</option>`).join('')
+        : '<option value="">No saved profiles</option>';
+    select.value = lib.activeProfileId || '';
+    const active = lib.profiles.find(p => p.id === lib.activeProfileId);
+    if (textarea) textarea.value = active?.content || getSettingContext(chatId) || '';
+}
+
+function weatherEventOptions(selected = '') {
+    const opts = Object.entries(WEATHER_EVENT_DEFS).map(([id, def]) =>
+        `<option value="${id}" ${id === selected ? 'selected' : ''}>${escapeHtmlLocal(def.icon + ' ' + def.label)}</option>`
+    );
+    opts.push(`<option value="custom" ${selected === 'custom' ? 'selected' : ''}>⚠️ Custom</option>`);
+    return opts.join('');
+}
+
+function renderWeatherOverrides(profile) {
+    const container = document.getElementById('nwst-weather-overrides-list');
+    if (!container) return;
+    if (!profile) {
+        container.innerHTML = '<div class="nwst-setting-sub">Select or create a Weather Profile first.</div>';
+        return;
+    }
+    const todayElapsed = getCurrentDay(getChatId())?.elapsedStoryDays || 0;
+    const overrides = Array.isArray(profile.overrides) ? profile.overrides : [];
+    if (overrides.length === 0) {
+        container.innerHTML = '<div class="nwst-setting-sub">No overrides for this profile.</div>';
+        return;
+    }
+    container.innerHTML = overrides.map((o, idx) => {
+        const startsIn = Math.max(0, Number(o.startElapsedDay ?? todayElapsed) - todayElapsed);
+        const durationDays = Math.max(1, Number(o.durationDays || Math.ceil((o.durationHours || 24) / 24)));
+        return `<div class="nwst-card nwst-weather-override-row" data-index="${idx}" data-start-elapsed="${Number(o.startElapsedDay ?? todayElapsed)}" style="margin-bottom:6px;padding:8px">
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+                <select class="nwst-weather-ov-type" style="flex:1">${weatherEventOptions(o.type || 'severe_thunderstorm')}</select>
+                <select class="nwst-weather-ov-severity" style="width:100px">
+                    <option value="moderate" ${o.severity==='moderate'?'selected':''}>Moderate</option>
+                    <option value="severe" ${o.severity==='severe'?'selected':''}>Severe</option>
+                    <option value="extreme" ${o.severity==='extreme'?'selected':''}>Extreme</option>
+                </select>
+                <button type="button" class="menu_button nwst-btn-danger nwst-weather-ov-remove" style="padding:2px 7px">×</button>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;font-size:11px">
+                <span>Starts in</span><input class="nwst-weather-ov-start" type="number" min="0" value="${startsIn}" style="width:52px;text-align:center"><span>days</span>
+                <span>Duration</span><input class="nwst-weather-ov-duration" type="number" min="1" max="30" value="${durationDays}" style="width:52px;text-align:center"><span>days</span>
+                <select class="nwst-weather-ov-time" style="width:105px"><option ${o.timeOfDay==='morning'?'selected':''}>morning</option><option ${o.timeOfDay==='afternoon'?'selected':''}>afternoon</option><option ${o.timeOfDay==='evening'?'selected':''}>evening</option><option ${o.timeOfDay==='overnight'?'selected':''}>overnight</option><option ${!o.timeOfDay||o.timeOfDay==='all day'?'selected':''}>all day</option></select>
+            </div>
+            <input class="nwst-weather-ov-name" type="text" value="${escapeHtmlLocal(o.customName || '')}" placeholder="Custom name (optional)" style="margin-bottom:5px">
+            <textarea class="nwst-weather-ov-desc" rows="2" placeholder="Optional hard-constraint notes">${escapeHtmlLocal(o.description || '')}</textarea>
+        </div>`;
+    }).join('');
+
+    container.querySelectorAll('.nwst-weather-ov-remove').forEach(btn => {
+        btn.onclick = async () => {
+            const row = btn.closest('.nwst-weather-override-row');
+            const idx = Number(row?.dataset?.index);
+            const state = getWeatherProfilesState(getChatId());
+            const active = state.profiles.find(p => p.id === state.activeProfileId);
+            if (!active || !Number.isInteger(idx)) return;
+            active.overrides.splice(idx, 1);
+            await saveWeatherProfilesState(getChatId(), state);
+            renderWeatherProfileUI();
+        };
+    });
+}
+
+async function collectWeatherOverridesIntoState(state) {
+    const active = state.profiles.find(p => p.id === state.activeProfileId);
+    if (!active) return;
+    const todayElapsed = getCurrentDay(getChatId())?.elapsedStoryDays || 0;
+    const rows = [...document.querySelectorAll('.nwst-weather-override-row')];
+    active.overrides = rows.map((row, idx) => {
+        const type = row.querySelector('.nwst-weather-ov-type')?.value || 'severe_thunderstorm';
+        const startsIn = Math.max(0, parseInt(row.querySelector('.nwst-weather-ov-start')?.value || '0', 10) || 0);
+        const durationDays = Math.max(1, parseInt(row.querySelector('.nwst-weather-ov-duration')?.value || '1', 10) || 1);
+        const originalStart = Number(row.dataset.startElapsed);
+        const startElapsedDay = Number.isFinite(originalStart) && originalStart <= todayElapsed && startsIn === 0
+            ? originalStart
+            : todayElapsed + startsIn;
+        return {
+            id: active.overrides?.[idx]?.id || `weather_override_${Date.now()}_${idx}`,
+            enabled: true,
+            type,
+            severity: row.querySelector('.nwst-weather-ov-severity')?.value || 'severe',
+            startElapsedDay,
+            durationDays,
+            durationHours: durationDays * 24,
+            recoveryDays: 0,
+            timeOfDay: row.querySelector('.nwst-weather-ov-time')?.value || 'all day',
+            customName: row.querySelector('.nwst-weather-ov-name')?.value?.trim() || '',
+            description: row.querySelector('.nwst-weather-ov-desc')?.value?.trim() || ''
+        };
+    });
+}
+
+function renderWeatherProfileUI() {
+    const chatId = getChatId();
+    if (!chatId) return;
+    const state = getWeatherProfilesState(chatId);
+    const select = document.getElementById('nwst-weather-profile-select');
+    const editor = document.getElementById('nwst-weather-profile-editor');
+    if (select) {
+        select.innerHTML = state.profiles.length
+            ? state.profiles.map(p => `<option value="${escapeHtmlLocal(p.id)}">${escapeHtmlLocal(p.name)}</option>`).join('')
+            : '<option value="">No Weather Profiles</option>';
+        select.value = state.activeProfileId || '';
+    }
+    const enabled = document.getElementById('nwst-weather-enabled');
+    const affect = document.getElementById('nwst-weather-affect-forecast');
+    const showHome = document.getElementById('nwst-weather-show-home');
+    if (enabled) enabled.checked = state.enabled === true;
+    if (affect) affect.checked = state.affectForecast !== false;
+    if (showHome) showHome.checked = state.showOnHome !== false;
+
+    const p = state.profiles.find(x => x.id === state.activeProfileId) || null;
+    if (editor) editor.style.display = p ? 'block' : 'none';
+    if (p) {
+        const byId = id => document.getElementById(id);
+        if (byId('nwst-weather-name')) byId('nwst-weather-name').value = p.name || '';
+        if (byId('nwst-weather-frequency')) byId('nwst-weather-frequency').value = p.frequency || 'occasional';
+        if (byId('nwst-weather-climate')) byId('nwst-weather-climate').value = (p.climate || []).join(', ');
+        if (byId('nwst-weather-terrain')) byId('nwst-weather-terrain').value = (p.terrain || []).join(', ');
+        if (byId('nwst-weather-characteristics')) byId('nwst-weather-characteristics').value = (p.characteristics || []).join(', ');
+        if (byId('nwst-weather-notes')) byId('nwst-weather-notes').value = p.notes || '';
+    }
+    const status = document.getElementById('nwst-weather-current-system');
+    if (status) {
+        if (!p) status.textContent = 'No active Weather Profile.';
+        else if (!p.activeSystem) status.textContent = `Profile: ${p.name} — ${profileSummary(p) || 'no climate/terrain tags yet'} · no severe weather active.`;
+        else status.textContent = `Profile: ${p.name} · ${p.activeSystem.icon || '⚠️'} ${p.activeSystem.severity} ${p.activeSystem.label}`;
+    }
+    renderWeatherOverrides(p);
+}
+
 function populateSettingsUI() {
     // Connection profile dropdowns
     populateConnectionProfileDropdowns();
@@ -1467,10 +1967,10 @@ function populateSettingsUI() {
     renderMoonsList();
     renderMoonOverridesList();
 
-    // Setting context (per-chat — load from storage)
-    const chatId = getChatId();
-    const contextTextarea = document.getElementById('nwst-setting-context');
-    if (contextTextarea) contextTextarea.value = getSettingContext(chatId);
+    // Setting context profiles + Severe Weather profiles (both per-chat)
+    renderSettingContextProfileUI();
+    renderWeatherProfileUI();
+    renderContextSnapshotsList();
 
     // Injection toggles
     const inj = getInjectionSettings();
@@ -1830,6 +2330,416 @@ function renderNoThinkRows() {
     }
 }
 
+
+function cloneForContextSnapshot(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function isActiveSettingsChat(chatId) {
+    return Boolean(chatId) && getChatId() === chatId;
+}
+
+function clearSettingRefreshPopupState() {
+    delete window._nwstRefreshSettingEnvironment;
+    delete window._nwstRefreshSettingConditions;
+    delete window._nwstRefreshSettingWorldEvents;
+}
+
+function normalizedSettingLibraryForSnapshot(library) {
+    return {
+        activeProfileId: library?.activeProfileId || null,
+        profiles: Array.isArray(library?.profiles) ? cloneForContextSnapshot(library.profiles) : []
+    };
+}
+
+function activeSettingName(library) {
+    return library?.profiles?.find(p => p.id === library.activeProfileId)?.name || 'None';
+}
+
+function activeWeatherName(state) {
+    return state?.profiles?.find(p => p.id === state.activeProfileId)?.name || 'None';
+}
+
+async function recordSettingProfileChangeSnapshot(beforeLibrary, afterLibrary, action = 'Setting Context') {
+    const beforeId = beforeLibrary?.activeProfileId || null;
+    const afterId = afterLibrary?.activeProfileId || null;
+    if (beforeId === afterId) return null;
+    const beforeName = activeSettingName(beforeLibrary);
+    const afterName = activeSettingName(afterLibrary);
+    const snap = await saveContextSnapshot(getChatId(), {
+        type: 'setting_profile_change',
+        label: `${action}: ${beforeName} → ${afterName}`,
+        details: 'Selection/profile-library change only; no world state was regenerated.',
+        payload: { settingContextProfilesSnapshot: normalizedSettingLibraryForSnapshot(beforeLibrary) }
+    });
+    renderContextSnapshotsList();
+    return snap;
+}
+
+async function recordWeatherProfileChangeSnapshot(beforeState, afterState, action = 'Weather Profile') {
+    const beforeId = beforeState?.activeProfileId || null;
+    const afterId = afterState?.activeProfileId || null;
+    if (beforeId === afterId) return null;
+    const beforeName = activeWeatherName(beforeState);
+    const afterName = activeWeatherName(afterState);
+    const snap = await saveContextSnapshot(getChatId(), {
+        type: 'weather_profile_change',
+        label: `${action}: ${beforeName} → ${afterName}`,
+        details: 'Weather Profile selection/library change only; no story-date snapshot was created.',
+        payload: { weatherProfilesSnapshot: cloneForContextSnapshot(beforeState) }
+    });
+    renderContextSnapshotsList();
+    return snap;
+}
+
+async function capturePreSettingRefreshSnapshot(options = {}) {
+    const chatId = options.expectedChatId || getChatId();
+    if (!isActiveSettingsChat(chatId)) return null;
+
+    const refreshEnvironment = options.refreshEnvironment === true;
+    const refreshConditions = options.refreshConditions === true;
+    const replaceWorldEvents = options.replaceWorldEvents === true;
+    if (!refreshEnvironment && !refreshConditions && !replaceWorldEvents) return null;
+
+    const currentSettingLibrary = getSettingContextProfiles(chatId);
+    const payload = {
+        // For an immediate profile-switch refresh, restore all the way to the
+        // pre-switch library. Manual refreshes restore the currently selected profile.
+        settingContextProfilesSnapshot: normalizedSettingLibraryForSnapshot(
+            options.previousSettingLibrary || currentSettingLibrary
+        ),
+        weatherProfilesSnapshot: cloneForContextSnapshot(getWeatherProfilesState(chatId))
+    };
+
+    const ws = getWorldState(chatId);
+    if (refreshEnvironment) {
+        payload.environmentSnapshot = {
+            currentDay: {
+                season: ws?.currentDay?.season || '',
+                weatherToday: ws?.currentDay?.weatherToday || '',
+                flora: ws?.currentDay?.flora || '',
+                fauna: ws?.currentDay?.fauna || '',
+                spiritualClimate: ws?.currentDay?.spiritualClimate || ''
+            },
+            forecast: cloneForContextSnapshot(ws?.forecast || [])
+        };
+    }
+    if (refreshConditions) {
+        payload.conditionsSnapshot = cloneForContextSnapshot(ws?.conditions || {});
+    }
+    if (replaceWorldEvents) {
+        const eventsModule = await import('../data/events.js');
+        if (!isActiveSettingsChat(chatId)) return null;
+        payload.eventsSnapshot = cloneForContextSnapshot(eventsModule.getAllEvents(chatId) || []);
+        const ctx = SillyTavern.getContext();
+        payload.pendingEventsSnapshot = cloneForContextSnapshot(
+            Array.isArray(ctx.chatMetadata['nwst:pendingEvents']) ? ctx.chatMetadata['nwst:pendingEvents'] : []
+        );
+    }
+
+    const activeSetting = currentSettingLibrary.profiles.find(p => p.id === currentSettingLibrary.activeProfileId);
+    const transition = options.changeLabel || activeSetting?.name || 'Current Setting';
+    const selected = [
+        refreshEnvironment ? 'environment/forecast' : null,
+        refreshConditions ? 'world conditions' : null,
+        replaceWorldEvents ? 'generated world events' : null
+    ].filter(Boolean).join(', ');
+
+    if (!isActiveSettingsChat(chatId)) return null;
+    const snap = await saveContextSnapshot(chatId, {
+        type: 'setting_refresh',
+        label: `Before Setting Refresh — ${transition}`,
+        details: `Captured before regenerating: ${selected}.`,
+        refreshOptions: { refreshEnvironment, refreshConditions, replaceWorldEvents },
+        payload
+    });
+    renderContextSnapshotsList();
+    return snap;
+}
+
+async function restoreContextProfileSnapshot(snapshotId) {
+    const chatId = getChatId();
+    const snapshot = getContextSnapshot(chatId, snapshotId);
+    if (!snapshot) {
+        nwstToast('Context/Profile snapshot no longer exists.', 'warning');
+        return;
+    }
+
+    const ok = await SillyTavern.getContext().callGenericPopup(
+        `Restore <strong>${escapeHtmlLocal(snapshot.label)}</strong>?<br><br>This only restores the data captured by this Context/Profile snapshot. It does not invoke Previous Day or change the story date unless that data was explicitly part of the snapshot.`,
+        SillyTavern.getContext().POPUP_TYPE.CONFIRM,
+        ''
+    );
+    if (!ok) return;
+    if (!isActiveSettingsChat(chatId)) {
+        console.warn('[NWST ContextSnapshots] Restore cancelled because the active chat changed while the confirmation was open.');
+        return;
+    }
+
+    const payload = snapshot.payload || {};
+    try {
+        if (payload.settingContextProfilesSnapshot) {
+            await saveSettingContextProfiles(chatId, cloneForContextSnapshot(payload.settingContextProfilesSnapshot));
+        }
+        if (payload.weatherProfilesSnapshot) {
+            await saveWeatherProfilesState(chatId, cloneForContextSnapshot(payload.weatherProfilesSnapshot));
+        }
+
+        if (payload.environmentSnapshot || payload.conditionsSnapshot) {
+            const ws = getWorldState(chatId);
+            if (payload.environmentSnapshot) {
+                ws.currentDay = {
+                    ...ws.currentDay,
+                    ...cloneForContextSnapshot(payload.environmentSnapshot.currentDay || {})
+                };
+                ws.forecast = cloneForContextSnapshot(payload.environmentSnapshot.forecast || []);
+            }
+            if (payload.conditionsSnapshot) {
+                ws.conditions = cloneForContextSnapshot(payload.conditionsSnapshot);
+            }
+            await saveWorldState(chatId, ws);
+        }
+
+        if (payload.eventsSnapshot) {
+            const eventsModule = await import('../data/events.js');
+            if (!isActiveSettingsChat(chatId)) return;
+            await eventsModule.saveAllEvents(chatId, cloneForContextSnapshot(payload.eventsSnapshot));
+        }
+        if (payload.pendingEventsSnapshot) {
+            if (!isActiveSettingsChat(chatId)) return;
+            const ctx = SillyTavern.getContext();
+            ctx.chatMetadata['nwst:pendingEvents'] = cloneForContextSnapshot(payload.pendingEventsSnapshot);
+            await ctx.saveMetadata();
+        }
+
+        renderSettingContextProfileUI();
+        renderWeatherProfileUI();
+        renderContextSnapshotsList();
+        if (typeof window?.nwstRefreshTabs === 'function') {
+            window.nwstRefreshTabs('home', 'world', 'events', 'notebook');
+        }
+        nwstToast(`Restored Context/Profile snapshot: ${snapshot.label}`, 'success');
+    } catch (err) {
+        console.error('[NWST ContextSnapshots] Restore failed:', err);
+        nwstToast(`Context/Profile restore failed: ${err.message}`, 'error');
+    }
+}
+
+function renderContextSnapshotsList() {
+    const container = document.getElementById('nwst-context-snapshot-list');
+    if (!container) return;
+    const list = getContextSnapshots(getChatId());
+    if (!list.length) {
+        container.innerHTML = '<div style="font-size:11px;color:#888;padding:4px 0">No Context/Profile snapshots yet.</div>';
+        return;
+    }
+
+    container.innerHTML = list.map(snapshot => {
+        const when = snapshot.createdAt ? new Date(snapshot.createdAt).toLocaleString() : 'Unknown time';
+        return `<div class="nwst-context-snapshot-row" data-snapshot-id="${escapeHtmlLocal(snapshot.id)}" style="padding:7px 0;border-bottom:0.5px solid var(--SmartThemeBorderColor,#444)">
+            <div style="font-size:11px;font-weight:600;color:var(--SmartThemeBodyColor,#ddd)">${escapeHtmlLocal(snapshot.label)}</div>
+            <div style="font-size:10px;color:#888;margin:2px 0 5px">${escapeHtmlLocal(when)}${snapshot.details ? ` · ${escapeHtmlLocal(snapshot.details)}` : ''}</div>
+            <div style="display:flex;gap:6px">
+                <button type="button" class="menu_button nwst-btn nwst-context-snapshot-restore" style="font-size:10px;padding:2px 7px">Restore</button>
+                <button type="button" class="menu_button nwst-btn-danger nwst-context-snapshot-delete" style="font-size:10px;padding:2px 7px">Delete</button>
+            </div>
+        </div>`;
+    }).join('');
+
+    container.querySelectorAll('.nwst-context-snapshot-restore').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.closest('.nwst-context-snapshot-row')?.dataset?.snapshotId;
+            if (id) await restoreContextProfileSnapshot(id);
+        });
+    });
+    container.querySelectorAll('.nwst-context-snapshot-delete').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.closest('.nwst-context-snapshot-row')?.dataset?.snapshotId;
+            if (!id) return;
+            await deleteContextSnapshot(getChatId(), id);
+            renderContextSnapshotsList();
+        });
+    });
+}
+
+
+async function refreshSettingDependentState(options = {}) {
+    const chatId = options.expectedChatId || getChatId();
+    if (!isActiveSettingsChat(chatId)) return false;
+
+    const refreshEnvironment = options.refreshEnvironment === true;
+    const refreshConditions = options.refreshConditions === true;
+    const replaceWorldEvents = options.replaceWorldEvents === true;
+
+    if (!refreshEnvironment && !refreshConditions && !replaceWorldEvents) {
+        nwstToast('No setting-dependent refresh items were selected.', 'info');
+        return;
+    }
+
+    nwstToast('Refreshing selected setting-dependent NWST state...', 'info');
+
+    try {
+        // Forecast + Current Day environment are refreshed first. The special
+        // setting-change synthesis intentionally ignores old World Conditions
+        // and old events so stale location data cannot bleed into the new scene.
+        if (refreshEnvironment) {
+            const { regenerateForecastOnly } = await import('../llm/dayAdvancement.js');
+            const { synthesizeCurrentDay } = await import('../llm/currentDaySynth.js');
+            if (!isActiveSettingsChat(chatId)) return false;
+            const forecastOk = await regenerateForecastOnly();
+            if (!forecastOk || !isActiveSettingsChat(chatId)) return false;
+            await synthesizeCurrentDay(chatId, undefined, { ignoreConditions: true, ignoreEvents: true });
+            if (!isActiveSettingsChat(chatId)) return false;
+        }
+
+        if (refreshConditions) {
+            const { regenerateAllWorldConditionsForSettingChange } = await import('./worldState.js');
+            if (!isActiveSettingsChat(chatId)) return false;
+            const conditionsOk = await regenerateAllWorldConditionsForSettingChange(chatId);
+            if (!conditionsOk || !isActiveSettingsChat(chatId)) return false;
+        }
+
+        if (replaceWorldEvents) {
+            const eventsModule = await import('../data/events.js');
+            if (!isActiveSettingsChat(chatId)) return false;
+            const allEvents = eventsModule.getAllEvents(chatId) || [];
+            const keptEvents = allEvents.filter(event => {
+                const active = event?.status === 'pending' || event?.status === 'inprogress';
+                const generatedWorld = event?.isNPC === false && event?.origin === 'generated';
+                const specialDay = Boolean(event?.sourceSpecialDayId) || event?.origin === 'special_day';
+                return !(active && generatedWorld && !specialDay);
+            });
+            const removedCount = allEvents.length - keptEvents.length;
+
+            // Temporarily hide stale generated-world proposals so they cannot
+            // suppress replacement ideas as duplicates. If generation fails or
+            // produces nothing, restore them and keep the active old events too.
+            if (!isActiveSettingsChat(chatId)) return false;
+            const ctx = SillyTavern.getContext();
+            const pendingBefore = Array.isArray(ctx.chatMetadata['nwst:pendingEvents'])
+                ? [...ctx.chatMetadata['nwst:pendingEvents']]
+                : [];
+            const keptPending = pendingBefore.filter(event => !(event?.isNPC === false && event?.origin === 'generated'));
+            if (keptPending.length !== pendingBefore.length) {
+                ctx.chatMetadata['nwst:pendingEvents'] = keptPending;
+                await ctx.saveMetadata();
+            }
+
+            const { regenerateAllWorldEvents } = await import('../llm/eventGen.js');
+            let proposed = 0;
+            try {
+                proposed = await regenerateAllWorldEvents({ settingRefresh: true });
+                if (!isActiveSettingsChat(chatId)) return false;
+            } catch (generationErr) {
+                // The old generated proposals were hidden only to keep stale-setting
+                // duplicates out of the replacement prompt. Never lose them on error.
+                if (keptPending.length !== pendingBefore.length) {
+                    ctx.chatMetadata['nwst:pendingEvents'] = pendingBefore;
+                    await ctx.saveMetadata();
+                }
+                throw generationErr;
+            }
+            if (proposed > 0) {
+                if (removedCount > 0) await eventsModule.saveAllEvents(chatId, keptEvents);
+                nwstToast(`Setting refresh removed ${removedCount} old generated world event(s) and proposed ${proposed} replacement(s) for review.`, 'success');
+            } else {
+                if (keptPending.length !== pendingBefore.length) {
+                    ctx.chatMetadata['nwst:pendingEvents'] = pendingBefore;
+                    await ctx.saveMetadata();
+                }
+                nwstToast('No replacement world-event proposals were generated, so the existing generated world events were preserved.', 'warning');
+            }
+        }
+
+        if (!isActiveSettingsChat(chatId)) return false;
+        if (typeof window?.nwstRefreshTabs === 'function') {
+            window.nwstRefreshTabs('home', 'world', 'events');
+        }
+        nwstToast('Setting-dependent refresh complete.', 'success');
+        return true;
+    } catch (err) {
+        console.error('[NWST Settings] Setting-dependent refresh failed:', err);
+        nwstToast(`Setting refresh failed: ${err.message}`, 'error');
+    }
+}
+
+async function promptSettingContextStateRefresh({ reason = 'profile-switch', previousSettingLibrary = null, changeLabel = '' } = {}) {
+    const chatId = getChatId();
+    if (!chatId) return false;
+
+    const settingLib = getSettingContextProfiles(chatId);
+    const activeSetting = settingLib.profiles.find(p => p.id === settingLib.activeProfileId);
+    const activeWeather = getActiveWeatherProfile(chatId);
+    const settingName = escapeHtmlLocal(activeSetting?.name || 'Current Setting');
+    const weatherName = escapeHtmlLocal(activeWeather?.name || 'None selected');
+
+    window._nwstRefreshSettingEnvironment = true;
+    window._nwstRefreshSettingConditions = true;
+    window._nwstRefreshSettingWorldEvents = false;
+
+    const html = `
+        <div style="padding:6px 4px;max-width:620px;line-height:1.45">
+            <div style="font-size:15px;font-weight:600;margin-bottom:8px">Refresh NWST for “${settingName}”?</div>
+            <div style="font-size:12px;color:#aaa;margin-bottom:10px">
+                The Setting Context changed, but NWST has <strong>not</strong> rewritten any existing state. Choose what should be rebuilt for the new setting. Cancel/Keep Existing performs zero model calls.
+            </div>
+            <div style="font-size:11px;color:#999;margin-bottom:10px;padding:8px;border:1px solid var(--SmartThemeBorderColor,#555);border-radius:6px">
+                <strong>Always preserved:</strong> current date/calendar, Notebook, Secrets, Communities, NPC events, story-detected events, Special Days, resolved/missed event history, and character continuity.
+            </div>
+            <label style="display:flex;gap:9px;align-items:flex-start;margin-bottom:8px;cursor:pointer">
+                <input type="checkbox" checked onchange="window._nwstRefreshSettingEnvironment=this.checked" style="margin-top:3px">
+                <span><strong>Current environment + 7-day forecast</strong><br><span style="font-size:11px;color:#999">Regenerates forecast plus Current Day weather/flora/fauna/spiritual atmosphere. ~2 model calls.</span></span>
+            </label>
+            <label style="display:flex;gap:9px;align-items:flex-start;margin-bottom:8px;cursor:pointer">
+                <input type="checkbox" checked onchange="window._nwstRefreshSettingConditions=this.checked" style="margin-top:3px">
+                <span><strong>World Conditions</strong><br><span style="font-size:11px;color:#999">Rebuilds Political, Social, Spiritual, and Environmental conditions against the new Setting Context. Up to 4 Planning LLM calls.</span></span>
+            </label>
+            <label style="display:flex;gap:9px;align-items:flex-start;margin-bottom:10px;cursor:pointer">
+                <input type="checkbox" onchange="window._nwstRefreshSettingWorldEvents=this.checked" style="margin-top:3px">
+                <span><strong>Replace generated World Events</strong><br><span style="font-size:11px;color:#999">Removes only active LLM-generated non-NPC/world events from the old setting, then generates replacement world-event proposals for approval. NPC, detected, and Special Day events are untouched. ~3 Planning LLM calls.</span></span>
+            </label>
+            <div style="font-size:11px;color:#c99;padding-top:8px;border-top:1px solid var(--SmartThemeBorderColor,#555)">
+                Active Weather Profile: <strong>${weatherName}</strong>. Forecast refresh uses this profile. If the location changed and this Weather Profile is wrong, choose <strong>Keep Existing</strong>, switch Weather Profile, then click <strong>Refresh Setting State…</strong>.
+            </div>
+        </div>`;
+
+    const ctx = SillyTavern.getContext();
+    const result = await ctx.callGenericPopup(html, ctx.POPUP_TYPE.TEXT, '', {
+        okButton: 'Refresh Selected',
+        cancelButton: 'Keep Existing',
+        wide: true,
+    });
+
+    if (!result) {
+        clearSettingRefreshPopupState();
+        if (reason === 'profile-switch') {
+            nwstToast('Setting Context changed; existing NWST state was kept unchanged. Refresh later if needed.', 'info');
+        }
+        return false;
+    }
+    if (!isActiveSettingsChat(chatId)) {
+        clearSettingRefreshPopupState();
+        console.warn('[NWST Settings] Setting refresh cancelled because the active chat changed while the popup was open.');
+        return false;
+    }
+
+    const refreshOptions = {
+        refreshEnvironment: window._nwstRefreshSettingEnvironment !== false,
+        refreshConditions: window._nwstRefreshSettingConditions !== false,
+        replaceWorldEvents: window._nwstRefreshSettingWorldEvents === true,
+    };
+    clearSettingRefreshPopupState();
+    const snapshot = await capturePreSettingRefreshSnapshot({
+        ...refreshOptions,
+        expectedChatId: chatId,
+        previousSettingLibrary,
+        changeLabel
+    });
+    if (!isActiveSettingsChat(chatId)) return false;
+    if ((refreshOptions.refreshEnvironment || refreshOptions.refreshConditions || refreshOptions.replaceWorldEvents) && !snapshot) return false;
+    return await refreshSettingDependentState({ ...refreshOptions, expectedChatId: chatId });
+}
+
 function wireSettingsEvents() {
     // ── Connection profile dropdowns ─────────────────────────────
     wireSelect('nwst-setting-planningLLM', (val) => { setConnectionProfile('planningLLM', val); renderNoThinkRows(); });
@@ -1988,7 +2898,29 @@ function wireSettingsEvents() {
         });
     }
 
-    // ── Setting context (per-chat) ───────────────────────────────
+    // ── Setting context profiles (per-chat) ──────────────────────
+    const contextSelect = document.getElementById('nwst-setting-contextProfile');
+    if (contextSelect) {
+        contextSelect.addEventListener('change', async () => {
+            const chatId = getChatId();
+            if (!chatId || !contextSelect.value) return;
+            const beforeLib = getSettingContextProfiles(chatId);
+            const before = beforeLib.activeProfileId;
+            const beforeName = activeSettingName(beforeLib);
+            const targetName = beforeLib.profiles.find(p => p.id === contextSelect.value)?.name || 'Selected Setting';
+            await setActiveSettingContextProfile(chatId, contextSelect.value);
+            const afterLib = getSettingContextProfiles(chatId);
+            await recordSettingProfileChangeSnapshot(beforeLib, afterLib);
+            renderSettingContextProfileUI();
+            nwstToast('Setting Context profile changed. Review the active Weather Profile if the location/environment also changed.', 'info');
+            if (before !== contextSelect.value) await promptSettingContextStateRefresh({
+                reason: 'profile-switch',
+                previousSettingLibrary: beforeLib,
+                changeLabel: `${beforeName} → ${targetName}`
+            });
+        });
+    }
+
     const saveContextBtn = document.getElementById('nwst-setting-saveContext');
     if (saveContextBtn) {
         saveContextBtn.addEventListener('click', async () => {
@@ -1996,10 +2928,236 @@ function wireSettingsEvents() {
             const textarea = document.getElementById('nwst-setting-context');
             if (textarea) {
                 await saveSettingContext(chatId, textarea.value);
-                nwstToast('Setting context saved.', 'success');
+                renderSettingContextProfileUI();
+                nwstToast('Setting Context profile saved. Review the active Weather Profile if the environment changed.', 'success');
             }
         });
     }
+
+    const refreshContextStateBtn = document.getElementById('nwst-setting-refreshContextState');
+    if (refreshContextStateBtn) {
+        refreshContextStateBtn.addEventListener('click', async () => {
+            await promptSettingContextStateRefresh({ reason: 'manual' });
+        });
+    }
+
+    const newContextBtn = document.getElementById('nwst-setting-newContextProfile');
+    if (newContextBtn) {
+        newContextBtn.addEventListener('click', async () => {
+            const name = await SillyTavern.getContext().callGenericPopup('Name this Setting Context profile:', SillyTavern.getContext().POPUP_TYPE.INPUT, 'New Setting');
+            if (!name) return;
+            const chatId = getChatId();
+            const beforeLib = getSettingContextProfiles(chatId);
+            await createSettingContextProfile(chatId, String(name).trim() || 'New Setting', '', true);
+            await recordSettingProfileChangeSnapshot(beforeLib, getSettingContextProfiles(chatId), 'Setting Context created');
+            renderSettingContextProfileUI();
+            nwstToast('Setting Context profile created. Review the active Weather Profile if needed.', 'info');
+        });
+    }
+
+    const duplicateContextBtn = document.getElementById('nwst-setting-duplicateContextProfile');
+    if (duplicateContextBtn) {
+        duplicateContextBtn.addEventListener('click', async () => {
+            const chatId = getChatId();
+            const lib = getSettingContextProfiles(chatId);
+            const active = lib.profiles.find(p => p.id === lib.activeProfileId);
+            if (!active) return;
+            const beforeLib = cloneForContextSnapshot(lib);
+            await createSettingContextProfile(chatId, `${active.name} Copy`, active.content, true);
+            await recordSettingProfileChangeSnapshot(beforeLib, getSettingContextProfiles(chatId), 'Setting Context duplicated');
+            renderSettingContextProfileUI();
+            nwstToast('Setting Context profile duplicated.', 'success');
+        });
+    }
+
+    const renameContextBtn = document.getElementById('nwst-setting-renameContextProfile');
+    if (renameContextBtn) {
+        renameContextBtn.addEventListener('click', async () => {
+            const chatId = getChatId();
+            let lib = getSettingContextProfiles(chatId);
+            const active = lib.profiles.find(p => p.id === lib.activeProfileId);
+            if (!active) return;
+            const name = await SillyTavern.getContext().callGenericPopup('Rename this Setting Context profile:', SillyTavern.getContext().POPUP_TYPE.INPUT, active.name);
+            if (!name) return;
+            active.name = String(name).trim() || active.name;
+            if (lib.virtualLegacy) lib = { activeProfileId: lib.activeProfileId, profiles: lib.profiles };
+            await saveSettingContextProfiles(chatId, lib);
+            renderSettingContextProfileUI();
+            nwstToast('Setting Context profile renamed.', 'success');
+        });
+    }
+
+    const deleteContextBtn = document.getElementById('nwst-setting-deleteContextProfile');
+    if (deleteContextBtn) {
+        deleteContextBtn.addEventListener('click', async () => {
+            const chatId = getChatId();
+            const lib = getSettingContextProfiles(chatId);
+            const active = lib.profiles.find(p => p.id === lib.activeProfileId);
+            if (!active) return;
+            const ok = await SillyTavern.getContext().callGenericPopup(`Delete Setting Context profile <b>${escapeHtmlLocal(active.name)}</b>?`, SillyTavern.getContext().POPUP_TYPE.CONFIRM, '');
+            if (!ok) return;
+            const beforeLib = cloneForContextSnapshot(lib);
+            const beforeId = lib.activeProfileId;
+            const beforeName = active.name || 'Deleted Setting';
+            const afterLib = await deleteSettingContextProfile(chatId, active.id);
+            await recordSettingProfileChangeSnapshot(beforeLib, afterLib, 'Setting Context deleted');
+            renderSettingContextProfileUI();
+            nwstToast('Setting Context profile deleted. Review the active Weather Profile if needed.', 'info');
+            if (beforeId !== afterLib.activeProfileId && afterLib.activeProfileId) {
+                await promptSettingContextStateRefresh({
+                    reason: 'profile-switch',
+                    previousSettingLibrary: beforeLib,
+                    changeLabel: `${beforeName} → ${activeSettingName(afterLib)}`
+                });
+            }
+        });
+    }
+
+    // ── Severe Weather / Weather Profiles ───────────────────────
+    const weatherEnabled = document.getElementById('nwst-weather-enabled');
+    if (weatherEnabled) weatherEnabled.addEventListener('change', async () => {
+        const state = getWeatherProfilesState(getChatId());
+        state.enabled = weatherEnabled.checked;
+        await saveWeatherProfilesState(getChatId(), state);
+        renderWeatherProfileUI();
+        if (weatherEnabled.checked && !state.activeProfileId) {
+            nwstToast('Severe Weather is enabled, but no Weather Profile is selected. Create one manually or analyze Setting Context.', 'warning');
+        }
+    });
+    const weatherAffect = document.getElementById('nwst-weather-affect-forecast');
+    if (weatherAffect) weatherAffect.addEventListener('change', async () => {
+        const state = getWeatherProfilesState(getChatId());
+        state.affectForecast = weatherAffect.checked;
+        await saveWeatherProfilesState(getChatId(), state);
+    });
+    const weatherShow = document.getElementById('nwst-weather-show-home');
+    if (weatherShow) weatherShow.addEventListener('change', async () => {
+        const state = getWeatherProfilesState(getChatId());
+        state.showOnHome = weatherShow.checked;
+        await saveWeatherProfilesState(getChatId(), state);
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+    });
+
+    const weatherSelect = document.getElementById('nwst-weather-profile-select');
+    if (weatherSelect) weatherSelect.addEventListener('change', async () => {
+        if (!weatherSelect.value) return;
+        const chatId = getChatId();
+        const beforeState = getWeatherProfilesState(chatId);
+        await setActiveWeatherProfile(chatId, weatherSelect.value);
+        await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId));
+        renderWeatherProfileUI();
+        nwstToast('Weather Profile changed.', 'info');
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+    });
+
+    const weatherNew = document.getElementById('nwst-weather-new-profile');
+    if (weatherNew) weatherNew.addEventListener('click', async () => {
+        const name = await SillyTavern.getContext().callGenericPopup('Name this Weather Profile:', SillyTavern.getContext().POPUP_TYPE.INPUT, 'New Weather Region');
+        if (!name) return;
+        const chatId = getChatId();
+        const beforeState = getWeatherProfilesState(chatId);
+        const p = makeDefaultWeatherProfile(String(name).trim() || 'New Weather Region');
+        await upsertWeatherProfile(chatId, p, { activate: true });
+        await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Weather Profile created');
+        renderWeatherProfileUI();
+    });
+
+    const weatherAnalyze = document.getElementById('nwst-weather-analyze-setting');
+    if (weatherAnalyze) weatherAnalyze.addEventListener('click', async () => {
+        weatherAnalyze.disabled = true;
+        try {
+            nwstToast('Analyzing Setting Context for climate and terrain...', 'info');
+            const chatId = getChatId();
+            const beforeState = getWeatherProfilesState(chatId);
+            await analyzeSettingContextToWeatherProfile(chatId, { activate: true });
+            await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Weather Profile generated');
+            renderWeatherProfileUI();
+        } catch (e) {
+            console.error('[NWST WeatherProfile] Analysis failed:', e);
+            nwstToast(`Weather Profile analysis failed: ${e.message}`, 'error');
+        } finally { weatherAnalyze.disabled = false; }
+    });
+
+    const weatherDuplicate = document.getElementById('nwst-weather-duplicate-profile');
+    if (weatherDuplicate) weatherDuplicate.addEventListener('click', async () => {
+        const chatId = getChatId();
+        const beforeState = getWeatherProfilesState(chatId);
+        const p = getActiveWeatherProfile(chatId);
+        if (!p) return;
+        const copy = JSON.parse(JSON.stringify(p));
+        copy.id = `weather_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+        copy.name = `${p.name} Copy`;
+        copy.activeSystem = null;
+        copy.history = [];
+        await upsertWeatherProfile(chatId, copy, { activate: true });
+        await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Weather Profile duplicated');
+        renderWeatherProfileUI();
+    });
+
+    const weatherDelete = document.getElementById('nwst-weather-delete-profile');
+    if (weatherDelete) weatherDelete.addEventListener('click', async () => {
+        const chatId = getChatId();
+        const beforeState = getWeatherProfilesState(chatId);
+        const p = getActiveWeatherProfile(chatId);
+        if (!p) return;
+        const ok = await SillyTavern.getContext().callGenericPopup(`Delete Weather Profile <b>${escapeHtmlLocal(p.name)}</b>?`, SillyTavern.getContext().POPUP_TYPE.CONFIRM, '');
+        if (!ok) return;
+        await deleteWeatherProfile(chatId, p.id);
+        await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Weather Profile deleted');
+        renderWeatherProfileUI();
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+    });
+
+    const weatherSave = document.getElementById('nwst-weather-save-profile');
+    if (weatherSave) weatherSave.addEventListener('click', async () => {
+        const state = getWeatherProfilesState(getChatId());
+        const p = state.profiles.find(x => x.id === state.activeProfileId);
+        if (!p) return;
+        p.name = document.getElementById('nwst-weather-name')?.value?.trim() || p.name;
+        p.frequency = document.getElementById('nwst-weather-frequency')?.value || 'occasional';
+        p.climate = splitTagInput(document.getElementById('nwst-weather-climate')?.value);
+        p.terrain = splitTagInput(document.getElementById('nwst-weather-terrain')?.value);
+        p.characteristics = splitTagInput(document.getElementById('nwst-weather-characteristics')?.value);
+        p.notes = document.getElementById('nwst-weather-notes')?.value?.trim() || '';
+        await collectWeatherOverridesIntoState(state);
+        await saveWeatherProfilesState(getChatId(), state);
+        renderWeatherProfileUI();
+        nwstToast('Weather Profile saved.', 'success');
+    });
+
+    const weatherAddOverride = document.getElementById('nwst-weather-add-override');
+    if (weatherAddOverride) weatherAddOverride.addEventListener('click', async () => {
+        const state = getWeatherProfilesState(getChatId());
+        const p = state.profiles.find(x => x.id === state.activeProfileId);
+        if (!p) { nwstToast('Create or select a Weather Profile first.', 'warning'); return; }
+        await collectWeatherOverridesIntoState(state);
+        p.overrides.push({
+            id: `weather_override_${Date.now()}`,
+            enabled: true,
+            type: 'severe_thunderstorm',
+            severity: 'severe',
+            startElapsedDay: getCurrentDay(getChatId())?.elapsedStoryDays || 0,
+            durationDays: 1,
+            durationHours: 24,
+            recoveryDays: 0,
+            timeOfDay: 'afternoon',
+            customName: '', description: ''
+        });
+        await saveWeatherProfilesState(getChatId(), state);
+        renderWeatherProfileUI();
+    });
+
+    const weatherClear = document.getElementById('nwst-weather-clear-system');
+    if (weatherClear) weatherClear.addEventListener('click', async () => {
+        const state = getWeatherProfilesState(getChatId());
+        const p = state.profiles.find(x => x.id === state.activeProfileId);
+        if (!p?.activeSystem) { nwstToast('No generated severe weather is active.', 'info'); return; }
+        p.activeSystem = null;
+        await saveWeatherProfilesState(getChatId(), state);
+        renderWeatherProfileUI();
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+        nwstToast('Generated severe weather cleared.', 'info');
+    });
 
     // ── Injection toggles ────────────────────────────────────────
     wireCheckbox('nwst-setting-injectCurrentDay', (checked) => setInjectionSetting('injectCurrentDay', checked));
@@ -2195,6 +3353,15 @@ function wireSettingsEvents() {
             const config = getCalendarConfig(chatId);
             config.enabled = enableCalToggle.checked;
             await saveCalendarConfig(chatId, config);
+            populateNagerDateUI();
+        });
+    }
+
+    const nagerToggle = document.getElementById('nwst-setting-nagerEnabled');
+    if (nagerToggle) {
+        nagerToggle.addEventListener('change', () => {
+            const wrap = document.getElementById('nwst-nager-settings');
+            if (wrap) wrap.style.display = nagerToggle.checked ? 'block' : 'none';
         });
     }
 
@@ -2237,6 +3404,10 @@ function wireSettingsEvents() {
             const chatId = getChatId();
             if (!chatId) return;
             const config = getCalendarConfig(chatId);
+            if (isLunisolarCalendar(config)) {
+                leapToggle.checked = config.leapYears !== false;
+                return;
+            }
             config.leapYears = leapToggle.checked;
             await saveCalendarConfig(chatId, config);
         });
@@ -2272,7 +3443,7 @@ function wireSettingsEvents() {
             // Show the parsed interpretation back to the user — this is what
             // makes the day/month ambiguity of slash dates safe to accept.
             const cfg = getCalendarConfig(chatId);
-            const names = monthNamesFor(cfg);
+            const names = monthNamesFor(cfg, parsed.year);
             const monthName = names[Math.min(parsed.month - 1, names.length - 1)] || `Month ${parsed.month}`;
             let interpreted = `${monthName} ${parsed.day}${ordinalSuffix(parsed.day)}, ${formatYear(parsed.year)}`;
             if (!cfg.enabled && Array.isArray(cfg.weekDays) && cfg.weekDays.length === 7) {
@@ -2343,11 +3514,68 @@ function wireSettingsEvents() {
         });
     }
 
+    const calendarSystemSelect = document.getElementById('nwst-setting-calendarSystem');
+    if (calendarSystemSelect) {
+        calendarSystemSelect.addEventListener('change', async () => {
+            const chatId = getChatId();
+            if (!chatId) return;
+            const previousConfig = getCalendarConfig(chatId);
+            const currentDayBeforeChange = getCurrentDay(chatId) || {};
+            const previousDate = parseCurrentCalendarDate(
+                currentDayBeforeChange.dateDisplay || '', currentDayBeforeChange.dateSub || '', previousConfig,
+                getSetting('dateFormatDMY') === true
+            );
+            const config = getCalendarConfig(chatId);
+            config.calendarSystem = calendarSystemSelect.value === 'lunisolar' ? 'lunisolar' : 'standard';
+            config.lunisolar = {
+                engine: 'east_asian',
+                leapMonthLabel: document.getElementById('nwst-setting-lunisolarLeapLabel')?.value?.trim() || config.lunisolar?.leapMonthLabel || 'Intercalary {month}'
+            };
+            if (config.calendarSystem === 'lunisolar') {
+                config.months = 12;
+                while (config.monthNames.length < 12) config.monthNames.push(`Month ${config.monthNames.length + 1}`);
+                while (config.monthDays.length < 12) config.monthDays.push(30);
+                config.monthNames = config.monthNames.slice(0, 12);
+                config.monthDays = config.monthDays.slice(0, 12);
+            }
+            await saveCalendarConfig(chatId, config);
+            if (previousDate) {
+                const translated = translateDateAcrossCalendarSystems(previousDate, previousConfig, config);
+                if (translated) await updateCurrentDay(chatId, { dayCount: dayOfYearFor(translated, config) });
+            }
+            applyCalendarSystemUIState(config);
+            renderCalendarMonthsList();
+            populateNagerDateUI();
+            validateCalendarTotal();
+        });
+    }
+
+    const lunisolarLeapLabel = document.getElementById('nwst-setting-lunisolarLeapLabel');
+    if (lunisolarLeapLabel) {
+        lunisolarLeapLabel.addEventListener('change', async () => {
+            const chatId = getChatId();
+            if (!chatId) return;
+            const config = getCalendarConfig(chatId);
+            config.lunisolar = {
+                engine: 'east_asian',
+                leapMonthLabel: lunisolarLeapLabel.value.trim() || 'Intercalary {month}'
+            };
+            await saveCalendarConfig(chatId, config);
+            renderCalendarMonthsList();
+            validateCalendarTotal();
+        });
+    }
+
     const monthCountInput = document.getElementById('nwst-setting-monthCount');
     if (monthCountInput) {
         monthCountInput.addEventListener('change', async () => {
             const chatId = getChatId();
             if (!chatId) return;
+            const activeConfig = getCalendarConfig(chatId);
+            if (isLunisolarCalendar(activeConfig)) {
+                monthCountInput.value = 12;
+                return;
+            }
             const num = parseInt(monthCountInput.value, 10);
             if (num < 1 || num > 24) {
                 nwstToast('Month count must be between 1 and 24.', 'warning');
@@ -2400,20 +3628,43 @@ function wireSettingsEvents() {
                 return;
             }
 
+            // Preserve the canonical displayed date while changing calendar systems.
+            // The same named/base month + day is translated into the destination
+            // year's concrete layout so dayCount does not remain on the old math.
+            const oldConfig = getCalendarConfig(chatId);
+            const currentBeforeSave = getCurrentDay(chatId) || {};
+            const oldCanonicalDate = parseCurrentCalendarDate(
+                currentBeforeSave.dateDisplay || '', currentBeforeSave.dateSub || '', oldConfig,
+                getSetting('dateFormatDMY') === true
+            );
+
             // Read current values from DOM
             const monthEntries = document.querySelectorAll('#nwst-calendar-months-list .nwst-month-entry');
             const config = getCalendarConfig(chatId);
+            config.calendarSystem = document.getElementById('nwst-setting-calendarSystem')?.value === 'lunisolar' ? 'lunisolar' : 'standard';
+            config.lunisolar = {
+                engine: 'east_asian',
+                leapMonthLabel: document.getElementById('nwst-setting-lunisolarLeapLabel')?.value?.trim() || config.lunisolar?.leapMonthLabel || 'Intercalary {month}'
+            };
+            const preservedMonthDays = Array.isArray(config.monthDays) ? [...config.monthDays] : [];
             config.monthNames = [];
-            config.monthDays = [];
+            if (!isLunisolarCalendar(config)) config.monthDays = [];
             monthEntries.forEach(entry => {
                 const nameInput = entry.querySelector('.nwst-month-name-input');
                 const daysInput = entry.querySelector('.nwst-month-days-input');
                 if (nameInput) {
                     config.monthNames.push(nameInput.value.trim() || `Month ${config.monthNames.length + 1}`);
-                    config.monthDays.push(parseInt(daysInput?.value, 10) || 30);
+                    if (!isLunisolarCalendar(config)) config.monthDays.push(parseInt(daysInput?.value, 10) || 30);
                 }
             });
-            config.months = config.monthNames.length;
+            if (isLunisolarCalendar(config)) {
+                config.months = 12;
+                config.monthNames = config.monthNames.slice(0, 12);
+                config.monthDays = preservedMonthDays.slice(0, 12);
+                while (config.monthDays.length < 12) config.monthDays.push(30);
+            } else {
+                config.months = config.monthNames.length;
+            }
 
             // Read weekDays from DOM
             const dayEntries = document.querySelectorAll('#nwst-calendar-days-list .nwst-month-entry');
@@ -2429,15 +3680,51 @@ function wireSettingsEvents() {
             const eraInput = document.getElementById('nwst-setting-eraName');
             if (eraInput) config.eraName = eraInput.value.trim();
 
+            // Optional Nager.Date real-world holiday layer. It remains stored
+            // on any calendar, but only runs when the active calendar keeps
+            // Gregorian month/day structure. Renaming month/weekday labels is
+            // explicitly allowed.
+            config.nagerDate = readNagerDateConfigFromUI(config.nagerDate);
+            if (config.nagerDate.enabled) {
+                if (!isNagerDateAvailable(config)) {
+                    nwstToast('Nager.Date holidays require Gregorian month lengths (12 months with the standard day counts) and a 7-day week. Renaming months or weekdays is fine.', 'warning');
+                } else if (!/^[A-Z]{2}$/.test(config.nagerDate.countryCode)) {
+                    nwstToast('Enter a valid 2-letter country code for Nager.Date (for example US, JP, or GB).', 'warning');
+                    document.getElementById('nwst-setting-nagerCountry')?.focus();
+                    return;
+                }
+                if (!Array.isArray(config.nagerDate.holidayTypes) || config.nagerDate.holidayTypes.length === 0) {
+                    nwstToast('Select at least one Nager.Date holiday type.', 'warning');
+                    return;
+                }
+            }
+
             // Special days are managed by their own cards (per-card save);
             // config already carries the stored list, so global save keeps
             // them intact without reading the editor DOM.
             await saveCalendarConfig(chatId, config);
+
+            if (oldCanonicalDate) {
+                const translated = translateDateAcrossCalendarSystems(oldCanonicalDate, oldConfig, config);
+                if (translated) {
+                    await updateCurrentDay(chatId, { dayCount: dayOfYearFor(translated, config) });
+                }
+            }
+
+            let nagerFetchResult = null;
+            if (isNagerDateAvailable(config) && config.nagerDate?.enabled) {
+                nagerFetchResult = await ensureNagerHolidayCacheForCurrentWindow(chatId);
+                if (!nagerFetchResult.ok && nagerFetchResult.failedYears?.length) {
+                    nwstToast(`Calendar settings saved, but Nager.Date holiday fetch failed for ${nagerFetchResult.failedYears.join(', ')}. NWST will retry when the story date advances. Check F12 for details.`, 'error');
+                }
+            }
             // Re-validate and re-populate to ensure consistency
             renderCalendarMonthsList();
             renderCalendarDaysList();
             renderSpecialDaysList();
+            populateNagerDateUI();
             validateCalendarTotal();
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
 
             // Surface last-minute special days immediately (in-month / near-term
             // occurrences materialize now rather than waiting for a day advance).
@@ -2447,11 +3734,11 @@ function wireSettingsEvents() {
                 if (created > 0) {
                     nwstToast(`Calendar saved — ${created} special day event(s) surfaced in the Events tab.`, 'success');
                     if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('events');
-                } else {
+                } else if (nagerFetchResult?.ok !== false) {
                     nwstToast('Calendar configuration saved.', 'success');
                 }
             } catch (e) {
-                nwstToast('Calendar configuration saved.', 'success');
+                if (nagerFetchResult?.ok !== false) nwstToast('Calendar configuration saved.', 'success');
             }
         });
     }
@@ -2474,7 +3761,10 @@ function wireSettingsEvents() {
                 months: defaults.months,
                 monthNames: [...defaults.monthNames],
                 monthDays: [...defaults.monthDays],
-                weekDays: [...defaults.weekDays]
+                weekDays: [...defaults.weekDays],
+                calendarSystem: 'standard',
+                lunisolar: { ...defaults.lunisolar },
+                leapYears: defaults.leapYears !== false
             });
             populateCalendarConfigUI();
             nwstToast('Calendar configuration restored to defaults.', 'success');
@@ -2576,22 +3866,32 @@ function wireSettingsEvents() {
             );
             if (!confirmed) return;
 
-            // Preserve user-authored data — these are manually configured,
-            // not auto-generated by the LLM, so they should survive a clear.
-            const preservedContext = getSettingContext(chatId);
+            // Preserve user-authored configuration. Generated severe-weather
+            // state/history is narrative state and is intentionally cleared, but
+            // the profile definitions and manual overrides survive.
+            let preservedSettingProfiles = getSettingContextProfiles(chatId);
+            preservedSettingProfiles = {
+                activeProfileId: preservedSettingProfiles.activeProfileId || null,
+                profiles: Array.isArray(preservedSettingProfiles.profiles) ? preservedSettingProfiles.profiles : []
+            };
             const preservedSeasonConfig = getSeasonConfig(chatId);
             const preservedCalendarConfig = getCalendarConfig(chatId);
+            const preservedWeatherProfiles = getWeatherProfilesState(chatId);
+            preservedWeatherProfiles.profiles = preservedWeatherProfiles.profiles.map(p => ({ ...p, activeSystem: null, history: [] }));
 
             await deleteAllChatData(chatId);
 
             // Restore user-authored data
-            if (preservedContext) {
-                await saveSettingContext(chatId, preservedContext);
+            if (preservedSettingProfiles.profiles.length > 0) {
+                await saveSettingContextProfiles(chatId, preservedSettingProfiles);
             }
             await saveSeasonConfig(chatId, preservedSeasonConfig);
             await saveCalendarConfig(chatId, preservedCalendarConfig);
+            if (preservedWeatherProfiles.profiles.length > 0) {
+                await saveWeatherProfilesState(chatId, preservedWeatherProfiles);
+            }
 
-            nwstToast('All NWST data cleared for this chat (Setting Context, Season Config, and Calendar Config preserved).', 'success');
+            nwstToast('All generated NWST data cleared for this chat (Setting Context profiles, Weather Profiles, Season Config, and Calendar Config preserved).', 'success');
             // Refresh the UI to reflect the cleared state
             populateSettingsUI();
         });
@@ -2680,6 +3980,51 @@ function wireSettingsEvents() {
     }
 
     // ── Debug buttons ─────────────────────────────────────────────────────
+
+
+    const clearContextSnapshotsBtn = document.getElementById('nwst-debug-clear-context-snapshots');
+    if (clearContextSnapshotsBtn) {
+        clearContextSnapshotsBtn.addEventListener('click', async () => {
+            const list = getContextSnapshots(getChatId());
+            if (!list.length) {
+                nwstToast('No Context/Profile snapshots to clear.', 'info');
+                return;
+            }
+            const ok = await SillyTavern.getContext().callGenericPopup(
+                `Clear all ${list.length} Context/Profile snapshot(s)?<br><br>This does not affect Previous Day snapshots.`,
+                SillyTavern.getContext().POPUP_TYPE.CONFIRM,
+                ''
+            );
+            if (!ok) return;
+            await clearContextSnapshots(getChatId());
+            renderContextSnapshotsList();
+            nwstToast('Context/Profile snapshot history cleared.', 'success');
+        });
+    }
+
+    const debugAssignWeather = document.getElementById('nwst-debug-assign-weather-profile');
+    if (debugAssignWeather) {
+        debugAssignWeather.addEventListener('click', async () => {
+            debugAssignWeather.disabled = true;
+            const original = debugAssignWeather.textContent;
+            debugAssignWeather.textContent = '⏳ Assigning...';
+            try {
+                nwstToast('Debug: analyzing active Setting Context...', 'info');
+                const chatId = getChatId();
+                const beforeState = getWeatherProfilesState(chatId);
+                const profile = await analyzeSettingContextToWeatherProfile(chatId, { activate: true, silent: true });
+                await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Debug Weather Profile assignment');
+                renderWeatherProfileUI();
+                nwstToast(`Debug Weather Profile assigned: ${profile.name}`, 'success');
+            } catch (err) {
+                console.error('[NWST Debug] Weather Profile assignment failed:', err);
+                nwstToast(`Weather Profile assignment failed: ${err.message}`, 'error');
+            } finally {
+                debugAssignWeather.textContent = original;
+                debugAssignWeather.disabled = false;
+            }
+        });
+    }
 
     const debugScanSecrets = document.getElementById('nwst-debug-scan-secrets');
     if (debugScanSecrets) {
@@ -2937,6 +4282,10 @@ function wireSettingsEvents() {
                 { okButton: 'Run Auto-Adjust', cancelButton: 'Cancel' }
             );
             if (!confirm) return;
+            if (getChatId() !== chatId) {
+                dlog('[NWST AutoPriority] Active chat changed before auto-adjust started; cancelled stale operation.');
+                return;
+            }
 
             nwstToast(`Evaluating ${secrets.length} secret(s) with Planning LLM...`, 'info');
 
@@ -2997,6 +4346,10 @@ Analyze each secret carefully. Consider:
 
             try {
                 const response = await generateWithProfile(profile, [systemMessage, userMessage], { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
+                if (getChatId() !== chatId) {
+                    dlog('[NWST AutoPriority] Active chat changed during auto-adjust; discarded stale result.');
+                    return;
+                }
                 if (!response) {
                     nwstToast('AI Auto-Adjust failed — LLM returned empty response.', 'error');
                     return;
@@ -3054,10 +4407,15 @@ Analyze each secret carefully. Consider:
                         skipped++;
                         continue;
                     }
+                    if (getChatId() !== chatId) {
+                        dlog('[NWST AutoPriority] Active chat changed while applying priorities; stopped stale updates.');
+                        return;
+                    }
                     await updateSecret(chatId, entry.id, { injectionPriority: entry.injectionPriority });
                     updated++;
                 }
 
+                if (getChatId() !== chatId) return;
                 nwstToast(`AI Auto-Adjust complete: ${updated} updated, ${skipped} skipped.`, updated > 0 ? 'success' : 'info');
                 if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
             } catch (err) {
@@ -3199,20 +4557,6 @@ function wireInput(id, callback) {
 function wireCheckbox(id, callback) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('change', () => callback(el.checked));
-}
-
-function wireTextarea(id, callback) {
-    const el = document.getElementById(id);
-    if (el) {
-        // Save on blur (user clicks away)
-        el.addEventListener('blur', () => callback(el.value));
-        // Also save periodically while typing (every 3 seconds of inactivity)
-        let debounceTimer;
-        el.addEventListener('input', async () => {
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(() => callback(el.value), 3000);
-        });
-    }
 }
 
 function setCheckbox(id, checked) {

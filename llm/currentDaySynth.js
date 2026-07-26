@@ -11,7 +11,7 @@
 
 import { getChatId, nwstToast } from '../utils.js';
 import {
-    getCurrentDay, updateCurrentDay, getForecast, getMoonPhases,
+    getCurrentDay, updateCurrentDay, getForecast,
     getEnabledConditions, getSettingContext, getCalendarConfig
 } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
@@ -69,7 +69,7 @@ STYLE GUIDANCE:
  * @param {object} [profileOverride] - Optional profile override
  * @returns {Promise<boolean>} True on success
  */
-export async function synthesizeCurrentDay(chatId, profileOverride) {
+export async function synthesizeCurrentDay(chatId, profileOverride, options = {}) {
     if (!chatId) chatId = getChatId();
     if (!chatId) return false;
 
@@ -83,10 +83,10 @@ export async function synthesizeCurrentDay(chatId, profileOverride) {
         const currentDay = getCurrentDay(chatId);
         const forecast = getForecast(chatId);
         const todayForecast = forecast.length > 0 ? forecast[0] : null;
-        const conditions = getEnabledConditions(chatId);
-        const activeEvents = getActiveEvents(chatId);
+        const conditions = options.ignoreConditions ? {} : getEnabledConditions(chatId);
+        const activeEvents = options.ignoreEvents ? [] : getActiveEvents(chatId);
         const settingContext = getSettingContext(chatId);
-        const todayEvents = activeEvents.filter(e => e.tier === 'immediate');
+        const todayEvents = options.ignoreEvents ? [] : activeEvents.filter(e => e.tier === 'immediate');
 
         // Compute the system-determined season for this dayCount so the
         // synthesis LLM writes evocative prose *about* the correct season.
@@ -100,6 +100,10 @@ export async function synthesizeCurrentDay(chatId, profileOverride) {
         ];
 
         const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
+        if (getChatId() !== chatId) {
+            dlog('[NWST CurrentDaySynth] Active chat changed during synthesis; discarding stale result.');
+            return false;
+        }
         const parsed = parseSynthesisResponse(response);
 
         if (!parsed) throw new Error('Failed to parse Current Day synthesis response.');
@@ -273,7 +277,7 @@ function parseSynthesisResponse(response) {
         }
     } catch (e) {
         // JSON parsing failed — fall through to raw text fallback
-        console.debug('[NWST CurrentDaySynth] JSON fallback parse failed:', e.message);
+        dlog('[NWST CurrentDaySynth] JSON fallback parse failed:', e.message);
     }
 
     // Last resort: use full response as weatherToday

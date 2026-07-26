@@ -148,7 +148,7 @@ if (typeof window !== 'undefined') {
      * Open the shared popout editor from anywhere in the extension.
      * Used by secret fields and other editable areas that need expanded editing.
      * @param {string} title - Header title shown in the popout
-     * @param {string} content - Initial textarea content
+     * @param {string} currentContent - Initial textarea content
      * @param {function} onSave - Callback with saved text when user clicks Save & close
      */
     window.openNWSTPopout = function(title, currentContent, onSave) {

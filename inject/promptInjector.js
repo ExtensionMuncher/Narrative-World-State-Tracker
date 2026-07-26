@@ -40,7 +40,7 @@
 // =============================================================================
 
 import { extension_prompt_roles } from '../../../../../script.js';
-import { getSettingContext, getCurrentDay, getForecast, getMoonPhases,
+import { getCurrentDay, getForecast, getMoonPhases,
          getEnabledConditions, getSeasonConfig } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
 import {
@@ -50,8 +50,9 @@ import {
 } from '../settings.js';
 import { getChatId } from '../index.js';
 import { buildSecretsInjection } from '../llm/secretsInjection.js';
-import { getLunarAngle, computeSeason, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
+import { computeSeason, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
 import { getMoonConfig } from '../data/moons.js';
+import { buildNagerHolidayPromptBlock } from '../data/nagerDate.js';
 import { dlog } from "../lib/debug.js";
 
 // ── Role string → numeric mapper ──────────────────────────────────────────
@@ -116,6 +117,11 @@ export function buildInjectionBlock(chatId) {
         if (dayBlock) parts.push(dayBlock);
     }
 
+    // Real-world holidays have their own per-chat injection toggle. They are
+    // intentionally independent of the broader Current Day injection switch.
+    const holidayBlock = buildNagerHolidayPromptBlock(chatId);
+    if (holidayBlock) parts.push(holidayBlock);
+
     // ── Forecast + Moon Phases ───────────────────────────────────
     // Token-Budget: stripped to today only + phase name
     // Combined: today + 3-day outlook, moon phases as strip
@@ -123,7 +129,7 @@ export function buildInjectionBlock(chatId) {
     if (day) {
         const forecast  = getForecast(chatId);
         const moonPhases = getMoonPhases(chatId);
-        const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day, mode);
+        const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, mode);
         if (weatherBlock) parts.push(weatherBlock);
     }
 
@@ -213,7 +219,7 @@ function buildCurrentDayBlock(day, chatId, mode) {
 
 // ── Weather / Moon block builders ─────────────────────────────────────────
 
-function buildWeatherBlock(forecast, moonPhases, chatId, currentDay, mode) {
+function buildWeatherBlock(forecast, moonPhases, chatId, mode) {
     let block = '';
 
     if (mode === 'token-budget') {
@@ -393,7 +399,7 @@ function buildInjectionBlockWithState(chatId) {
             if (dayBlock) parts.push(dayBlock);
             const forecast   = getForecast(chatId);
             const moonPhases = getMoonPhases(chatId);
-            const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, day, mode);
+            const weatherBlock = buildWeatherBlock(forecast, moonPhases, chatId, mode);
             if (weatherBlock) parts.push(weatherBlock);
         }
         if (isInjectEvents()) {

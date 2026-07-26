@@ -256,6 +256,10 @@ export async function runEventValidityReview(chatId) {
 
         dlog(`[NWST EventReview] Reviewing ${active.length} active, ${undated.length} undated, ${concluded.length} concluded event(s)...`);
         const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.MEDIUM });
+        if (getChatId() !== chatId) {
+            dlog('[NWST EventReview] Discarded stale review result because the active chat changed.');
+            return 0;
+        }
         const parsed = parseReviewResponse(response);
         if (!parsed) return 0;
 

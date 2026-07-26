@@ -19,8 +19,7 @@
 
 import {
     getChatData,
-    setChatData,
-    deleteChatData
+    setChatData
 } from './storage.js';
 
 // ── Default avatar color palette ──────────────────────────────────────────

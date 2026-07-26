@@ -19,7 +19,7 @@ import { getSceneContext, getSidecarState } from './secretsSidecar.js';
 import { buildAliasRegistry } from '../data/aliasRegistry.js';
 import {
     getInjectionThreshold, getSecretBudgetTokens,
-    getMaxSecretsInjected, getScoringWeights, getSidecarScanRange
+    getMaxSecretsInjected, getSidecarScanRange
 } from '../settings.js';
 
 /**
