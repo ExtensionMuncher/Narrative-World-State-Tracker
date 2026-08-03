@@ -30,6 +30,7 @@ import {
 } from './storage.js';
 import { getMaxSnapshotCount } from '../settings.js';
 import { dlog } from "../lib/debug.js";
+import { normalizeDateSub } from "../utils.js";
 
 // ── Current Day ───────────────────────────────────────────────────────────
 
@@ -48,7 +49,18 @@ export function getWorldState(chatId) {
  * @param {object} worldState - Complete world state object
  */
 export async function saveWorldState(chatId, worldState) {
-    await setChatData(chatId, 'worldState', worldState);
+    let normalized = worldState;
+    const currentDay = worldState?.currentDay;
+    if (currentDay && Object.prototype.hasOwnProperty.call(currentDay, 'dateSub')) {
+        const cleanDateSub = normalizeDateSub(currentDay.dateSub);
+        if (cleanDateSub !== currentDay.dateSub) {
+            normalized = {
+                ...worldState,
+                currentDay: { ...currentDay, dateSub: cleanDateSub }
+            };
+        }
+    }
+    await setChatData(chatId, 'worldState', normalized);
 }
 
 /**

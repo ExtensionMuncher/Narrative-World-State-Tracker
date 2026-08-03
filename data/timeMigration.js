@@ -7,11 +7,12 @@
 // uses dayCount; event aging and other duration bookkeeping use elapsed days.
 // =============================================================================
 
-import { getCurrentDay, updateCurrentDay, getStartDate, getCalendarConfig } from './worldState.js';
+import { getWorldState, getCurrentDay, updateCurrentDay, getStartDate, getCalendarConfig } from './worldState.js';
 import { getAllEvents, saveAllEvents, classifyScheduledEventTier } from './events.js';
 import { parseCurrentCalendarDate, dayOfYearFor, daysBetweenCalendarDates, wrapDayCount, extractYearFromText, dateFromDayCount, monthLengthsFor, resolveScheduledElapsedWindow, parseScheduledDayRange, addDaysToDate } from '../lib/calendarMath.js';
 import { getSetting } from '../index.js';
 import { dlog } from '../lib/debug.js';
+import { normalizeDateSub } from '../utils.js';
 
 const ELAPSED_FIELDS = ['tierSetElapsedDay', 'resolveElapsedDay', 'timingDismissedElapsedDay'];
 
@@ -105,8 +106,38 @@ export async function migrateTemporalState(chatId) {
 
     const cfg = getCalendarConfig(chatId);
     const dmy = getSetting('dateFormatDMY') === true;
-    const parsedDate = parseCurrentCalendarDate(current.dateDisplay || '', current.dateSub || '', cfg, dmy);
+    const normalizedDateSub = normalizeDateSub(current.dateSub || '');
+    const parsedDate = parseCurrentCalendarDate(current.dateDisplay || '', normalizedDateSub, cfg, dmy);
     const oldDayCount = Number.isFinite(current.dayCount) ? Number(current.dayCount) : 0;
+
+    // A freshly cleared/uninitialized chat has an empty Current Day and dayCount
+    // 0. Do not "migrate" that blank default into Day 1: doing so materializes
+    // nwst:worldState again immediately after Clear All and makes other UI treat
+    // the chat as already tracking a canonical date even though none exists.
+    const hasDisplayedDate = Boolean(
+        String(current.dateDisplay || '').trim() || normalizedDateSub
+    );
+    if (!hasDisplayedDate && oldDayCount <= 0) {
+        return { changed: false, parsedDate: null, elapsedStoryDays: 0, dayCount: 0 };
+    }
+
+    // Repair the exact phantom state produced by older builds after Clear All:
+    // an otherwise empty world state with dayCount 1 / elapsed 0. Preserve any
+    // genuinely populated legacy state, even if its display date is malformed.
+    if (!hasDisplayedDate && oldDayCount === 1 && (current.elapsedStoryDays ?? 0) === 0) {
+        const ws = getWorldState(chatId);
+        const hasGeneratedWorldContent =
+            (Array.isArray(ws?.forecast) && ws.forecast.length > 0)
+            || (Array.isArray(ws?.moonPhases) && ws.moonPhases.length > 0)
+            || Boolean(ws?.conditions && Object.values(ws.conditions)
+                .some(condition => String(condition?.content || '').trim().length > 0));
+        const hasEvents = getAllEvents(chatId).length > 0;
+        if (!hasGeneratedWorldContent && !hasEvents) {
+            await updateCurrentDay(chatId, { dayCount: 0 });
+            dlog('[NWST TimeMigration] Repaired phantom Day 1 created by an older Clear All flow.');
+            return { changed: true, parsedDate: null, elapsedStoryDays: 0, dayCount: 0 };
+        }
+    }
 
     let elapsed = Number.isInteger(current.elapsedStoryDays) && current.elapsedStoryDays >= 0
         ? current.elapsedStoryDays
@@ -145,7 +176,7 @@ export async function migrateTemporalState(chatId) {
             }
         }
 
-        const currentYear = parsedDate?.year ?? extractYearFromText(current.dateSub || '') ?? extractYearFromText(current.dateDisplay || '') ?? 1;
+        const currentYear = parsedDate?.year ?? extractYearFromText(normalizedDateSub) ?? extractYearFromText(current.dateDisplay || '') ?? 1;
         const currentDOY = parsedDate ? dayOfYearFor(parsedDate, cfg) : wrapDayCount(oldDayCount || 1, cfg, currentYear);
         const currentCalendarDate = parsedDate || dateFromDayCount(currentDOY, currentYear, cfg);
 
@@ -257,7 +288,7 @@ export async function migrateTemporalState(chatId) {
     }
     if (eventsChanged) await saveAllEvents(chatId, events);
 
-    const year = parsedDate?.year ?? extractYearFromText(current.dateSub || '') ?? extractYearFromText(current.dateDisplay || '') ?? 1;
+    const year = parsedDate?.year ?? extractYearFromText(normalizedDateSub) ?? extractYearFromText(current.dateDisplay || '') ?? 1;
     const cyclicalDayCount = parsedDate
         ? dayOfYearFor(parsedDate, cfg)
         : wrapDayCount(oldDayCount || 1, cfg, year);
@@ -265,6 +296,7 @@ export async function migrateTemporalState(chatId) {
     const updates = {};
     if (current.dayCount !== cyclicalDayCount) updates.dayCount = cyclicalDayCount;
     if (current.elapsedStoryDays !== elapsed) updates.elapsedStoryDays = elapsed;
+    if (normalizedDateSub !== String(current.dateSub || '').trim()) updates.dateSub = normalizedDateSub;
     const changed = Object.keys(updates).length > 0 || eventsChanged;
     if (Object.keys(updates).length > 0) await updateCurrentDay(chatId, updates);
 

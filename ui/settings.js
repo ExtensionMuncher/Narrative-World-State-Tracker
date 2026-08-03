@@ -1316,7 +1316,11 @@ function populateStartDateUI() {
         input.disabled = false;
         btn.disabled = false;
         const cur = chatId ? getCurrentDay(chatId) : null;
-        const tracking = cur && Number.isInteger(cur.dayCount) && cur.dayCount > 0;
+        // A fresh NWST state can carry a default dayCount before a canonical
+        // Current Day exists. Only treat the chat as actively tracking when
+        // there is an actual displayed date.
+        const hasCurrentDate = typeof cur?.dateDisplay === 'string' && cur.dateDisplay.trim().length > 0;
+        const tracking = hasCurrentDate && Number.isInteger(cur.dayCount) && cur.dayCount > 0;
         status.textContent = tracking
             ? 'Not set — NWST is already tracking this chat; anything entered now is stored as reference information only.'
             : 'Not set — the warmup scan will fill this from the roleplay text, or enter it yourself now.';
@@ -3456,7 +3460,10 @@ function wireSettingsEvents() {
             // elapsedStoryDays is recalculated from Starting Date -> Current Date
             // and duration markers are rebased so existing event ages stay intact.
             const cur = getCurrentDay(chatId);
-            const tracking = cur && Number.isInteger(cur.dayCount) && cur.dayCount > 0;
+            // A default dayCount alone does not mean the chat has a canonical
+            // Current Day yet. Fresh chats must stay on the direct setup path.
+            const hasCurrentDate = typeof cur?.dateDisplay === 'string' && cur.dateDisplay.trim().length > 0;
+            const tracking = hasCurrentDate && Number.isInteger(cur.dayCount) && cur.dayCount > 0;
             let currentDateForRebase = null;
             let elapsedForRebase = null;
             if (tracking) {
@@ -3499,18 +3506,33 @@ function wireSettingsEvents() {
             );
             if (!confirmed) return;
 
-            // Preserve legacy anchor metadata for backward compatibility, but
-            // Starting Date now also establishes elapsedStoryDays when Current
-            // Day is already populated.
-            const anchor = { ...parsed, anchorDayCount: existing?.anchorDayCount ?? null, source: 'user', locked: true };
+            // Preserve legacy anchor metadata for backward compatibility. The
+            // anchor's calendar position is also the initial seasonal day count
+            // for a fresh chat so Season Configuration is immediately aligned.
+            const anchorDayCount = dayOfYearFor(parsed, cfg);
+            const anchor = { ...parsed, anchorDayCount, source: 'user', locked: true };
             await saveStartDate(chatId, anchor);
 
             if (tracking) {
                 await rebaseElapsedStoryDays(chatId, elapsedForRebase);
             }
 
+            // dayCount is the current cyclical position in the calendar year,
+            // not elapsed duration. Fresh chats start at the Starting Date;
+            // already-tracking chats keep their later canonical Current Day.
+            const seasonalDate = tracking ? currentDateForRebase : parsed;
+            const seasonalDayCount = dayOfYearFor(seasonalDate, cfg);
+            const { computeSeason } = await import('../llm/dayAdvancement.js');
+            const computedSeason = computeSeason(seasonalDayCount, getSeasonConfig(chatId));
+            const seasonalUpdate = { dayCount: seasonalDayCount, dayCountAutoSet: true };
+            if (computedSeason) seasonalUpdate.season = computedSeason;
+            await updateCurrentDay(chatId, seasonalUpdate);
+
             populateStartDateUI();
-            nwstToast(`Starting date saved: ${interpreted}`, 'success');
+            populateSeasonConfigUI();
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+            const seasonNote = computedSeason ? ` · ${computedSeason}` : '';
+            nwstToast(`Starting date saved: ${interpreted}. Seasonal day count: ${seasonalDayCount}${seasonNote}.`, 'success');
         });
     }
 
@@ -3879,6 +3901,16 @@ function wireSettingsEvents() {
             const preservedWeatherProfiles = getWeatherProfilesState(chatId);
             preservedWeatherProfiles.profiles = preservedWeatherProfiles.profiles.map(p => ({ ...p, activeSystem: null, history: [] }));
 
+            // Stop the event-driven scanner before clearing so its in-memory
+            // cadence does not continue from data that no longer exists.
+            let scannerModule = null;
+            try {
+                scannerModule = await import('../llm/scanner.js');
+                scannerModule.stopScanner();
+            } catch (error) {
+                console.warn('[NWST Settings] Could not stop scanner before Clear All:', error);
+            }
+
             await deleteAllChatData(chatId);
 
             // Restore user-authored data
@@ -3891,9 +3923,19 @@ function wireSettingsEvents() {
                 await saveWeatherProfilesState(chatId, preservedWeatherProfiles);
             }
 
-            nwstToast('All generated NWST data cleared for this chat (Setting Context profiles, Weather Profiles, Season Config, and Calendar Config preserved).', 'success');
-            // Refresh the UI to reflect the cleared state
-            populateSettingsUI();
+            // Restart only after preserved configuration is restored so the
+            // chat re-enters warmup from a genuinely clean boundary.
+            if (scannerModule && getSetting('enabled') && !getSetting('scanPaused')) {
+                scannerModule.startScanner();
+            }
+
+            nwstToast('All generated NWST data cleared for this chat. Scanner warmup was reset; Setting Context profiles, Weather Profiles, Season Config, and Calendar Config were preserved.', 'success');
+            // Refresh every tab so stale generated content disappears at once.
+            if (typeof window.nwstRefreshAllUI === 'function') {
+                window.nwstRefreshAllUI();
+            } else {
+                populateSettingsUI();
+            }
         });
     }
 

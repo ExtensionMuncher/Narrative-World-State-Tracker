@@ -1105,7 +1105,7 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
     prompt += `CRITICAL DATE FORMAT RULES — READ BEFORE GENERATING:\n`;
     prompt += `  1. dateDisplay MUST start with the day of the week (e.g. "${calConfig.enabled && calConfig.weekDays.length > 0 ? calConfig.weekDays[0] : 'Monday'}", "${calConfig.enabled && calConfig.weekDays.length > 1 ? calConfig.weekDays[1] : 'Thursday'}", "Kin'yōbi")\n`;
     prompt += `  2. dateDisplay MUST NOT contain a pipe | character — that belongs in dateSub\n`;
-    prompt += `  3. Use dateSub for era/calendar context ONLY, in whatever era system fits the setting (e.g. "Reiwa 6", "Tang Dynasty · Kaiyuan 5", "Reign of Augustus · Year 12", "Victorian Era", "1st Century BC")\n`;
+    prompt += `  3. Use dateSub for era/calendar context ONLY, in whatever era system fits the setting (e.g. "Reiwa 6", "Tang Dynasty · Kaiyuan 5", "Reign of Augustus · Year 12", "Victorian Era", "1st Century BC"). NEVER append a city, country, region, or general setting label such as "Modern City" or "Present-day Region".\n`;
     prompt += `  4. dayCount = the 1-based cyclical day position within the CURRENT configured calendar year. Its maximum is the sum of that year's configured month lengths; it resets to 1 at New Year.\n`;
     prompt += `  5. FAILURE TO FOLLOW THESE RULES WILL CORRUPT THE DATE DISPLAY IN THE UI.\n\n`;
 
@@ -1153,7 +1153,7 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
     prompt += `{
   "currentDay": {
     "dateDisplay": "MUST start with day-of-week followed by ', Month Date, Year'. No pipe characters. Modern: 'Monday, April 15th, 2024'. Historical: 'Kin'yōbi, Chrysanthemum Month · Sixth Day of the Waxing Moon'.",
-    "dateSub": "Era context only, matching the setting's culture and period — e.g. 'Reiwa 6', 'Imperial Era · 1125 CE', 'Tang Dynasty · Kaiyuan 5', 'Victorian Era', '21st Century', '1st Century BC'. Leave empty if no applicable era.",
+    "dateSub": "Era/calendar context only, matching the setting's culture and period — e.g. 'Reiwa 6', 'Imperial Era · 1125 CE', 'Tang Dynasty · Kaiyuan 5', 'Victorian Era', '21st Century', '1st Century BC'. Never include a city, country, region, or general setting label. Leave empty if no applicable era.",
     "season": "Current season — evocative, sensory, grounded in the setting. Faction names fine if relevant; individual character actions should not appear.",
     "weatherToday": "Today's weather as a physical experience. Faction names fine if relevant; individual character actions should not appear.",
     "flora": "What is growing or changing in the natural world. Faction names fine if relevant; individual character actions should not appear.",
@@ -1286,8 +1286,9 @@ async function applyBatchResults(chatId, result) {
         const { replaceCurrentDay } = await import('../data/worldState.js');
 
         // ── Post-process dateDisplay ──────────────────────────────
-        // If the LLM put era/region info after a pipe (e.g. "October 17, 2024 | Modern day Japan"),
-        // split it into dateDisplay and dateSub. Also ensure day-of-week is present.
+        // If the LLM put sub-date information after a pipe, split it into
+        // dateDisplay and dateSub. Storage normalization later removes any
+        // accidental city/country/general-setting label. Also ensure day-of-week is present.
         if (result.currentDay.dateDisplay && typeof result.currentDay.dateDisplay === 'string') {
             const pipeIdx = result.currentDay.dateDisplay.indexOf('|');
             if (pipeIdx !== -1) {

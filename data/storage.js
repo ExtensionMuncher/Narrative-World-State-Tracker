@@ -453,10 +453,41 @@ function chatHasData(chatId) {
         return false;
     }
 
-    const contentKeys = ['worldState', 'events', 'notebook', 'communities'];
-    const found = contentKeys.filter(k => meta[metaKey(k)] !== undefined);
+    // Key existence alone is not enough. Clear All, an empty import, or an old
+    // temporal migration may leave a stored default-shaped object behind. That
+    // must not trick the scanner into skipping warmup as though a batch scan had
+    // populated the chat.
+    const ws = meta[metaKey('worldState')];
+    const day = ws?.currentDay || {};
+    const hasCurrentDay = [
+        day.dateDisplay, day.dateSub, day.season, day.weatherToday,
+        day.flora, day.fauna, day.spiritualClimate
+    ].some(value => String(value || '').trim().length > 0);
+    const hasForecast = Array.isArray(ws?.forecast) && ws.forecast.length > 0;
+    const hasMoonState = Array.isArray(ws?.moonPhases) && ws.moonPhases.length > 0;
+    const hasConditionContent = ws?.conditions && Object.values(ws.conditions)
+        .some(condition => String(condition?.content || '').trim().length > 0);
+    const hasWorldState = Boolean(ws && (hasCurrentDay || hasForecast || hasMoonState || hasConditionContent));
 
-    dlog(`[NWST Storage] chatHasData: content keys found: ${found.join(', ') || 'none'}`);
+    const events = meta[metaKey('events')];
+    const hasEvents = Array.isArray(events) && events.length > 0;
+
+    const notebook = meta[metaKey('notebook')];
+    const hasNotebook = Boolean(notebook && [notebook.core, notebook.mystery]
+        .filter(section => section && typeof section === 'object')
+        .some(section => Object.values(section).some(list => Array.isArray(list) && list.length > 0)))
+        || (Array.isArray(notebook?.secrets) && notebook.secrets.length > 0);
+
+    const communities = meta[metaKey('communities')];
+    const hasCommunities = Array.isArray(communities) && communities.length > 0;
+
+    const found = [];
+    if (hasWorldState) found.push('worldState');
+    if (hasEvents) found.push('events');
+    if (hasNotebook) found.push('notebook');
+    if (hasCommunities) found.push('communities');
+
+    dlog(`[NWST Storage] chatHasData: meaningful content found: ${found.join(', ') || 'none'}`);
     return found.length > 0;
 }
 

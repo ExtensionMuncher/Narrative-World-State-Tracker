@@ -821,7 +821,7 @@ You will receive:
 Respond with a JSON object containing:
 {
   "dateDisplay": "the new date display string (advance by one day)",
-  "dateSub": "the sub-date string (era/year, unchanged unless a year boundary is crossed)",
+  "dateSub": "era/year only, unchanged unless a year boundary is crossed. Never include a city, country, region, or general setting label.",
   "season": "the current season (update if the day advancement crosses a seasonal boundary)",
   "forecast": [
     {
@@ -858,7 +858,7 @@ You will receive:
 
 Respond with a JSON object containing:
 {
-  "dateSub": "era context for the computed date, in whatever era system fits the SETTING — e.g. 'Reiwa 8', 'Kank\u014d 4', 'Tang Dynasty \u00b7 Kaiyuan 5', 'Reign of Augustus \u00b7 Year 12', 'Victorian Era', 'Umayyad Caliphate \u00b7 97 AH', '1st Century BC'. Keep the previous era label unless the computed date crosses an era boundary. Use an empty string if no era system applies to this setting.",
+  "dateSub": "era/calendar context only for the computed date, in whatever era system fits the SETTING — e.g. 'Reiwa 8', 'Kank\u014d 4', 'Tang Dynasty \u00b7 Kaiyuan 5', 'Reign of Augustus \u00b7 Year 12', 'Victorian Era', 'Umayyad Caliphate \u00b7 97 AH', '1st Century BC'. Keep the previous era label unless the computed date crosses an era boundary. Never include a city, country, region, or general setting label. Use an empty string if no era system applies to this setting.",
   "season": "the current season for the computed date",
   "forecast": [
     {
@@ -1020,6 +1020,10 @@ export async function regenerateForecast(mode = 'all') {
             const userPrompt = buildForecastOnlyPrompt(currentDay, settingContext, currentForecast, computedSeason, weatherConstraint, weatherProfileContext);
 
             const response = await callLLM(profile, systemPrompt, userPrompt);
+            if (getChatId() !== chatId) {
+                dlog('[NWST DayAdvancement] Discarded stale forecast result because the active chat changed.');
+                return false;
+            }
             if (!response) {
                 throw new Error('LLM returned empty response.');
             }
@@ -1109,7 +1113,6 @@ export async function advanceToNextDay() {
         const currentDay = getCurrentDay(chatId);
         const settingContext = getSettingContext(chatId);
         const currentForecast = getForecast(chatId);
-        const currentMoonPhases = getMoonPhases(chatId);
 
         // ★ SNAPSHOT FIRST — capture pre-mutation state before anything changes
         await saveDayBoundarySnapshot(chatId);
@@ -1153,6 +1156,10 @@ export async function advanceToNextDay() {
         // 4. Call the Day Advancement LLM
         const systemPrompt = detDate ? DAY_ADVANCEMENT_DETERMINISTIC_SYSTEM_PROMPT : DAY_ADVANCEMENT_SYSTEM_PROMPT;
         const response = await callLLM(profile, systemPrompt, userPrompt);
+        if (getChatId() !== chatId) {
+            dlog('[NWST DayAdvancement] Discarded stale day-advancement result because the active chat changed.');
+            return false;
+        }
 
         // 5. Parse the JSON response
         const result = parseDayAdvancementResponse(response, !!detDate);
@@ -1498,7 +1505,7 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast, compute
     prompt += `Sub-Date: ${currentDay.dateSub || '(not set)'}\n`;
     if (detDate) {
         prompt += `System-computed NEW date (authoritative): ${detDate.dateDisplay}\n`;
-        prompt += `Provide the dateSub era label for this new date, using whatever era system fits the setting (any culture or period). Previous era line: "${currentDay.dateSub || '(none)'}" — keep it unless the new date crosses an era boundary; empty string if no era system applies.\n`;
+        prompt += `Provide the dateSub era label for this new date, using whatever era system fits the setting (any culture or period). Previous era line: "${currentDay.dateSub || '(none)'}" — keep it unless the new date crosses an era boundary. dateSub is era/calendar context only: never append a city, country, region, or general setting label. Use an empty string if no era system applies.\n`;
         if (eraPin) {
             prompt += `PLAYER-VERIFIED ERA: the player manually confirmed the era system ("${eraPin}"). The previous era line descends from that confirmation — do NOT replace it with a different era system. Maintain it: update era-relative year numbers as years roll (e.g. era-year 4 becomes era-year 5 at a new year), and change the era name only at a genuine historical boundary within the same system.\n`;
         }

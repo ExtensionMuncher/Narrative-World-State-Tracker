@@ -25,6 +25,8 @@ It runs quietly in the background on a configurable message cadence, updating as
 - Manual date editing for typo corrections — does not trigger API calls
 - **Separate calendar position and story duration** — the annual `dayCount` now wraps with the configured calendar while `elapsedStoryDays` tracks how much canonical story time has actually passed. Event aging, compaction, cooldowns, and other duration logic no longer break at New Year.
 - **Starting Date catch-up** — adding a Starting Date to an existing chat can parse the current configured-calendar date, calculate the elapsed distance, and rebase duration markers without resetting your world state.
+- **Immediate Starting Date initialization** — on a fresh or cleared chat, saving the Starting Date immediately establishes the annual calendar position and configured season. A default placeholder day count no longer makes NWST incorrectly treat an uninitialized chat as already tracking time.
+- **Era-line cleanup** — the secondary date line is limited to era/calendar context. Accidental city, country, region, or general setting labels are removed before storage so they cannot become stale when the story changes location.
 - Custom month names, configured weekday cycles, leap years, year rollover, and cross-year Special Day ranges are handled by the calendar engine rather than assuming a fixed 365-day/7-day calendar.
 
 ### 🌤 Weather & Moon Phases
@@ -115,6 +117,7 @@ Secrets are injected **selectively**: only when a character from the "Who Knows"
 - Cadence scanning is split into a **detailed continuity pass** (Notebook, Secrets, detected future plans, active Event status) and a **World/Community pass** for macro-scale persistent state. Both responses are validated before either pass is applied, preventing half-applied scan windows.
 - Scan windows are bounded and backlog-aware so older unscanned messages are processed in order instead of being skipped when a backlog develops.
 - A Home-tab health indicator reports warmup progress, active scanning, backlog, the last successful scan, failures, and when the next cadence pass is due.
+- Long-running forecast, day-advancement, and time-skip responses are discarded if the active chat changes before completion, preventing stale results from being written into another chat.
 - Explicit completion-token budgets are used across NWST's structured LLM calls to reduce reasoning-heavy models exhausting their response allowance before returning valid JSON.
 
 ### ⚡ Batch Scan
@@ -175,6 +178,8 @@ NWST keeps **calendar position** and **story duration** as separate concepts. Sa
 All narrative data is stored **per chat**. Your high fantasy roleplay has its own world state, events, notebook, Setting Context profile library, and Weather Profile library. Your modern city roleplay has its own. Opening a different chat loads that chat's data entirely. There is no crossover.
 
 Narrative-state snapshots are saved at day advancement boundaries. Previous Day restores the saved world state, events, notebook, active Setting Context selection, and severe-weather simulation state for that boundary. Batch-scan and pre-time-skip landmark snapshots are protected from retention pruning, so the stored total can exceed the configured snapshot target when necessary.
+
+**Clear All** preserves user-authored Setting Context profiles, Weather Profiles, Season Configuration, and Calendar Configuration while removing generated state. It now resets scanner warmup/cadence, clears phantom empty-state markers left by older builds, and refreshes every tab immediately so a cleared chat behaves like a genuinely fresh one.
 
 ---
 

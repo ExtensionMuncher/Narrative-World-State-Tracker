@@ -79,7 +79,7 @@ Respond with a JSON object:
 {
   "currentDay": {
     "dateDisplay": "new date string",
-    "dateSub": "sub-date if changed",
+    "dateSub": "era/calendar context only if changed; never include a city, country, region, or general setting label",
     "season": "new season",
     "weatherToday": "weather at the new time",
     "flora": "seasonal flora description",
@@ -193,6 +193,10 @@ export async function executeTimeSkip(skipDescription) {
 
         dlog('[NWST Timeskip] Calling Planning LLM with full context...');
         const response = await generateWithProfile(profile, messages, { maxTokens: LLM_TOKEN_BUDGETS.BULK });
+        if (getChatId() !== chatId) {
+            dlog('[NWST Timeskip] Discarded stale time-skip result because the active chat changed.');
+            return false;
+        }
 
         if (!response) {
             throw new Error('Planning LLM returned empty response.');
@@ -415,6 +419,10 @@ export async function executeTimeSkip(skipDescription) {
         }
 
         // ── 8. Regenerate weather forecast ──────────────────────────
+        if (getChatId() !== chatId) {
+            dlog('[NWST Timeskip] Active chat changed before forecast regeneration; abandoning stale time skip.');
+            return false;
+        }
         try {
             const { regenerateForecast } = await import('./dayAdvancement.js');
             await regenerateForecast('forecast');
@@ -500,6 +508,7 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     prompt += `=== CURRENT WORLD STATE ===\n`;
     prompt += `Date: ${currentDay.dateDisplay || '(not set)'}\n`;
     prompt += `Sub-Date: ${currentDay.dateSub || ''}\n`;
+    prompt += `Sub-Date rule: era/calendar context only. Never append a city, country, region, or general setting label.\n`;
     if (eraPin) {
         prompt += `PLAYER-VERIFIED ERA: the player manually confirmed the era system ("${eraPin}"). Keep the new dateSub in this same era system — update era-relative year numbers for the elapsed time, but do NOT switch to a different era system.\n`;
     }
