@@ -9,7 +9,7 @@
 //
 // PROFILE RESOLUTION PRIORITY:
 //   1. The specific NWST profile configured in Settings for this role
-//      (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM)
+//      (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM, hiddenIntentionsLLM)
 //   2. If not configured OR if the saved profile no longer exists:
 //      → WARN the user via toast (once per session per role)
 //      → Fall back to the current chat's active connection profile
@@ -29,6 +29,17 @@ import { dlog } from "../lib/debug.js";
 // Track which roles we've already warned about this session so we don't
 // spam the user with the same toast on every scanner tick.
 const warnedRoles = new Set();
+const identicalRequestsInFlight = new Map();
+
+function requestFingerprint(profileId, messages, maxTokens, softOn, hardOn) {
+    const source = `${profileId}|${maxTokens || ''}|${softOn ? 1 : 0}|${hardOn ? 1 : 0}|${JSON.stringify(messages)}`;
+    let hash = 2166136261;
+    for (let i = 0; i < source.length; i++) {
+        hash ^= source.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return `${profileId}:${source.length}:${hash >>> 0}`;
+}
 
 // ── Connection profile availability ──────────────────────────────────────
 
@@ -71,12 +82,20 @@ export function getProfileById(profileId) {
  * Returns null only if NO profiles exist at all (connection-manager disabled
  * or no profiles configured). Callers must handle null by skipping the LLM call.
  *
- * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM'
+ * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM' | 'secretsSidecarLLM' | 'hiddenIntentionsLLM'
  * @returns {object|null} The resolved profile object, or null if unavailable
  */
 export function resolveProfile(profileKey) {
     const roleLabel = getRoleLabel(profileKey);
     const configuredId = getConnectionProfile(profileKey);
+
+    // Hidden Intentions can deliberately inherit the Planning profile so the
+    // feature does not force a fifth connection unless the user wants one.
+    if (profileKey === 'hiddenIntentionsLLM' && configuredId === '__planning__') {
+        const inherited = resolveProfile('planningLLM');
+        if (inherited) dlog(`[NWST Connections] hiddenIntentionsLLM: inheriting Planning profile "${inherited.name}" (${inherited.id})`);
+        return inherited;
+    }
 
     // No profile configured for this role at all
     if (!configuredId) {
@@ -124,6 +143,7 @@ function getRoleLabel(profileKey) {
         case 'dayAdvancementLLM':       return 'Day Advancement LLM';
         case 'narrativeConsistencyLLM': return 'Narrative Consistency LLM';
         case 'secretsSidecarLLM':       return 'Secrets Sidecar LLM';
+        case 'hiddenIntentionsLLM':      return 'Hidden Intentions LLM';
         default:                        return profileKey;
     }
 }
@@ -153,46 +173,175 @@ export function resetProfileWarnings() {
  * @param {number} [options.maxTokens] - Max response tokens
  * @returns {Promise<string>} LLM response text, or '' on failure
  */
-export async function generateWithProfile(profile, messages, options = {}) {
+function flattenConnectionText(value) {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) {
+        return value.map(item => {
+            if (typeof item === 'string') return item;
+            if (!item || typeof item !== 'object') return '';
+            return flattenConnectionText(item.text ?? item.content ?? item.output_text ?? item.value);
+        }).filter(Boolean).join('');
+    }
+    if (value && typeof value === 'object') {
+        return flattenConnectionText(value.text ?? value.content ?? value.output_text ?? value.value);
+    }
+    return '';
+}
+
+function extractConnectionResponseText(response) {
+    if (typeof response === 'string') return response;
+    if (!response || typeof response !== 'object') return '';
+
+    const direct = [
+        response.content,
+        response.text,
+        response.response,
+        response.output_text,
+        response.generated_text,
+        response.message?.content,
+        response.data?.content,
+        response.data?.text,
+        response.data?.response,
+        response.result?.content,
+        response.result?.text,
+        response.result?.response,
+        response.choices?.[0]?.message?.content,
+        response.choices?.[0]?.text,
+        response.data?.choices?.[0]?.message?.content,
+        response.data?.choices?.[0]?.text,
+    ];
+    for (const value of direct) {
+        const text = flattenConnectionText(value);
+        if (text.length) return text;
+    }
+    return '';
+}
+
+function firstNonEmptyString(values = []) {
+    for (const value of values) {
+        const text = flattenConnectionText(value);
+        if (text.trim()) return text;
+    }
+    return '';
+}
+
+function extractConnectionResponseMetadata(response, content = '') {
+    if (!response || typeof response !== 'object') {
+        return {
+            reasoning: '',
+            finishReason: '',
+            completionTokens: null,
+            reasoningTokens: null,
+            reasoningExhausted: false
+        };
+    }
+
+    const reasoning = firstNonEmptyString([
+        response.reasoning_content,
+        response.reasoning,
+        response.message?.reasoning_content,
+        response.message?.reasoning,
+        response.data?.reasoning_content,
+        response.data?.reasoning,
+        response.result?.reasoning_content,
+        response.result?.reasoning,
+        response.choices?.[0]?.message?.reasoning_content,
+        response.choices?.[0]?.message?.reasoning,
+        response.data?.choices?.[0]?.message?.reasoning_content,
+        response.data?.choices?.[0]?.message?.reasoning,
+    ]);
+    const finishReason = firstNonEmptyString([
+        response.finish_reason,
+        response.finishReason,
+        response.stop_reason,
+        response.stopReason,
+        response.choices?.[0]?.finish_reason,
+        response.choices?.[0]?.stop_reason,
+        response.data?.choices?.[0]?.finish_reason,
+        response.data?.choices?.[0]?.stop_reason,
+    ]);
+    const usage = response.usage || response.data?.usage || response.result?.usage || {};
+    const completionTokens = Number.isFinite(Number(usage.completion_tokens ?? usage.output_tokens))
+        ? Number(usage.completion_tokens ?? usage.output_tokens)
+        : null;
+    const reasoningTokens = Number.isFinite(Number(
+        usage.reasoning_tokens
+        ?? usage.completion_tokens_details?.reasoning_tokens
+        ?? usage.output_tokens_details?.reasoning_tokens
+    ))
+        ? Number(
+            usage.reasoning_tokens
+            ?? usage.completion_tokens_details?.reasoning_tokens
+            ?? usage.output_tokens_details?.reasoning_tokens
+        )
+        : null;
+    const stoppedForLength = /(?:length|max[_\s-]?(?:tokens?|output)|token[_\s-]?limit)/i.test(finishReason);
+    const reasoningExhausted = !String(content || '').trim() && !!reasoning.trim() && stoppedForLength;
+    return { reasoning, finishReason, completionTokens, reasoningTokens, reasoningExhausted };
+}
+
+function connectionResponseDiagnostic(response, metadata = {}) {
+    if (response == null) return 'no response object';
+    if (typeof response === 'string') return `string response (${response.length} chars)`;
+    if (typeof response !== 'object') return `${typeof response} response`;
+    const keys = Object.keys(response).slice(0, 16);
+    const status = response.status ?? response.statusCode ?? response.code ?? response.data?.status ?? '';
+    const errorValue = response.error?.message ?? response.error ?? response.data?.error?.message ?? response.data?.error ?? '';
+    const message = typeof response.message === 'string' ? response.message : '';
+    const parts = [`object keys=[${keys.join(', ')}]`];
+    if (status !== '') parts.push(`status=${String(status).slice(0, 120)}`);
+    if (errorValue) parts.push(`error=${String(errorValue).slice(0, 350)}`);
+    if (message) parts.push(`message=${message.slice(0, 350)}`);
+    if (metadata.finishReason) parts.push(`finish_reason=${metadata.finishReason.slice(0, 120)}`);
+    if (metadata.reasoning) parts.push(`reasoning=${metadata.reasoning.length} chars`);
+    if (metadata.completionTokens != null) parts.push(`completion_tokens=${metadata.completionTokens}`);
+    if (metadata.reasoningTokens != null) parts.push(`reasoning_tokens=${metadata.reasoningTokens}`);
+    if (metadata.reasoningExhausted) parts.push('reasoning_exhausted=true');
+    return parts.join('; ');
+}
+
+/**
+ * Detailed variant used by long-running migrations that need to distinguish a
+ * real empty model answer from a transport/provider failure. Existing callers
+ * can continue using generateWithProfile(), which returns only the text.
+ */
+export async function generateWithProfileDetailed(profile, messages, options = {}) {
+    const requestChars = (messages || []).reduce((sum, item) => sum + String(item?.content || '').length, 0);
     if (!profile?.id) {
-        console.error('[NWST Connections] generateWithProfile: invalid or null profile');
-        return '';
+        const error = new Error('Invalid or null connection profile.');
+        console.error('[NWST Connections] generateWithProfileDetailed:', error.message);
+        return { content: '', error, empty: true, requestChars, diagnostic: error.message };
     }
 
     if (!messages?.length) {
-        console.error('[NWST Connections] generateWithProfile: no messages provided');
-        return '';
+        const error = new Error('No messages were provided to the connection request.');
+        console.error('[NWST Connections] generateWithProfileDetailed:', error.message);
+        return { content: '', error, empty: true, requestChars, diagnostic: error.message };
     }
 
     try {
         const ctx = SillyTavern.getContext();
 
         if (!ctx.ConnectionManagerRequestService) {
-            console.error(
-                '[NWST Connections] ConnectionManagerRequestService not available. ' +
-                'Is the connection-manager extension enabled?'
-            );
+            const error = new Error('ConnectionManagerRequestService is unavailable.');
+            console.error('[NWST Connections]', error.message);
             nwstToast(
                 'NWST: Cannot call LLM — connection-manager extension is required. ' +
                 'Please enable it in ST Extensions.',
                 'error'
             );
-            return '';
+            return { content: '', error, empty: true, requestChars, diagnostic: error.message };
         }
 
-        dlog(`[NWST Connections] Calling LLM: profile="${profile.name || profile.id}" api="${profile.api || 'unknown'}"`);
+        dlog(`[NWST Connections] Calling LLM: profile="${profile.name || profile.id}" api="${profile.api || 'unknown'}" request=${requestChars} chars`);
 
-        // Per-profile no-think. Settings are keyed by profile ID so each profile
-        // independently controls reasoning suppression. Backward-compat: the old
-        // blanket booleans (noThink / noThinkHard), if true, apply to all profiles
-        // until a per-profile map is set.
         const s = ctx.extensionSettings?.nwst || {};
         const softMap = (s.noThinkProfiles && typeof s.noThinkProfiles === 'object') ? s.noThinkProfiles : null;
         const hardMap = (s.noThinkHardProfiles && typeof s.noThinkHardProfiles === 'object') ? s.noThinkHardProfiles : null;
-        const softOn = softMap ? !!softMap[profile.id] : !!s.noThink;
-        const hardOn = hardMap ? !!hardMap[profile.id] : !!s.noThinkHard;
+        const forceNoThink = options.forceNoThink === true;
+        const softOn = forceNoThink || (softMap ? !!softMap[profile.id] : !!s.noThink);
+        const hardOn = forceNoThink || (hardMap ? !!hardMap[profile.id] : !!s.noThinkHard);
 
-        // No-think soft switch: append "/no_think" to the LAST user message.
         let outMessages = messages;
         try {
             if (softOn) {
@@ -201,16 +350,11 @@ export async function generateWithProfile(profile, messages, options = {}) {
                 for (let i = outMessages.length - 1; i >= 0; i--) {
                     if (outMessages[i].role === 'user') { idx = i; break; }
                 }
-                if (idx >= 0) {
-                    outMessages[idx].content = (outMessages[idx].content || '') + '\n\n/no_think';
-                } else {
-                    outMessages.push({ role: 'user', content: '/no_think' });
-                }
+                if (idx >= 0) outMessages[idx].content = (outMessages[idx].content || '') + '\n\n/no_think';
+                else outMessages.push({ role: 'user', content: '/no_think' });
             }
         } catch (e) { dlog('[NWST] no_think injection skipped:', e); }
 
-        // No-think HARD switch (per-profile, opt-in). Off unless set for this
-        // profile — some backends error on unknown body keys.
         const overridePayload = {};
         if (hardOn) {
             overridePayload.think = false;
@@ -218,20 +362,59 @@ export async function generateWithProfile(profile, messages, options = {}) {
             overridePayload.chat_template_kwargs = { enable_thinking: false };
         }
 
-        const response = await ctx.ConnectionManagerRequestService.sendRequest(
+        const __nwstSend = () => ctx.ConnectionManagerRequestService.sendRequest(
             profile.id,
             outMessages,
             options.maxTokens,
             { extractData: true, includePreset: true, stream: false },
             overridePayload
         );
+        const fingerprint = requestFingerprint(profile.id, outMessages, options.maxTokens, softOn, hardOn);
+        let requestPromise = identicalRequestsInFlight.get(fingerprint);
+        if (!requestPromise) {
+            requestPromise = Promise.resolve(__nwstSend());
+            identicalRequestsInFlight.set(fingerprint, requestPromise);
+            requestPromise.finally(() => {
+                if (identicalRequestsInFlight.get(fingerprint) === requestPromise) identicalRequestsInFlight.delete(fingerprint);
+            }).catch(() => undefined);
+        } else {
+            dlog('[NWST Connections] Coalesced an identical in-flight request to prevent duplicate model charges.');
+        }
+        const response = await requestPromise;
 
-        const result = response?.content || '';
-        dlog(`[NWST Connections] Response received (${result.length} chars)`);
-        return result;
-
+        const content = extractConnectionResponseText(response);
+        const metadata = extractConnectionResponseMetadata(response, content);
+        const diagnostic = connectionResponseDiagnostic(response, metadata);
+        dlog(`[NWST Connections] Response received (${content.length} chars); ${diagnostic}`);
+        if (!content.trim()) {
+            const reason = metadata.reasoningExhausted
+                ? 'Model exhausted its completion budget in reasoning before emitting visible text'
+                : 'Connection returned no model text';
+            const error = new Error(`${reason} (${diagnostic}).`);
+            return {
+                content: '',
+                error,
+                empty: true,
+                requestChars,
+                diagnostic,
+                rawResponse: response,
+                ...metadata
+            };
+        }
+        return { content, error: null, empty: false, requestChars, diagnostic, rawResponse: response, ...metadata };
     } catch (err) {
         console.error('[NWST Connections] LLM call failed:', err);
-        return '';
+        return {
+            content: '',
+            error: err instanceof Error ? err : new Error(String(err)),
+            empty: true,
+            requestChars,
+            diagnostic: String(err?.message || err || 'Unknown connection failure').slice(0, 500)
+        };
     }
+}
+
+export async function generateWithProfile(profile, messages, options = {}) {
+    const result = await generateWithProfileDetailed(profile, messages, options);
+    return result.content || '';
 }

@@ -20,6 +20,7 @@
 //     inconsistenciesFlagged: string[],
 //     currentToneAtmosphere: string[]
 //   },
+//   hiddenIntentions: [ structured private objectives/plans/commitments/priorities/contingencies/interests ],
 //   secrets: [
 //     {
 //       id: string,
@@ -80,7 +81,8 @@ export function getNotebook(chatId) {
             inconsistenciesFlagged: Array.isArray(nb.mystery?.inconsistenciesFlagged) ? nb.mystery.inconsistenciesFlagged : [],
             currentToneAtmosphere: Array.isArray(nb.mystery?.currentToneAtmosphere) ? nb.mystery.currentToneAtmosphere : []
         },
-        secrets: Array.isArray(nb.secrets) ? nb.secrets : []
+        secrets: Array.isArray(nb.secrets) ? nb.secrets : [],
+        hiddenIntentions: Array.isArray(nb.hiddenIntentions) ? nb.hiddenIntentions : []
     };
 }
 
@@ -352,7 +354,7 @@ function knowledgeNamesMatch(a, b) {
         return [...aTokens].sort().join(' ') === [...bTokens].sort().join(' ');
     }
 
-    // Safe short/full-name bridge: "Mira" ↔ "Mira Rowan".
+    // Safe short/full-name bridge: "Mira" ↔ "Mira Vale".
     // Only match whole first/last-name tokens; never arbitrary substrings.
     const short = aTokens.length === 1 ? aTokens[0] : (bTokens.length === 1 ? bTokens[0] : '');
     const full = aTokens.length > 1 ? aTokens : (bTokens.length > 1 ? bTokens : []);
@@ -401,6 +403,17 @@ export async function repairSecretKnowledgeIntegrity(chatId) {
 
     if (repaired > 0) await saveNotebook(chatId, nb);
     return repaired;
+}
+
+async function notifyHiddenIntentionsKnowledgeChange(chatId, actors, reason = 'Secret knowledge changed.') {
+    const names = Array.from(new Set((Array.isArray(actors) ? actors : []).map(x => String(x || '').trim()).filter(Boolean)));
+    if (!names.length) return;
+    try {
+        const { markHiddenIntentionsDirty } = await import('../llm/hiddenIntentions.js');
+        await markHiddenIntentionsDirty(chatId, names, reason, { worldDirty: false });
+    } catch (e) {
+        console.warn('[NWST Notebook] Could not mark Hidden Intentions dirty after knowledge change:', e);
+    }
 }
 
 // ── Secrets section ───────────────────────────────────────────────────────
@@ -507,15 +520,18 @@ export async function addSecret(chatId, secretData) {
         //   lastInjectionMsgIndex — message counter from chat.length at time of last injection.
         //   -1 means never injected. Used for cooldown and stale-bonus calculations.
         lastInjectionMsgIndex: secretData.lastInjectionMsgIndex ?? -1,
-        // Optional v2 trigger anchors. Preserve exactly to avoid event-promotion data loss.
-        triggerAnchors: secretData.triggerAnchors || null,
+        // v2 trigger anchors. Normalize model/user input, and guarantee a
+        // deterministic fallback so newly generated Secrets never require a
+        // separate Debug > Backfill Anchors pass just to become selectively usable.
+        triggerAnchors: normalizeSecretTriggerAnchors(secretData.triggerAnchors)
+            || buildFallbackSecretTriggerAnchors(secretData),
         // ── Lifecycle status ──────────────────────────────────────────
         //   'active'          — normal; scored and injected
         //   'pending_archive' — LLM flagged it as likely revealed/dormant; awaiting
         //                       player decision. Still injects until resolved.
         //   'archived'        — player approved; stops injecting entirely.
         status: secretData.status || 'active',
-        // Why it was flagged for archive (shown in the review UI): 'revealed' | 'dormant' | ''
+        // Why it was archived/flagged: 'revealed' | 'dormant' | 'manual' | ''
         archiveReason: secretData.archiveReason || '',
         // Message index when flagged, for ordering the review list.
         flaggedAtMsgIndex: secretData.flaggedAtMsgIndex ?? -1,
@@ -525,6 +541,7 @@ export async function addSecret(chatId, secretData) {
     };
     nb.secrets.push(newSecret);
     await saveNotebook(chatId, nb);
+    await notifyHiddenIntentionsKnowledgeChange(chatId, newSecret.whoKnows, 'A secret entered actor-accessible knowledge.');
     return newSecret;
 }
 
@@ -540,11 +557,15 @@ export async function updateSecret(chatId, secretId, updates) {
     if (!Array.isArray(nb.secrets)) return null;
     const index = nb.secrets.findIndex(s => s.id === secretId);
     if (index === -1) return null;
+    const beforeKnows = Array.isArray(nb.secrets[index].whoKnows) ? nb.secrets[index].whoKnows.slice() : [];
     nb.secrets[index] = { ...nb.secrets[index], ...updates };
     const normalized = normalizeSecretKnowledgeLists(nb.secrets[index]);
     nb.secrets[index].whoKnows = normalized.whoKnows;
     nb.secrets[index].whoDoesNotKnow = normalized.whoDoesNotKnow;
     await saveNotebook(chatId, nb);
+    if (JSON.stringify(beforeKnows) !== JSON.stringify(normalized.whoKnows)) {
+        await notifyHiddenIntentionsKnowledgeChange(chatId, [...beforeKnows, ...normalized.whoKnows], "An actor's secret knowledge changed.");
+    }
     return nb.secrets[index];
 }
 
@@ -588,7 +609,10 @@ export async function addWhoKnows(chatId, secretId, characterName) {
         secret.whoDoesNotKnow = filtered;
         changed = true;
     }
-    if (changed) await saveNotebook(chatId, nb);
+    if (changed) {
+        await saveNotebook(chatId, nb);
+        await notifyHiddenIntentionsKnowledgeChange(chatId, [characterName], 'An actor learned or was removed from a secret knowledge boundary.');
+    }
     return secret;
 }
 
@@ -606,6 +630,7 @@ export async function removeWhoKnows(chatId, secretId, characterName) {
     if (!secret) return null;
     secret.whoKnows = secret.whoKnows.filter(n => n !== characterName);
     await saveNotebook(chatId, nb);
+    await notifyHiddenIntentionsKnowledgeChange(chatId, [characterName], "An actor's secret knowledge boundary changed.");
     return secret;
 }
 
@@ -633,7 +658,10 @@ export async function addWhoDoesNotKnow(chatId, secretId, characterName) {
         secret.whoKnows = filtered;
         changed = true;
     }
-    if (changed) await saveNotebook(chatId, nb);
+    if (changed) {
+        await saveNotebook(chatId, nb);
+        await notifyHiddenIntentionsKnowledgeChange(chatId, [characterName], "An actor's secret knowledge boundary changed.");
+    }
     return secret;
 }
 
@@ -695,6 +723,80 @@ function extractRelevanceKeywords(secretData) {
     return Array.from(words).join(', ');
 }
 
+/**
+ * Normalize model/user supplied trigger anchors into the canonical object form.
+ * Supports the array form emitted by LLM prompts and the object form used by
+ * the scorer/UI. Empty/invalid values return null so callers can fall back.
+ */
+export function normalizeSecretTriggerAnchors(value) {
+    const cleanList = items => {
+        const out = [];
+        const seen = new Set();
+        for (const item of (Array.isArray(items) ? items : [])) {
+            if (typeof item !== 'string') continue;
+            const clean = item.replace(/\s+/g, ' ').trim();
+            if (!clean) continue;
+            const key = clean.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(clean);
+        }
+        return out.slice(0, 7);
+    };
+
+    if (Array.isArray(value)) {
+        const phrases = cleanList(value);
+        return phrases.length ? { phrases } : null;
+    }
+
+    if (value && typeof value === 'object') {
+        const normalized = {};
+        for (const bucket of ['phrases', 'characters', 'aliases', 'groups', 'organizations']) {
+            const list = cleanList(value[bucket]);
+            if (list.length) normalized[bucket] = list;
+        }
+        return Object.keys(normalized).length ? normalized : null;
+    }
+
+    return null;
+}
+
+/**
+ * Deterministic safety net for generated Secrets whose LLM output omitted
+ * triggerAnchors. This is intentionally local/cheap: generated anchors should
+ * normally come from the LLM, but no saved Secret should be anchorless merely
+ * because one response skipped the optional-looking field.
+ */
+export function buildFallbackSecretTriggerAnchors(secretData) {
+    const candidates = [];
+    const seen = new Set();
+    const add = value => {
+        if (typeof value !== 'string') return;
+        const clean = value.replace(/^[\s'"`]+|[\s'"`]+$/g, '').trim();
+        if (!clean || clean.length < 3) return;
+        const key = clean.toLowerCase();
+        if (STOP_WORDS.has(key) || seen.has(key)) return;
+        seen.add(key);
+        candidates.push(clean);
+    };
+
+    // Prefer proper-name/specific noun-like tokens from the title first, then
+    // expand with the same grounded text used by relevance matching.
+    for (const source of [secretData.title, secretData.evidenceShown, secretData.secret, secretData.revealConditions]) {
+        if (!source) continue;
+        const tokens = String(source).match(/[A-Za-z0-9][A-Za-z0-9'’-]*/g) || [];
+        for (const token of tokens) {
+            const lower = token.toLowerCase();
+            if (lower.length < 3 || STOP_WORDS.has(lower)) continue;
+            add(token);
+            if (candidates.length >= 7) break;
+        }
+        if (candidates.length >= 7) break;
+    }
+
+    return candidates.length ? { phrases: candidates.slice(0, 7) } : null;
+}
+
 // ── Bulk operations ───────────────────────────────────────────────────────
 
 /**
@@ -703,4 +805,10 @@ function extractRelevanceKeywords(secretData) {
  */
 export async function clearNotebook(chatId) {
     await deleteChatData(chatId, 'notebook');
+    try {
+        const { resetHiddenIntentionsState } = await import('./hiddenIntentions.js');
+        await resetHiddenIntentionsState(chatId);
+    } catch (e) {
+        console.warn('[NWST Notebook] Could not reset Hidden Intentions runtime state:', e);
+    }
 }

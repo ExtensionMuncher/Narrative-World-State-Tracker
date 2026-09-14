@@ -106,6 +106,38 @@ export const WEATHER_EVENT_DEFS = {
     }
 };
 
+
+export const REGIONAL_HAZARD_LEVELS = {
+    very_low: { label: 'Very Low', multiplier: 0.25 },
+    low: { label: 'Low', multiplier: 0.65 },
+    neutral: { label: 'Neutral', multiplier: 1.0 },
+    elevated: { label: 'Elevated', multiplier: 1.35 },
+    high: { label: 'High', multiplier: 1.75 }
+};
+
+export function defaultRegionalHazards() {
+    return Object.fromEntries(Object.keys(WEATHER_EVENT_DEFS).map(id => [id, 'neutral']));
+}
+
+export function normalizeRegionalHazards(value) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const normalized = defaultRegionalHazards();
+    for (const eventId of Object.keys(normalized)) {
+        const level = String(source[eventId] || '').trim().toLowerCase();
+        normalized[eventId] = Object.prototype.hasOwnProperty.call(REGIONAL_HAZARD_LEVELS, level) ? level : 'neutral';
+    }
+    return normalized;
+}
+
+export function regionalHazardSummary(profile, { includeNeutral = false } = {}) {
+    if (!profile) return '';
+    const hazards = normalizeRegionalHazards(profile.regionalHazards);
+    return Object.entries(hazards)
+        .filter(([, level]) => includeNeutral || level !== 'neutral')
+        .map(([eventId, level]) => `${WEATHER_EVENT_DEFS[eventId]?.label || titleCase(eventId)}: ${REGIONAL_HAZARD_LEVELS[level]?.label || 'Neutral'}`)
+        .join('; ');
+}
+
 const FREQUENCY_MASTER_CHANCE = { rare: 0.008, occasional: 0.02, active: 0.05 };
 const SEVERITY_WEIGHTS = [
     { value: 'moderate', weight: 70 },
@@ -141,6 +173,9 @@ export function makeDefaultWeatherProfile(name = 'Default Weather') {
         climate: [],
         terrain: [],
         characteristics: [],
+        regionalHazards: defaultRegionalHazards(),
+        regionalHazardsSource: 'manual',
+        regionalHazardsUpdatedAt: null,
         notes: '',
         frequency: 'occasional',
         activeSystem: null,
@@ -173,6 +208,9 @@ export function getWeatherProfilesState(chatId) {
         p.climate = Array.isArray(p.climate) ? p.climate : [];
         p.terrain = Array.isArray(p.terrain) ? p.terrain : [];
         p.characteristics = Array.isArray(p.characteristics) ? p.characteristics : [];
+        p.regionalHazards = normalizeRegionalHazards(p.regionalHazards);
+        p.regionalHazardsSource = typeof p.regionalHazardsSource === 'string' ? p.regionalHazardsSource : 'legacy_neutral';
+        p.regionalHazardsUpdatedAt = p.regionalHazardsUpdatedAt != null && Number.isFinite(Number(p.regionalHazardsUpdatedAt)) ? Number(p.regionalHazardsUpdatedAt) : null;
         p.notes = typeof p.notes === 'string' ? p.notes : '';
         p.history = Array.isArray(p.history) ? p.history.filter(h => h && typeof h === 'object') : [];
         p.overrides = Array.isArray(p.overrides) ? p.overrides.filter(o => o && typeof o === 'object') : [];
@@ -247,10 +285,10 @@ function weightedPick(items, rand) {
 }
 function seasonKey(season) {
     const s = norm(season);
-    if (s.includes('spring') || s.includes('haru')) return 'spring';
-    if (s.includes('summer') || s.includes('natsu')) return 'summer';
-    if (s.includes('autumn') || s.includes('fall') || s.includes('aki')) return 'autumn';
-    if (s.includes('winter') || s.includes('fuyu')) return 'winter';
+    if (s.includes('spring')) return 'spring';
+    if (s.includes('summer')) return 'summer';
+    if (s.includes('autumn') || s.includes('fall')) return 'autumn';
+    if (s.includes('winter')) return 'winter';
     return null;
 }
 function customSeasonMultiplier(eventId, season) {
@@ -281,15 +319,59 @@ function characteristicMultiplier(def, characteristics = []) {
     if (/dry|arid/.test(text) && ['dust_storm','heat_wave'].includes(def._id)) m *= 1.2;
     return m;
 }
+const PROFILE_TAG_ALIASES = {
+    climate: {
+        humid_subtropical: ['humid', 'subtropical'],
+        semi_arid: ['semiarid'],
+        sub_arctic: ['subarctic']
+    },
+    terrain: {
+        high_altitude: ['high_elevation'],
+        riveradjacent: ['river_adjacent']
+    }
+};
+
+function canonicalProfileTags(values, field) {
+    const recognized = new Set();
+    for (const def of Object.values(WEATHER_EVENT_DEFS)) {
+        for (const key of Object.keys(def?.[field] || {})) recognized.add(key);
+    }
+    const out = [];
+    const add = value => {
+        if (recognized.has(value) && !out.includes(value)) out.push(value);
+    };
+    for (const raw of (Array.isArray(values) ? values : [])) {
+        const tag = norm(raw);
+        if (!tag) continue;
+        const aliases = PROFILE_TAG_ALIASES[field]?.[tag];
+        if (aliases) {
+            aliases.forEach(add);
+            continue;
+        }
+        if (recognized.has(tag)) {
+            add(tag);
+            continue;
+        }
+        // Analyzer/user input occasionally supplies composite descriptors such
+        // as "humid subtropical" or "coastal urban". Preserve compound
+        // canonical tags (high_elevation, river_adjacent) above, then safely
+        // decompose only unknown composites into recognized atomic tags.
+        tag.split('_').forEach(add);
+    }
+    return out;
+}
+
 function eventWeight(eventId, def, profile, season) {
     let w = def.base || 1;
     const s = seasonKey(season);
     w *= s ? (def.seasons?.[s] ?? 1) : customSeasonMultiplier(eventId, season);
-    const climateTags = profile.climate.map(norm);
-    const terrainTags = profile.terrain.map(norm);
+    const climateTags = canonicalProfileTags(profile.climate, 'climate');
+    const terrainTags = canonicalProfileTags(profile.terrain, 'terrain');
     for (const tag of climateTags) if (def.climate?.[tag] != null) w *= def.climate[tag];
     for (const tag of terrainTags) if (def.terrain?.[tag] != null) w *= def.terrain[tag];
     w *= characteristicMultiplier({ ...def, _id: eventId }, profile.characteristics);
+    const hazardLevel = normalizeRegionalHazards(profile.regionalHazards)[eventId] || 'neutral';
+    w *= REGIONAL_HAZARD_LEVELS[hazardLevel]?.multiplier ?? 1;
     return Number.isFinite(w) ? Math.max(0, w) : 0;
 }
 function simpleRangeRoll([min, max], rand) {
@@ -460,6 +542,7 @@ export function getWeatherProfileForecastContext(chatId) {
         p.climate?.length ? `Climate: ${p.climate.join(', ')}` : '',
         p.terrain?.length ? `Terrain: ${p.terrain.join(', ')}` : '',
         p.characteristics?.length ? `Characteristics: ${p.characteristics.join('; ')}` : '',
+        regionalHazardSummary(p) ? `Regional severe-weather likelihoods: ${regionalHazardSummary(p)}. All unlisted hazards are Neutral.` : 'Regional severe-weather likelihoods: Neutral across all tracked hazards.',
         p.notes ? `Weather notes: ${p.notes}` : '',
         'Use this profile to ground ordinary forecast conditions as well as severe-weather plausibility.'
     ].filter(Boolean).join('\n');

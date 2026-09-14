@@ -18,6 +18,7 @@ import { getActiveEvents } from '../data/events.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { getComputedSeason } from './dayAdvancement.js';
+import { getSevereWeatherConstraint, getWeatherProfileForecastContext } from '../data/severeWeather.js';
 import { dlog } from "../lib/debug.js";
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
@@ -37,7 +38,7 @@ CRITICAL RULE — NO CHARACTERS:
 Do NOT mention any named characters. Do NOT describe character actions, feelings, states, or presence. Do NOT reference what happened in the story. The Current Day block describes the WORLD, not the people in it. Characters are alive and moving — their states change message to message. The Current Day block is static ambient context. Any character reference will contaminate the main AI's generations by anchoring it to a past moment.
 
 WRONG (character contamination):
-"A failed ward has left the room charged with an uneasy magical pressure."
+"A named character's magic has leaked into the room, thickening the atmosphere."
 "The shrine is quiet — the character is expected to arrive before sundown."
 
 RIGHT (world-only):
@@ -91,8 +92,10 @@ export async function synthesizeCurrentDay(chatId, profileOverride, options = {}
         // Compute the system-determined season for this dayCount so the
         // synthesis LLM writes evocative prose *about* the correct season.
         const computedSeason = getComputedSeason(chatId);
+        const weatherProfileContext = getWeatherProfileForecastContext(chatId);
+        const weatherConstraint = getSevereWeatherConstraint(chatId, currentDay?.elapsedStoryDays || 0);
 
-        const userPrompt = buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason);
+        const userPrompt = buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason, weatherProfileContext, weatherConstraint);
 
         const messages = [
             { role: 'system', content: CURRENT_DAY_SYNTH_PROMPT },
@@ -135,13 +138,19 @@ export async function synthesizeCurrentDay(chatId, profileOverride, options = {}
 
 // ── Prompt building ───────────────────────────────────────────────────────
 
-function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason) {
+function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason, weatherProfileContext = '', weatherConstraint = '') {
     let prompt = '';
 
     // Setting context goes FIRST so the LLM grounds itself in the world before
     // reading weather data — prevents generic descriptions divorced from the setting
     if (settingContext) {
         prompt += `=== SETTING CONTEXT (read this first — ground all descriptions in this world) ===\n${settingContext}\n\n`;
+    }
+    if (weatherProfileContext) {
+        prompt += `${weatherProfileContext}\n\n`;
+    }
+    if (weatherConstraint) {
+        prompt += `${weatherConstraint}\n\n`;
     }
 
     // Inject calendar config (months + week days) if configured
@@ -156,9 +165,9 @@ function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents
 
     prompt += `=== CURRENT DATE ===\n`;
     prompt += `Date: ${currentDay.dateDisplay || '(not set)'}\n`;
-    prompt += `Season: ${currentDay.season || '(not set)'}\n`;
+    prompt += `Stored Season: ${currentDay.season || '(not set)'}\n`;
     if (computedSeason) {
-        prompt += `System-computed current season: ${computedSeason}\n`;
+        prompt += `System-computed climatic season: ${computedSeason}\n`;
     }
     prompt += '\n';
 
@@ -206,81 +215,114 @@ function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents
 
 // ── Response parsing ──────────────────────────────────────────────────────
 
-function parseSynthesisResponse(response) {
+export function parseSynthesisResponse(response) {
     if (!response || typeof response !== 'string') return null;
 
     const text = response.trim();
-    const result = {};
+    if (!text) return null;
 
-    // Primary: parse **Label** — value markdown format
-    const patterns = [
-        { regex: /\*\*Season\*\*\s*[—–-]\s*(.+?)(?=\n\*\*|\n*$)/is,           key: 'season' },
-        { regex: /\*\*Weather today\*\*\s*[—–-]\s*(.+?)(?=\n\*\*|\n*$)/is,     key: 'weatherToday' },
-        { regex: /\*\*Flora\*\*\s*[—–-]\s*(.+?)(?=\n\*\*|\n*$)/is,             key: 'flora' },
-        { regex: /\*\*Fauna\*\*\s*[—–-]\s*(.+?)(?=\n\*\*|\n*$)/is,             key: 'fauna' },
-        { regex: /\*\*Spiritual Climate\*\*\s*[—–-]\s*(.+?)(?=\n\*\*|\n*$)/is, key: 'spiritualClimate' }
-    ];
+    const fieldMap = {
+        season: 'season',
+        weather: 'weatherToday',
+        weathertoday: 'weatherToday',
+        flora: 'flora',
+        fauna: 'fauna',
+        spiritualclimate: 'spiritualClimate'
+    };
 
-    for (const { regex, key } of patterns) {
-        const match = text.match(regex);
-        if (match) result[key] = match[1].trim();
-    }
+    const normalizeKey = (value) => fieldMap[String(value || '')
+        .toLowerCase()
+        .replace(/[^a-z]/g, '')] || null;
 
-    // Fallback: "Label: value" format
-    if (!result.season) {
-        for (const line of text.split('\n')) {
-            const colonMatch = line.match(/^[-*]?\s*(Season|Weather today|Flora|Fauna|Spiritual Climate)\s*:\s*(.+)/i);
-            if (colonMatch) {
-                const label = colonMatch[1].toLowerCase().replace(' ', '');
-                const value = colonMatch[2].trim();
-                if (label === 'season') result.season = value;
-                else if (label === 'weathertoday') result.weatherToday = value;
-                else if (label === 'flora') result.flora = value;
-                else if (label === 'fauna') result.fauna = value;
-                else if (label === 'spiritualclimate') result.spiritualClimate = value;
-            }
-        }
-    }
+    const cleanValue = (value) => String(value ?? '')
+        .replace(/^\s*(?:[:：]|[—–-])\s*/, '')
+        .replace(/^\s*(?:\*\*|__)\s*/, '')
+        .replace(/\s*(?:\*\*|__)\s*$/, '')
+        .trim();
 
-    if (result.season || result.weatherToday) return result;
-
-    // JSON fallback: many instruction-tuned models (gemma, etc.) output JSON
-    // with keys like {"season": "...", "weatherToday": "...", etc.}
+    // JSON first. Smaller instruction-tuned models frequently prefer JSON even
+    // when the system prompt demonstrates markdown. Accept both the flat shape
+    // and a harmless { currentDay: {...} } wrapper, but never treat arbitrary
+    // raw output as one of the fields.
     try {
         let jsonStr = text;
-        // Strip markdown fences
-        const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/i);
         if (fenceMatch) jsonStr = fenceMatch[1].trim();
-        // Find outermost JSON object
         const objMatch = jsonStr.match(/\{[\s\S]*\}/);
         if (objMatch) {
             const parsed = JSON.parse(objMatch[0]);
+            const source = (parsed?.currentDay && typeof parsed.currentDay === 'object')
+                ? parsed.currentDay
+                : (parsed?.current_day && typeof parsed.current_day === 'object')
+                    ? parsed.current_day
+                    : parsed;
             const jsonResult = {};
-            const fieldMap = {
-                season: 'season',
-                weatherToday: 'weatherToday',
-                weather_today: 'weatherToday',
-                flora: 'flora',
-                fauna: 'fauna',
-                spiritualClimate: 'spiritualClimate',
-                spiritual_climate: 'spiritualClimate'
-            };
-            for (const [jsonKey, resultKey] of Object.entries(fieldMap)) {
-                if (parsed[jsonKey] && typeof parsed[jsonKey] === 'string') {
-                    jsonResult[resultKey] = parsed[jsonKey].trim();
-                }
+            for (const [rawKey, rawValue] of Object.entries(source || {})) {
+                const key = normalizeKey(rawKey);
+                if (!key || typeof rawValue !== 'string') continue;
+                const value = cleanValue(rawValue);
+                if (value) jsonResult[key] = value;
             }
-            if (jsonResult.season || jsonResult.weatherToday) {
+            if (Object.keys(jsonResult).length > 0) {
                 dlog('[NWST CurrentDaySynth] Parsed JSON response successfully.');
                 return jsonResult;
             }
         }
     } catch (e) {
-        // JSON parsing failed — fall through to raw text fallback
-        dlog('[NWST CurrentDaySynth] JSON fallback parse failed:', e.message);
+        dlog('[NWST CurrentDaySynth] JSON parse path did not match:', e.message);
     }
 
-    // Last resort: use full response as weatherToday
-    console.warn('[NWST CurrentDaySynth] Could not parse structured response — using raw text.');
-    return { weatherToday: text };
+    // Flexible section parser. Handles the formats that commonly vary between
+    // GLM/Gemma-class models, including:
+    //   **Season** — value
+    //   - **Season:** value
+    //   ### Season\nvalue
+    //   Weather today: value
+    // and multiline prose continuations until the next recognized label.
+    const result = {};
+    let currentKey = null;
+    let buffer = [];
+
+    const flush = () => {
+        if (!currentKey) return;
+        const value = cleanValue(buffer.join('\n').trim());
+        if (value) result[currentKey] = value;
+        currentKey = null;
+        buffer = [];
+    };
+
+    const labelPattern = /^\s*(?:[-*+]\s+)?(?:#{1,6}\s*)?(?:\*\*|__)?\s*(Season|Weather(?:\s+today)?|Flora|Fauna|Spiritual\s+Climate)\s*(?:(?:\*\*|__)\s*)?(?:(?:[:：]|[—–-])\s*)?(?:(?:\*\*|__)\s*)?(.*)$/i;
+
+    const stripped = text
+        .replace(/^```(?:markdown|md|text)?\s*/i, '')
+        .replace(/\s*```$/, '');
+
+    for (const rawLine of stripped.split(/\r?\n/)) {
+        const line = rawLine.trimEnd();
+        const match = line.match(labelPattern);
+        if (match) {
+            flush();
+            currentKey = normalizeKey(match[1]);
+            const inlineValue = cleanValue(match[2]);
+            buffer = inlineValue ? [inlineValue] : [];
+            continue;
+        }
+
+        if (currentKey) {
+            // Preserve paragraph breaks inside a section, but ignore leading
+            // blank lines before its prose starts.
+            if (line.trim() || buffer.length > 0) buffer.push(line.trim());
+        }
+    }
+    flush();
+
+    if (Object.keys(result).length > 0) return result;
+
+    // Fail closed. The previous implementation assigned the entire unparsed
+    // response to weatherToday, so one formatting variation could embed every
+    // Current Day section inside Weather and make repeated day advances look as
+    // if the card were piling copies of itself. Keeping the prior fields is much
+    // safer than corrupting a single field with a multi-section blob.
+    console.warn('[NWST CurrentDaySynth] Could not parse a structured Current Day response; existing fields were preserved.');
+    return null;
 }

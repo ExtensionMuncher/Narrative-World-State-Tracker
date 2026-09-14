@@ -111,12 +111,21 @@ function stampInjection(chatId, secrets) {
 
     setTimeout(async () => {
         try {
-            const { updateSecret } = await import('../data/notebook.js');
+            if (getChatId() !== chatId) return;
+            const { getNotebook, saveNotebook } = await import('../data/notebook.js');
+            const notebook = getNotebook(chatId);
+            if (!Array.isArray(notebook?.secrets)) return;
+            const ids = new Set(secrets.map(secret => secret?.id).filter(Boolean));
+            let changed = false;
             for (const secret of secrets) {
-                if (secret.id) {
-                    await updateSecret(chatId, secret.id, { lastInjectionMsgIndex: currentMsgIndex });
+                if (!secret?.id) continue;
+                const stored = notebook.secrets.find(item => item.id === secret.id);
+                if (stored && stored.lastInjectionMsgIndex !== currentMsgIndex) {
+                    stored.lastInjectionMsgIndex = currentMsgIndex;
+                    changed = true;
                 }
             }
+            if (changed && getChatId() === chatId) await saveNotebook(chatId, notebook);
         } catch (e) {
             dlog('[NWST SecretsInjection] Failed to stamp injection index:', e);
         }

@@ -6,7 +6,7 @@
 //
 // Layout:
 //   • Info box explaining the notebook's purpose
-//   • Three accordion sections: Core, Mystery & Continuity, Secrets & Hidden Knowledge
+//   • Four accordion sections: Core, Mystery & Continuity, Hidden Intentions, Secrets & Hidden Knowledge
 //   • Core and Mystery: bullet lists with contenteditable spans + ✕ delete + ⛶ popout
 //   • Secrets: structured field entries (type, title, secret, whoKnows, whoDoesNotKnow, etc.)
 // =============================================================================
@@ -22,6 +22,13 @@ import {
     addWhoKnows, removeWhoKnows, addWhoDoesNotKnow, removeWhoDoesNotKnow,
     clearNotebook
 } from '../data/notebook.js';
+import {
+    getHiddenIntentions, getHiddenIntentionsState,
+    addHiddenIntention, updateHiddenIntention, deleteHiddenIntention,
+    INTENTION_TYPES, INTENTION_DOMAINS
+} from '../data/hiddenIntentions.js';
+import { runHiddenIntentionsGenerate, runHiddenIntentionsReconcile, purgeUserCharacterIntentions } from '../llm/hiddenIntentions.js';
+import { buildAliasRegistry, toCanonicalId } from '../data/aliasRegistry.js';
 
 // Flatten a triggerAnchors object into a comma-separated editable string,
 // and parse it back. Anchors are stored structured but edited as flat text.
@@ -67,6 +74,30 @@ const SECRET_TYPES = [
     { value: 'unconfirmed_suspicion', label: 'Unconfirmed suspicion', cssClass: 'nwst-stype-suspicion' }
 ];
 
+// Keep expanded secret cards stable across holder edits and background refreshes.
+const openSecretIds = new Set();
+// Preserve nested Hidden Intentions expansion state across saves/scans while
+// the user remains in the Notebook. Leaving the Notebook intentionally resets
+// these cards to closed so stale expansion state cannot reopen them later.
+const openHiddenActorIds = new Set();
+const openHiddenIntentionIds = new Set();
+let hiddenExpansionChatId = null;
+
+function ensureHiddenExpansionChat(chatId) {
+    if (hiddenExpansionChatId === chatId) return;
+    openHiddenActorIds.clear();
+    openHiddenIntentionIds.clear();
+    hiddenExpansionChatId = chatId || null;
+}
+
+export function collapseHiddenIntentionsForNotebookExit() {
+    openHiddenActorIds.clear();
+    openHiddenIntentionIds.clear();
+    const container = document.getElementById('nwst-hi-container');
+    if (!container) return;
+    container.querySelectorAll('details[open]').forEach(node => { node.open = false; });
+}
+
 // ── Build the Notebook tab HTML ───────────────────────────────────────────
 
 export function buildNotebookTab() {
@@ -76,7 +107,7 @@ export function buildNotebookTab() {
     pane.innerHTML = `
         <div class="nwst-info-box">
             The notebook is the planner LLM's internal working surface. These notes are <strong>never injected</strong> into your main prompt.
-            Click ✎ to edit inline, or ⛶ to open a larger popout editor. Press Enter in the input row to add a new bullet.
+            Inline edits <strong>save automatically when focus leaves the field</strong>. You can also use each section's <strong>Save edits</strong> button for an explicit commit. Click ⛶ to open a larger popout editor, or press Enter in the input row to add a new bullet.
         </div>
 
         <!-- Undo / redo bar for scanner mutations -->
@@ -91,7 +122,10 @@ export function buildNotebookTab() {
         <div class="nwst-nb-section" id="nwst-nb-core">
             <div class="nwst-nb-section-hdr nwst-nb-toggle" data-section="core">
                 <span class="nwst-nb-section-title">Core</span>
-                <span style="font-size:11px;color:#999">▾</span>
+                <span class="nwst-nb-section-actions">
+                    <button type="button" class="menu_button nwst-btn nwst-nb-section-save" data-save-section="core" title="Save all edited Core notebook entries">Save edits</button>
+                    <span style="font-size:11px;color:#999">▾</span>
+                </span>
             </div>
             <div class="nwst-nb-section-body" id="nwst-nb-core-body"></div>
         </div>
@@ -100,16 +134,46 @@ export function buildNotebookTab() {
         <div class="nwst-nb-section" id="nwst-nb-mystery">
             <div class="nwst-nb-section-hdr nwst-nb-toggle" data-section="mystery">
                 <span class="nwst-nb-section-title">Mystery & Continuity</span>
-                <span style="font-size:11px;color:#999">▾</span>
+                <span class="nwst-nb-section-actions">
+                    <button type="button" class="menu_button nwst-btn nwst-nb-section-save" data-save-section="mystery" title="Save all edited Mystery & Continuity notebook entries">Save edits</button>
+                    <span style="font-size:11px;color:#999">▾</span>
+                </span>
             </div>
             <div class="nwst-nb-section-body" id="nwst-nb-mystery-body"></div>
+        </div>
+
+        <!-- Hidden Intentions section -->
+        <div class="nwst-nb-section" id="nwst-nb-hiddenIntentions">
+            <div class="nwst-nb-section-hdr nwst-nb-toggle" data-section="hiddenIntentions">
+                <span class="nwst-nb-section-title">Hidden Intentions</span>
+                <span class="nwst-nb-section-actions">
+                    <button type="button" class="menu_button nwst-btn nwst-nb-section-save" data-save-section="hiddenIntentions" title="Save all currently rendered Hidden Intention edits">Save edits</button>
+                    <span style="font-size:11px;color:#999">▾</span>
+                </span>
+            </div>
+            <div class="nwst-nb-section-body" id="nwst-nb-hiddenIntentions-body" style="padding:10px 12px">
+                <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.5">
+                    Compact private NPC objectives, plans, commitments, priorities, contingencies, and emerging interests. These records are <strong>never injected</strong> into the RP prompt.
+                    <strong>Generate</strong> seeds new records; <strong>Reconcile</strong> only checks existing records for progress, blocking, revision, completion, or staleness.
+                </div>
+                <div id="nwst-hi-status" style="font-size:11px;color:#999;margin-bottom:8px"></div>
+                <div id="nwst-hi-container"></div>
+                <div class="nwst-btn-row nwst-hi-toolbar" style="margin-top:8px;flex-wrap:wrap">
+                    <button class="menu_button nwst-btn" id="nwst-hi-add" title="Manually add one locked Hidden Intention record.">+ Add manually</button>
+                    <button class="menu_button nwst-btn" id="nwst-hi-generate" title="Create new grounded records from the recent visible-message window plus relevant NWST Secrets, Communities, Events, Notebook pressures, and World State. This does not update or resolve existing records. Use Debug Backfill in Settings for older chats starting from zero.">✨ Generate new intentions</button>
+                    <button class="menu_button nwst-btn" id="nwst-hi-reconcile" title="Review existing Hidden Intentions for progress, blocking, revision, completion, abandonment, or staleness. This does not create new records.">🔄 Reconcile existing</button>
+                </div>
+            </div>
         </div>
 
         <!-- Secrets & Hidden Knowledge section -->
         <div class="nwst-nb-section" id="nwst-nb-secrets">
             <div class="nwst-nb-section-hdr nwst-nb-toggle" data-section="secrets">
                 <span class="nwst-nb-section-title">Secrets & Hidden Knowledge</span>
-                <span style="font-size:11px;color:#999">▾</span>
+                <span class="nwst-nb-section-actions">
+                    <button type="button" class="menu_button nwst-btn nwst-nb-section-save" data-save-section="secrets" title="Save all currently rendered Secret edits">Save edits</button>
+                    <span style="font-size:11px;color:#999">▾</span>
+                </span>
             </div>
             <div class="nwst-nb-section-body" style="padding:10px 12px" id="nwst-nb-secrets-body">
                 <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.5">
@@ -141,6 +205,7 @@ export function buildNotebookTab() {
 export function refreshNotebookUI() {
     refreshCoreSection();
     refreshMysterySection();
+    refreshHiddenIntentionsSection();
     refreshSecretsSection();
     refreshHistoryControls();
 }
@@ -285,8 +350,65 @@ function refreshMysterySection() {
 
 // ── Bullet event wiring ───────────────────────────────────────────────────
 
+function markNotebookBulletSaved(span, text = null) {
+    if (!span) return;
+    span.dataset.savedText = text == null ? span.textContent.trim() : String(text).trim();
+    span.classList.remove('nwst-dirty', 'nwst-save-error');
+}
+
+async function saveNotebookBulletElement(span, { force = false, notifyOnError = true } = {}) {
+    if (!span) return true;
+    const bullet = span.closest('.nwst-nb-bullet');
+    const field = span.closest('.nwst-nb-field');
+    if (!bullet || !field) return true;
+    const section = field.getAttribute('data-section');
+    const fieldKey = field.getAttribute('data-field');
+    const index = parseInt(bullet.getAttribute('data-index'), 10);
+    const newText = span.textContent.trim();
+    const savedText = span.dataset.savedText ?? newText;
+    if (!force && newText === savedText) {
+        span.classList.remove('nwst-dirty', 'nwst-save-error');
+        return true;
+    }
+
+    try {
+        const chatId = getChatId();
+        if (section === 'core') {
+            await updateCoreBullet(chatId, fieldKey, index, newText);
+        } else if (section === 'mystery') {
+            await updateMysteryBullet(chatId, fieldKey, index, newText);
+        } else {
+            return true;
+        }
+        markNotebookBulletSaved(span, newText);
+        return true;
+    } catch (error) {
+        span.classList.add('nwst-save-error');
+        console.error('[NWST Notebook] Could not save edited bullet:', error);
+        if (notifyOnError) nwstToast('Notebook edit could not be saved. Your text is still visible; try Save edits again.', 'error');
+        return false;
+    }
+}
+
+async function saveBulletNotebookSection(section, { notify = true } = {}) {
+    const body = document.getElementById(`nwst-nb-${section}-body`);
+    if (!body) return true;
+    const spans = Array.from(body.querySelectorAll('.nwst-nb-bullet-text'));
+    let ok = true;
+    for (const span of spans) {
+        if (!(await saveNotebookBulletElement(span, { force: false, notifyOnError: false }))) ok = false;
+    }
+    if (notify) nwstToast(ok ? `${section === 'core' ? 'Core' : 'Mystery & Continuity'} notebook edits saved.` : 'Some notebook edits could not be saved.', ok ? 'success' : 'error');
+    return ok;
+}
+
 function wireBulletEvents(container) {
     if (!container) return;
+
+    // Capture the persisted text represented by this render. Autosave only
+    // writes when the inline value actually changes, which avoids redundant
+    // metadata writes when the user merely tabs/clicks through the Notebook.
+    container.querySelectorAll('.nwst-nb-bullet-text').forEach(span => markNotebookBulletSaved(span));
 
     // ── Add bullet on Enter ────────────────────────────────────
     container.querySelectorAll('.nwst-nb-add-input').forEach(input => {
@@ -307,9 +429,6 @@ function wireBulletEvents(container) {
                     await addMysteryBullet(chatId, fieldKey, text);
                     refreshMysterySection();
                 }
-
-                // Re-wire events after refresh
-                wireBulletEvents(document.getElementById(`nwst-nb-${section}-body`));
             }
         });
     });
@@ -331,59 +450,369 @@ function wireBulletEvents(container) {
                 await deleteMysteryBullet(chatId, fieldKey, index);
                 refreshMysterySection();
             }
-
-            wireBulletEvents(document.getElementById(`nwst-nb-${section}-body`));
         });
     });
 
     // ── Save edited bullet on blur ─────────────────────────────
     container.querySelectorAll('.nwst-nb-bullet-text').forEach(span => {
-        span.addEventListener('blur', async function () {
-            const bullet = this.closest('.nwst-nb-bullet');
-            const field = this.closest('.nwst-nb-field');
-            const section = field.getAttribute('data-section');
-            const fieldKey = field.getAttribute('data-field');
-            const index = parseInt(bullet.getAttribute('data-index'), 10);
-            const newText = this.textContent.trim();
-            const chatId = getChatId();
+        span.addEventListener('input', function () {
+            const current = this.textContent.trim();
+            this.classList.toggle('nwst-dirty', current !== (this.dataset.savedText ?? current));
+            this.classList.remove('nwst-save-error');
+        });
 
-            if (section === 'core') {
-                await updateCoreBullet(chatId, fieldKey, index, newText);
-            } else if (section === 'mystery') {
-                await updateMysteryBullet(chatId, fieldKey, index, newText);
-            }
+        span.addEventListener('blur', async function () {
+            await saveNotebookBulletElement(this);
         });
 
         // ── ⛶ popout button on focus ───────────────────────────
-        span.addEventListener('focus', async function () {
+        span.addEventListener('focus', function () {
             const bullet = this.closest('.nwst-nb-bullet');
-            // Remove existing popout button if any
             const existing = bullet.querySelector('.nwst-nb-bullet-expand');
             if (existing) existing.remove();
 
+            const targetSpan = this;
             const popoutBtn = document.createElement('button');
-            popoutBtn.className = 'nwst-nb-bullet-expand nwst-expand-btn editor_maximize';
+            popoutBtn.className = 'nwst-nb-bullet-expand nwst-expand-btn';
             popoutBtn.title = 'Open in popout';
             popoutBtn.textContent = '⛶';
             popoutBtn.style.cssText = 'font-size:13px;color:#aaa;margin-top:1px;';
-            popoutBtn.setAttribute('data-for', this.id);
-            // Prevent blur from the contenteditable span when clicking the button
-            popoutBtn.onmousedown = function (ev) {
+            // Keep focus on the editable span until our explicit popout-save
+            // callback runs; this prevents a blur race with the expanded editor.
+            popoutBtn.onmousedown = ev => ev.preventDefault();
+            popoutBtn.onclick = function (ev) {
                 ev.preventDefault();
+                ev.stopPropagation();
+                const currentText = targetSpan.textContent || '';
+                if (typeof window.openNWSTPopout === 'function') {
+                    window.openNWSTPopout('Edit notebook entry', currentText, async saved => {
+                        targetSpan.textContent = saved;
+                        targetSpan.classList.add('nwst-dirty');
+                        await saveNotebookBulletElement(targetSpan, { force: true });
+                    });
+                }
             };
             bullet.insertBefore(popoutBtn, bullet.querySelector('.nwst-nb-bullet-del'));
         });
 
-        span.addEventListener('blur', async function () {
-            // Remove popout button after a short delay (allows click to register)
+        span.addEventListener('blur', function () {
+            // Remove popout button after a short delay (allows click to register).
             setTimeout(() => {
                 const bullet = this.closest('.nwst-nb-bullet');
-                if (bullet) {
-                    const btn = bullet.querySelector('.nwst-nb-bullet-expand');
-                    if (btn) btn.remove();
-                }
+                if (bullet) bullet.querySelector('.nwst-nb-bullet-expand')?.remove();
             }, 150);
         });
+    });
+}
+
+// ── Hidden Intentions section ─────────────────────────────────────────────
+
+const HI_TYPES = [...INTENTION_TYPES];
+const HI_DOMAINS = [...INTENTION_DOMAINS];
+const HI_TYPE_LABELS = {
+    objective: 'Objective',
+    active_plan: 'Active plan',
+    commitment: 'Commitment',
+    ongoing_priority: 'Ongoing priority',
+    contingency: 'Contingency',
+    emerging_interest: 'Emerging interest'
+};
+const HI_DOMAIN_LABELS = {
+    relational: 'Relational', care_support: 'Care / support', duty_responsibility: 'Duty / responsibility',
+    personal: 'Personal', investigative: 'Investigative', logistical: 'Logistical',
+    social_factional: 'Social / factional', protective: 'Protective', opportunistic: 'Opportunistic',
+    adversarial: 'Adversarial', escape_avoidance: 'Escape / avoidance'
+};
+const HI_STATUSES = ['latent', 'active', 'ready', 'blocked', 'revised', 'parked', 'resolved', 'abandoned', 'stale', 'pending_review'];
+const HI_PROGRESS = ['unattempted', 'prepared', 'attempted', 'progressed', 'blocked', 'failed', 'fulfilled'];
+const HI_LEVELS = ['low', 'medium', 'high'];
+
+function hiSelectOptions(values, selected, labels = {}) {
+    return values.map(value => `<option value="${value}"${value === selected ? ' selected' : ''}>${escapeHTML(labels[value] || value.replaceAll('_', ' '))}</option>`).join('');
+}
+
+function hiListText(values) {
+    return Array.isArray(values) ? values.join('\n') : '';
+}
+
+function parseHiList(value) {
+    return Array.from(new Set(String(value || '').split(/\n|;/).map(x => x.trim()).filter(Boolean)));
+}
+
+function hiFieldDomId(item, field) {
+    const safeId = String(item?.id || 'record').replace(/[^a-zA-Z0-9_-]/g, '-');
+    const safeField = String(field || 'field').replace(/[^a-zA-Z0-9_-]/g, '-');
+    return `nwst-hi-${safeId}-${safeField}`;
+}
+
+function buildHiTextareaField(item, field, label, value = '', {
+    rows = 3,
+    placeholder = '',
+    required = false,
+    list = false
+} = {}) {
+    const id = hiFieldDomId(item, field);
+    const content = list ? hiListText(value) : String(value || '');
+    const placeholderAttr = placeholder ? ` placeholder="${escapeHTML(placeholder)}"` : '';
+    return `
+        <div class="nwst-secret-field-label nwst-hi-text-field" data-hi-field="${escapeHTML(field)}">
+            <label class="nwst-hi-field-caption" for="${id}">
+                <span>${escapeHTML(label)}</span>${required ? '<span class="nwst-hi-required">required</span>' : ''}
+            </label>
+            <div class="nwst-hi-textarea-shell">
+                <textarea id="${id}" class="text_pole nwst-hi-field" data-field="${escapeHTML(field)}" rows="${rows}"${placeholderAttr}>${escapeHTML(content)}</textarea>
+                <button type="button" class="editor_maximize nwst-expand-btn nwst-hi-text-expand" data-for="${id}" title="Expand ${escapeHTML(label)}">⛶</button>
+            </div>
+        </div>`;
+}
+
+function buildHiddenIntentionCard(item) {
+    const objective = item.objective || item.nextAction || '(No objective written yet)';
+    const reviewBadge = item.status === 'pending_review'
+        ? `<span class="nwst-hi-badge nwst-hi-badge-review">review</span>`
+        : '';
+    const lockBadge = item.locked
+        ? `<span class="nwst-hi-badge" title="Wording locked">🔒</span>`
+        : '';
+    const evidence = (item.evidenceRanges || []).slice(-4).map(row => {
+        const range = row.start == null ? '' : `M${row.start}${row.end != null && row.end !== row.start ? `–M${row.end}` : ''}: `;
+        return `<li>${escapeHTML(range + (row.summary || 'Narrative evidence'))}</li>`;
+    }).join('');
+
+    const hasStrategy = Boolean(item.strategy);
+    const hasNextAction = Boolean(item.nextAction);
+    const hasTriggers = Boolean(item.triggerConditions?.length);
+    const hasConstraints = Boolean(item.constraints?.length);
+    const hasProgressNote = Boolean(item.progressNote);
+    const requiresStrategy = ['active_plan', 'contingency'].includes(item.type);
+    const requiresNextAction = ['active_plan', 'commitment'].includes(item.type);
+    const requiresTriggers = item.type === 'contingency';
+    const optionalFields = [];
+    optionalFields.push(`<label class="nwst-secret-field-label">Actor<input class="text_pole nwst-hi-field" data-field="actor" value="${escapeHTML(item.actor)}"></label>`);
+    if (!hasStrategy && !requiresStrategy) optionalFields.push(buildHiTextareaField(item, 'strategy', 'Strategy', '', { rows: 4, placeholder: 'Optional broad approach' }));
+    if (!hasNextAction && !requiresNextAction) optionalFields.push(buildHiTextareaField(item, 'nextAction', 'Next action', '', { rows: 3, placeholder: 'Optional nearest concrete step' }));
+    if (!hasTriggers && !requiresTriggers) optionalFields.push(buildHiTextareaField(item, 'triggerConditions', 'Trigger conditions', [], { rows: 4, placeholder: 'One per line', list: true }));
+    if (!hasConstraints) optionalFields.push(buildHiTextareaField(item, 'constraints', 'Constraints', [], { rows: 4, placeholder: 'One per line', list: true }));
+    if (!hasProgressNote) optionalFields.push(buildHiTextareaField(item, 'progressNote', 'Progress note', '', { rows: 4, placeholder: 'Filled when the intention is acted upon or changes' }));
+
+    return `
+    <details class="nwst-hi-card" data-intention-id="${escapeHTML(item.id)}"${openHiddenIntentionIds.has(item.id) ? ' open' : ''}>
+        <summary class="nwst-hi-card-summary">
+            <span class="nwst-hi-summary-objective">${escapeHTML(objective)}</span>
+            <span class="nwst-hi-badge">${escapeHTML(HI_TYPE_LABELS[item.type] || item.type)}</span>
+            <span class="nwst-hi-badge">${escapeHTML(HI_DOMAIN_LABELS[item.domain] || item.domain)}</span>
+            <span class="nwst-hi-badge">${escapeHTML(item.status)}</span>
+            ${reviewBadge}${lockBadge}
+        </summary>
+        <div class="nwst-hi-card-body">
+            <div class="nwst-hi-meta-grid">
+                <label class="nwst-secret-field-label">Type<select class="text_pole nwst-hi-field" data-field="type">${hiSelectOptions(HI_TYPES, item.type, HI_TYPE_LABELS)}</select></label>
+                <label class="nwst-secret-field-label">Domain<select class="text_pole nwst-hi-field" data-field="domain">${hiSelectOptions(HI_DOMAINS, item.domain, HI_DOMAIN_LABELS)}</select></label>
+                <label class="nwst-secret-field-label">Status<select class="text_pole nwst-hi-field" data-field="status">${hiSelectOptions(HI_STATUSES, item.status)}</select></label>
+                <label class="nwst-secret-field-label">Progress<select class="text_pole nwst-hi-field" data-field="progressStage">${hiSelectOptions(HI_PROGRESS, item.progressStage)}</select></label>
+            </div>
+            ${buildHiTextareaField(item, 'objective', 'Objective', item.objective, { rows: 3 })}
+            ${(hasStrategy || requiresStrategy) ? buildHiTextareaField(item, 'strategy', 'Strategy', item.strategy, { rows: 4, required: requiresStrategy, placeholder: requiresStrategy ? 'Broad method: how this plan or response will be carried out' : 'Optional broad approach' }) : ''}
+            ${(hasNextAction || requiresNextAction) ? buildHiTextareaField(item, 'nextAction', 'Next action', item.nextAction, { rows: 3, required: requiresNextAction, placeholder: 'Nearest concrete step' }) : ''}
+            ${(hasTriggers || requiresTriggers) ? buildHiTextareaField(item, 'triggerConditions', 'Trigger conditions', item.triggerConditions, { rows: 4, required: requiresTriggers, placeholder: 'One per line', list: true }) : ''}
+            ${hasConstraints ? buildHiTextareaField(item, 'constraints', 'Constraints', item.constraints, { rows: 4, list: true }) : ''}
+            ${buildHiTextareaField(item, 'basis', 'Grounding basis', item.basis, { rows: 6, placeholder: 'One supporting fact per line', list: true })}
+            ${hasProgressNote ? buildHiTextareaField(item, 'progressNote', 'Progress note', item.progressNote, { rows: 4 }) : ''}
+            ${item.status === 'parked' ? `<div class="nwst-info-box nwst-hi-parked-note"><strong>Parked working-set history</strong><br>${escapeHTML(item.parkedReason || 'A more current or actionable intention displaced this record from the five-slot working set.')}<br><span style="font-size:11px;color:#999">Parked at message ${item.parkedAtMessage ?? '—'}${item.parkedFromStatus ? ` · previous status: ${escapeHTML(item.parkedFromStatus)}` : ''}</span></div>` : ''}
+            <div class="nwst-hi-level-grid">
+                <label class="nwst-secret-field-label">Confidence<select class="text_pole nwst-hi-field" data-field="confidence">${hiSelectOptions(HI_LEVELS, item.confidence)}</select></label>
+                <label class="nwst-secret-field-label">Commitment<select class="text_pole nwst-hi-field" data-field="commitment">${hiSelectOptions(HI_LEVELS, item.commitment)}</select></label>
+            </div>
+            ${optionalFields.length ? `<details class="nwst-hi-optional"><summary>Optional / currently empty fields</summary><div class="nwst-hi-optional-body">${optionalFields.join('')}</div></details>` : ''}
+            ${evidence ? `<details class="nwst-hi-evidence"><summary>Narrative evidence (${item.evidenceRanges.length})</summary><ul>${evidence}</ul></details>` : ''}
+            <div class="nwst-hi-record-meta">Last reviewed: message ${item.lastReviewedMessage ?? '—'} · story day ${item.lastReviewedDay ?? '—'} · origin: ${escapeHTML(item.origin)}</div>
+            <div class="nwst-btn-row nwst-hi-actions">
+                <button class="menu_button nwst-btn nwst-hi-save">Save</button>
+                <button class="menu_button nwst-btn nwst-hi-lock">${item.locked ? '🔓 Unlock wording' : '🔒 Lock wording'}</button>
+                ${item.status === 'pending_review' ? '<button class="menu_button nwst-btn nwst-hi-accept">Accept</button>' : ''}
+                ${item.status === 'parked' ? '<button class="menu_button nwst-btn nwst-hi-reactivate">Reactivate</button>' : ''}
+                ${!['abandoned','resolved'].includes(item.status) ? '<button class="menu_button nwst-btn nwst-hi-abandon">Abandon</button>' : ''}
+                <button class="menu_button nwst-btn-danger nwst-hi-delete">Delete</button>
+            </div>
+        </div>
+    </details>`;
+}
+
+function buildHiddenActorGroup(group) {
+    const working = group.items.filter(item => !['parked', 'resolved', 'abandoned', 'stale'].includes(item.status));
+    const parked = group.items.filter(item => item.status === 'parked');
+    const closed = group.items.filter(item => ['resolved', 'abandoned', 'stale'].includes(item.status));
+    const contingencies = working.filter(item => item.type === 'contingency').length;
+    const open = openHiddenActorIds.has(group.actorId);
+    const parkedOpen = parked.some(item => openHiddenIntentionIds.has(item.id));
+    const closedOpen = closed.some(item => openHiddenIntentionIds.has(item.id));
+    const workingHtml = working.length
+        ? working.map(buildHiddenIntentionCard).join('')
+        : '<div class="nwst-nb-empty">No current working-set records.</div>';
+    const parkedHtml = parked.length
+        ? `<details class="nwst-hi-history-group"${parkedOpen ? ' open' : ''}><summary>Parked history (${parked.length})</summary><div class="nwst-hi-history-body">${parked.map(buildHiddenIntentionCard).join('')}</div></details>`
+        : '';
+    const closedHtml = closed.length
+        ? `<details class="nwst-hi-history-group"${closedOpen ? ' open' : ''}><summary>Closed history (${closed.length})</summary><div class="nwst-hi-history-body">${closed.map(buildHiddenIntentionCard).join('')}</div></details>`
+        : '';
+    return `
+    <details class="nwst-hi-actor-group" data-actor-id="${escapeHTML(group.actorId)}"${open ? ' open' : ''}>
+        <summary class="nwst-hi-actor-summary">
+            <strong>${escapeHTML(group.actor || 'Unnamed NPC')}</strong>
+            <span>${group.items.length} record${group.items.length === 1 ? '' : 's'}</span>
+            <span class="nwst-hi-badge">${working.length} current</span>
+            ${parked.length ? `<span class="nwst-hi-badge">${parked.length} parked</span>` : ''}
+            ${contingencies ? `<span class="nwst-hi-badge">${contingencies} contingenc${contingencies === 1 ? 'y' : 'ies'}</span>` : ''}
+        </summary>
+        <div class="nwst-hi-actor-body">${workingHtml}${parkedHtml}${closedHtml}</div>
+    </details>`;
+}
+
+function refreshHiddenIntentionsSection() {
+    const container = document.getElementById('nwst-hi-container');
+    const statusEl = document.getElementById('nwst-hi-status');
+    if (!container) return;
+    const chatId = getChatId();
+    ensureHiddenExpansionChat(chatId);
+    const registry = buildAliasRegistry(chatId);
+    const rawItems = getHiddenIntentions(chatId);
+    const items = rawItems.filter(item => {
+        const actorId = registry.resolve(item.actor) || item.actorId || toCanonicalId(item.actor);
+        return !registry.isUserPc(actorId);
+    }).sort((a, b) =>
+        String(a.actor || '').localeCompare(String(b.actor || '')) || String(a.objective || '').localeCompare(String(b.objective || ''))
+    );
+    // Early builds could generate PC records. Hide them immediately and persist
+    // the cleanup asynchronously so they also disappear from exports/consumers.
+    if (items.length !== rawItems.length) {
+        purgeUserCharacterIntentions(chatId).catch(error => console.warn('[NWST Notebook] PC intention purge failed:', error));
+    }
+
+    const groupsByActor = new Map();
+    for (const item of items) {
+        const actorId = item.actorId || registry.resolve(item.actor) || toCanonicalId(item.actor);
+        if (!groupsByActor.has(actorId)) groupsByActor.set(actorId, { actorId, actor: item.actor || registry.getDisplay(actorId), items: [] });
+        groupsByActor.get(actorId).items.push(item);
+    }
+    const groups = Array.from(groupsByActor.values()).sort((a, b) => String(a.actor).localeCompare(String(b.actor)));
+    const state = getHiddenIntentionsState(chatId);
+    if (statusEl) {
+        const dirty = (state.dirtyActors || []).map(x => x.actor).filter(Boolean);
+        statusEl.textContent = `${items.length} record${items.length === 1 ? '' : 's'} across ${groups.length} NPC${groups.length === 1 ? '' : 's'} · Dirty actors: ${dirty.join(', ') || 'none'} · Last operation: ${state.lastScanTrigger || 'never'}${state.lastError ? ` · Error: ${state.lastError}` : ''}`;
+    }
+    container.innerHTML = groups.length
+        ? groups.map(buildHiddenActorGroup).join('')
+        : '<div class="nwst-nb-empty">No hidden intentions yet. Use <strong>Generate new intentions</strong> to seed this chat. Automatic cadence and day advancement only reconcile records after they exist.</div>';
+    wireHiddenIntentionsEvents();
+}
+
+function collectHiddenIntentionForm(card) {
+    const value = field => card.querySelector(`.nwst-hi-field[data-field="${field}"]`)?.value ?? '';
+    const actor = value('actor').trim();
+    const registry = buildAliasRegistry(getChatId());
+    return {
+        actor,
+        actorId: registry.resolve(actor) || toCanonicalId(actor),
+        type: value('type'),
+        domain: value('domain'),
+        status: value('status'),
+        objective: value('objective').trim(),
+        strategy: value('strategy').trim(),
+        nextAction: value('nextAction').trim(),
+        triggerConditions: parseHiList(value('triggerConditions')),
+        constraints: parseHiList(value('constraints')),
+        basis: parseHiList(value('basis')),
+        progressNote: value('progressNote').trim(),
+        progressStage: value('progressStage'),
+        confidence: value('confidence'),
+        commitment: value('commitment'),
+        _manualOverride: true
+    };
+}
+
+function wireHiddenIntentionsEvents() {
+    const container = document.getElementById('nwst-hi-container');
+    if (!container) return;
+    container.querySelectorAll('.nwst-hi-actor-group').forEach(group => {
+        group.ontoggle = function () {
+            const actorId = this.getAttribute('data-actor-id');
+            if (!actorId) return;
+            if (this.open) {
+                openHiddenActorIds.add(actorId);
+            } else {
+                openHiddenActorIds.delete(actorId);
+                // Closing an actor group is an explicit request to collapse its
+                // nested cards too. Native <details> does not emit toggle events
+                // for hidden descendants, so clear their remembered state here.
+                this.querySelectorAll('.nwst-hi-card').forEach(card => {
+                    const id = card.getAttribute('data-intention-id');
+                    if (id) openHiddenIntentionIds.delete(id);
+                    card.open = false;
+                });
+                this.querySelectorAll('.nwst-hi-history-group').forEach(history => { history.open = false; });
+            }
+        };
+    });
+    container.querySelectorAll('.nwst-hi-card').forEach(card => {
+        card.ontoggle = function () {
+            const id = this.getAttribute('data-intention-id');
+            if (!id) return;
+            if (this.open) openHiddenIntentionIds.add(id); else openHiddenIntentionIds.delete(id);
+        };
+    });
+    container.querySelectorAll('.nwst-hi-save').forEach(btn => btn.onclick = async function () {
+        const card = this.closest('.nwst-hi-card');
+        const id = card?.getAttribute('data-intention-id');
+        if (!id) return;
+        const form = collectHiddenIntentionForm(card);
+        const problem = validateHiddenIntentionForm(form);
+        if (problem) {
+            nwstToast(problem, 'warning');
+            return;
+        }
+        await updateHiddenIntention(getChatId(), id, form);
+        refreshHiddenIntentionsSection();
+        nwstToast('Hidden intention saved.', 'success');
+    });
+    container.querySelectorAll('.nwst-hi-lock').forEach(btn => btn.onclick = async function () {
+        const card = this.closest('.nwst-hi-card');
+        const id = card?.getAttribute('data-intention-id');
+        const item = getHiddenIntentions(getChatId()).find(x => x.id === id);
+        if (!item) return;
+        await updateHiddenIntention(getChatId(), id, { locked: !item.locked, _manualOverride: true });
+        refreshHiddenIntentionsSection();
+    });
+    container.querySelectorAll('.nwst-hi-accept').forEach(btn => btn.onclick = async function () {
+        const card = this.closest('.nwst-hi-card');
+        const id = card?.getAttribute('data-intention-id');
+        if (!id) return;
+        await updateHiddenIntention(getChatId(), id, { ...collectHiddenIntentionForm(card), status: 'active' });
+        refreshHiddenIntentionsSection();
+        nwstToast('Hidden intention accepted.', 'success');
+    });
+    container.querySelectorAll('.nwst-hi-reactivate').forEach(btn => btn.onclick = async function () {
+        const card = this.closest('.nwst-hi-card');
+        const id = card?.getAttribute('data-intention-id');
+        const item = getHiddenIntentions(getChatId()).find(x => x.id === id);
+        if (!item) return;
+        await updateHiddenIntention(getChatId(), id, { status: item.parkedFromStatus || 'active', _manualOverride: true });
+        refreshHiddenIntentionsSection();
+        nwstToast('Hidden intention reactivated. Reconciliation may rotate the working set if this exceeds five.', 'success');
+    });
+    container.querySelectorAll('.nwst-hi-abandon').forEach(btn => btn.onclick = async function () {
+        const card = this.closest('.nwst-hi-card');
+        const id = card?.getAttribute('data-intention-id');
+        if (!id) return;
+        await updateHiddenIntention(getChatId(), id, { status: 'abandoned', progressNote: 'Manually abandoned.', _manualOverride: true });
+        refreshHiddenIntentionsSection();
+    });
+    container.querySelectorAll('.nwst-hi-delete').forEach(btn => btn.onclick = async function () {
+        const card = this.closest('.nwst-hi-card');
+        const id = card?.getAttribute('data-intention-id');
+        if (!id) return;
+        await deleteHiddenIntention(getChatId(), id);
+        refreshHiddenIntentionsSection();
+        nwstToast('Hidden intention deleted.', 'info');
     });
 }
 
@@ -393,7 +822,13 @@ function buildSecretEntryHTML(secret) {
     let e = '';
 
         const typeDef = SECRET_TYPES.find(t => t.value === secret.type) || SECRET_TYPES[0];
-        const isOpen = false; // All secrets collapsed by default — reduces visual noise
+        const isOpen = openSecretIds.has(secret.id); // preserve user expansion across refreshes
+        const lifecycleStatus = secret.status || 'active';
+        const lifecycleButton = lifecycleStatus === 'active'
+            ? '<button class="menu_button nwst-btn nwst-secret-manual-archive" style="font-size:11px;padding:3px 9px" title="Archive this secret without deleting it. Archived secrets stop injecting and can be restored later.">Archive</button>'
+            : lifecycleStatus === 'archived'
+                ? '<button class="menu_button nwst-btn nwst-secret-restore" style="font-size:11px;padding:3px 9px" title="Restore this secret to active injection.">Restore</button>'
+                : '';
 
         e += `
         <div class="nwst-secret-entry${isOpen ? ' nwst-open' : ''}" data-secret-id="${secret.id}">
@@ -421,12 +856,13 @@ function buildSecretEntryHTML(secret) {
                         <ul class="nwst-nb-bullets nwst-who-knows-list" style="border:0.5px solid #777;border-radius:6px;overflow:hidden">
                             ${(secret.whoKnows || []).map(name => `
                                 <li class="nwst-nb-bullet" style="padding:5px 8px">
-                                    <span class="nwst-nb-bullet-text" contenteditable="true">${escapeHTML(name)}</span>
+                                    <span class="nwst-nb-bullet-text nwst-knowledge-name" contenteditable="true" spellcheck="false" data-original-name="${escapeHTML(name)}">${escapeHTML(name)}</span>
                                     <button class="nwst-nb-bullet-del nwst-who-knows-del">✕</button>
                                 </li>`).join('')}
                         </ul>
-                        <div class="nwst-nb-add-row" style="padding:4px 0 0">
-                            <input class="nwst-nb-add-input nwst-who-knows-add" placeholder="+ Add" data-secret-id="${secret.id}">
+                        <div class="nwst-nb-add-row" style="padding:4px 0 0;display:flex;gap:5px;align-items:center">
+                            <input class="nwst-nb-add-input nwst-who-knows-add" placeholder="Type a name" data-secret-id="${secret.id}" style="flex:1;min-width:0">
+                            <button type="button" class="menu_button nwst-btn nwst-who-knows-add-btn" style="font-size:10px;padding:2px 7px">Add</button>
                         </div>
                     </div>
                     <div class="nwst-secret-field">
@@ -434,12 +870,13 @@ function buildSecretEntryHTML(secret) {
                         <ul class="nwst-nb-bullets nwst-who-not-know-list" style="border:0.5px solid #777;border-radius:6px;overflow:hidden">
                             ${(secret.whoDoesNotKnow || []).map(name => `
                                 <li class="nwst-nb-bullet" style="padding:5px 8px">
-                                    <span class="nwst-nb-bullet-text" contenteditable="true">${escapeHTML(name)}</span>
+                                    <span class="nwst-nb-bullet-text nwst-knowledge-name" contenteditable="true" spellcheck="false" data-original-name="${escapeHTML(name)}">${escapeHTML(name)}</span>
                                     <button class="nwst-nb-bullet-del nwst-who-not-know-del">✕</button>
                                 </li>`).join('')}
                         </ul>
-                        <div class="nwst-nb-add-row" style="padding:4px 0 0">
-                            <input class="nwst-nb-add-input nwst-who-not-know-add" placeholder="+ Add" data-secret-id="${secret.id}">
+                        <div class="nwst-nb-add-row" style="padding:4px 0 0;display:flex;gap:5px;align-items:center">
+                            <input class="nwst-nb-add-input nwst-who-not-know-add" placeholder="Type a name" data-secret-id="${secret.id}" style="flex:1;min-width:0">
+                            <button type="button" class="menu_button nwst-btn nwst-who-not-know-add-btn" style="font-size:10px;padding:2px 7px">Add</button>
                         </div>
                     </div>
                 </div>
@@ -473,7 +910,7 @@ function buildSecretEntryHTML(secret) {
 
                 <div class="nwst-secret-field" style="margin-bottom:8px">
                     <div class="nwst-secret-field-label">Trigger anchors
-                        <span style="font-size:10px;color:#999;font-weight:normal"> — distinctive words/phrases unique to THIS secret (comma-separated). These make injection reliable. e.g. for a secret about Mara: mara, night courier, silver ring, east gate</span>
+                        <span style="font-size:10px;color:#999;font-weight:normal"> — distinctive words/phrases unique to THIS secret (comma-separated). These make injection reliable. e.g. for a secret about Mira: mira, affiliate, courier, tattoo</span>
                     </div>
                     <div class="nwst-secret-field-content" contenteditable="true" data-field="triggerAnchorsFlat"
                         style="font-size:13px;line-height:1.5;border:0.5px solid #777;border-radius:6px;padding:6px 8px;min-height:28px;cursor:text">${escapeHTML(flattenAnchors(secret.triggerAnchors))}</div>
@@ -491,6 +928,7 @@ function buildSecretEntryHTML(secret) {
                         <option value="low"${(secret.injectionPriority || 'normal') === 'low' ? ' selected' : ''}>⬇ Low — background/rare</option>
                     </select>
                     <button class="menu_button nwst-btn nwst-secret-save" style="font-size:11px;padding:3px 9px;margin-left:auto" title="Save all edits to this secret">💾 Save</button>
+                    ${lifecycleButton}
                     <button class="menu_button nwst-btn-danger nwst-secret-delete" style="font-size:11px;padding:3px 9px">Delete secret</button>
                 </div>
             </div>
@@ -499,7 +937,7 @@ function buildSecretEntryHTML(secret) {
     return e;
 }
 
-function refreshSecretsSection() {
+function refreshSecretsSection({ force = false } = {}) {
     const container = document.getElementById('nwst-nb-secrets-container');
     if (!container) return;
 
@@ -508,10 +946,10 @@ function refreshSecretsSection() {
     // A background scan re-rendering mid-edit is what caused edits to "roll
     // back" — the innerHTML replacement wiped in-progress typing.
     const active = document.activeElement;
-    if (active && active.closest && active.closest('.nwst-secret-entry')) {
+    if (!force && active && active.closest && active.closest('.nwst-secret-entry')) {
         return; // someone is typing in a secret — do not clobber
     }
-    if (container.querySelector('.nwst-secret-entry.nwst-dirty')) {
+    if (!force && container.querySelector('.nwst-secret-entry.nwst-dirty')) {
         return; // unsaved edits pending — do not clobber
     }
 
@@ -650,6 +1088,74 @@ function wireSecretFilterAndArchive() {
     });
 }
 
+// ── Explicit section-level saves ─────────────────────────────────────────
+
+function validateHiddenIntentionForm(form) {
+    if (['active_plan', 'contingency'].includes(form.type) && !form.strategy) {
+        return 'Active Plans and Contingencies require a strategy describing the broad method.';
+    }
+    if (['active_plan', 'commitment'].includes(form.type) && !form.nextAction) {
+        return 'Active Plans and Commitments require a nearest next action.';
+    }
+    if (form.type === 'contingency' && !form.triggerConditions.length) {
+        return 'Contingencies require at least one trigger condition.';
+    }
+    return '';
+}
+
+async function saveHiddenIntentionsSection({ notify = true } = {}) {
+    const container = document.getElementById('nwst-hi-container');
+    if (!container) return true;
+    const pending = Array.from(container.querySelectorAll('.nwst-hi-card')).map(card => ({
+        card,
+        id: card.getAttribute('data-intention-id'),
+        form: collectHiddenIntentionForm(card)
+    })).filter(item => item.id);
+    for (const item of pending) {
+        const problem = validateHiddenIntentionForm(item.form);
+        if (problem) {
+            if (notify) nwstToast(`Hidden Intentions not saved: ${problem}`, 'warning');
+            return false;
+        }
+    }
+    try {
+        for (const item of pending) await updateHiddenIntention(getChatId(), item.id, item.form);
+        if (notify) nwstToast('Hidden Intention edits saved.', 'success');
+        return true;
+    } catch (error) {
+        console.error('[NWST Notebook] Could not save Hidden Intentions section:', error);
+        if (notify) nwstToast('Hidden Intention edits could not be saved.', 'error');
+        return false;
+    }
+}
+
+async function saveSecretsSection({ notify = true } = {}) {
+    const container = document.getElementById('nwst-nb-secrets-container');
+    if (!container) return true;
+    const entries = Array.from(container.querySelectorAll('.nwst-secret-entry'));
+    try {
+        for (const entry of entries) {
+            const secretId = entry.getAttribute('data-secret-id');
+            if (!secretId) continue;
+            await updateSecret(getChatId(), secretId, collectSecretEntryUpdates(entry));
+            entry.classList.remove('nwst-dirty');
+        }
+        if (notify) nwstToast('Secret edits saved.', 'success');
+        return true;
+    } catch (error) {
+        console.error('[NWST Notebook] Could not save Secrets section:', error);
+        if (notify) nwstToast('Some Secret edits could not be saved.', 'error');
+        return false;
+    }
+}
+
+async function saveNotebookSection(section) {
+    if (section === 'core' || section === 'mystery') return saveBulletNotebookSection(section);
+    if (section === 'hiddenIntentions') return saveHiddenIntentionsSection();
+    if (section === 'secrets') return saveSecretsSection();
+    return false;
+}
+
 // ── Wire notebook-level events ────────────────────────────────────────────
 
 function wireNotebookEvents() {
@@ -662,6 +1168,27 @@ function wireNotebookEvents() {
         };
     });
 
+    // ── Explicit section Save edits buttons ────────────────────
+    document.querySelectorAll('.nwst-nb-section-save[data-save-section]').forEach(btn => {
+        // Do not collapse the accordion or trigger a competing blur before the
+        // explicit save captures the current inline value.
+        btn.onmousedown = e => e.preventDefault();
+        btn.onclick = async function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const section = this.getAttribute('data-save-section');
+            const oldText = this.textContent;
+            this.disabled = true;
+            this.textContent = 'Saving…';
+            try {
+                await saveNotebookSection(section);
+            } finally {
+                this.disabled = false;
+                this.textContent = oldText;
+            }
+        };
+    });
+
     // ── Clear all ──────────────────────────────────────────────
     const clearBtn = document.getElementById('nwst-nb-clearAll');
     if (clearBtn) {
@@ -670,6 +1197,68 @@ function wireNotebookEvents() {
             await clearNotebook(chatId);
             refreshNotebookUI();
             nwstToast('Notebook cleared.', 'warning');
+        };
+    }
+
+    // ── Hidden Intentions controls ──────────────────────────
+    const addIntentionBtn = document.getElementById('nwst-hi-add');
+    if (addIntentionBtn) {
+        addIntentionBtn.onclick = async () => {
+            const actor = String(window.prompt('NPC name for this intention:', '') || '').trim();
+            if (!actor) return;
+            const objective = String(window.prompt('Durable objective or intended action:', '') || '').trim();
+            if (!objective) return;
+            const registry = buildAliasRegistry(getChatId());
+            const actorId = registry.resolve(actor) || toCanonicalId(actor);
+            if (registry.isUserPc(actorId)) {
+                nwstToast('The user character cannot own Hidden Intentions.', 'warning');
+                return;
+            }
+            await addHiddenIntention(getChatId(), {
+                actor,
+                actorId,
+                type: 'objective',
+                domain: 'personal',
+                objective,
+                basis: ['Manually added by the player.'],
+                status: 'active',
+                confidence: 'high',
+                commitment: 'medium',
+                locked: true,
+                origin: 'manual'
+            });
+            refreshHiddenIntentionsSection();
+            nwstToast('Hidden intention added and wording locked.', 'success');
+        };
+    }
+    const generateIntentionsBtn = document.getElementById('nwst-hi-generate');
+    if (generateIntentionsBtn) {
+        generateIntentionsBtn.onclick = async () => {
+            generateIntentionsBtn.disabled = true;
+            const original = generateIntentionsBtn.textContent;
+            generateIntentionsBtn.textContent = '⏳ Generating...';
+            try {
+                await runHiddenIntentionsGenerate({ trigger: 'manual_generate', expectedChatId: getChatId(), force: true, broad: true });
+                refreshHiddenIntentionsSection();
+            } finally {
+                generateIntentionsBtn.disabled = false;
+                generateIntentionsBtn.textContent = original;
+            }
+        };
+    }
+    const reconcileIntentionsBtn = document.getElementById('nwst-hi-reconcile');
+    if (reconcileIntentionsBtn) {
+        reconcileIntentionsBtn.onclick = async () => {
+            reconcileIntentionsBtn.disabled = true;
+            const original = reconcileIntentionsBtn.textContent;
+            reconcileIntentionsBtn.textContent = '⏳ Reconciling...';
+            try {
+                await runHiddenIntentionsReconcile({ trigger: 'manual_reconcile', expectedChatId: getChatId(), force: true });
+                refreshHiddenIntentionsSection();
+            } finally {
+                reconcileIntentionsBtn.disabled = false;
+                reconcileIntentionsBtn.textContent = original;
+            }
         };
     }
 
@@ -724,6 +1313,38 @@ function wireNotebookEvents() {
 // ── Wire secret-specific events ───────────────────────────────────────────
 // Single clean wiring — no duplicate registrations.
 
+/**
+ * Read the complete editable state of one Secret card. Lifecycle actions use
+ * this too so clicking Archive/Restore cannot discard text that has not yet
+ * blurred/saved.
+ */
+function collectSecretEntryUpdates(entry) {
+    const updates = {};
+    const titleEl = entry?.querySelector('.nwst-secret-title');
+    if (titleEl) updates.title = titleEl.textContent.trim() || 'Untitled secret';
+
+    entry?.querySelectorAll('.nwst-secret-field-content[contenteditable]').forEach(el => {
+        const field = el.getAttribute('data-field');
+        const value = el.textContent.trim();
+        if (field === 'triggerAnchorsFlat') {
+            updates.triggerAnchors = parseAnchors(value);
+        } else if (field) {
+            updates[field] = value;
+        }
+    });
+
+    updates.whoKnows = Array.from(entry?.querySelectorAll('.nwst-who-knows-list .nwst-knowledge-name') || [])
+        .map(el => el.textContent.trim()).filter(Boolean);
+    updates.whoDoesNotKnow = Array.from(entry?.querySelectorAll('.nwst-who-not-know-list .nwst-knowledge-name') || [])
+        .map(el => el.textContent.trim()).filter(Boolean);
+
+    const typeSel = entry?.querySelector('.nwst-secret-type-select');
+    if (typeSel) updates.type = typeSel.value;
+    const prioSel = entry?.querySelector('.nwst-secret-priority-select');
+    if (prioSel) updates.injectionPriority = prioSel.value;
+    return updates;
+}
+
 function wireSecretEvents() {
     const container = document.getElementById('nwst-nb-secrets-container');
     if (!container) return;
@@ -731,7 +1352,57 @@ function wireSecretEvents() {
     // ── Expand/collapse toggle ─────────────────────────────────
     container.querySelectorAll('.nwst-secret-toggle').forEach(hdr => {
         hdr.onclick = function () {
-            this.closest('.nwst-secret-entry').classList.toggle('nwst-open');
+            const entry = this.closest('.nwst-secret-entry');
+            if (!entry) return;
+            entry.classList.toggle('nwst-open');
+            const secretId = entry.getAttribute('data-secret-id');
+            if (entry.classList.contains('nwst-open')) openSecretIds.add(secretId);
+            else openSecretIds.delete(secretId);
+        };
+    });
+
+    // ── Manual archive / restore ────────────────────────────────
+    // Prevent mousedown from moving focus first. Otherwise an async blur-save
+    // can race the lifecycle write and resurrect the old status afterward.
+    container.querySelectorAll('.nwst-secret-manual-archive, .nwst-secret-restore').forEach(btn => {
+        btn.onmousedown = (e) => e.preventDefault();
+    });
+
+    container.querySelectorAll('.nwst-secret-manual-archive').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const entry = this.closest('.nwst-secret-entry');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!secretId) return;
+            const chatId = getChatId();
+            const updates = collectSecretEntryUpdates(entry);
+            updates.status = 'archived';
+            updates.archiveReason = 'manual';
+            updates.flaggedAtMsgIndex = -1;
+            await updateSecret(chatId, secretId, updates);
+            entry.classList.remove('nwst-dirty');
+            openSecretIds.delete(secretId);
+            refreshSecretsSection({ force: true });
+            nwstToast('Secret archived — it will no longer be injected.', 'success');
+        };
+    });
+
+    container.querySelectorAll('.nwst-secret-restore').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const entry = this.closest('.nwst-secret-entry');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!secretId) return;
+            const chatId = getChatId();
+            const updates = collectSecretEntryUpdates(entry);
+            updates.status = 'active';
+            updates.archiveReason = '';
+            updates.flaggedAtMsgIndex = -1;
+            await updateSecret(chatId, secretId, updates);
+            entry.classList.remove('nwst-dirty');
+            openSecretIds.add(secretId);
+            refreshSecretsSection({ force: true });
+            nwstToast('Secret restored to active tracking.', 'success');
         };
     });
 
@@ -744,7 +1415,8 @@ function wireSecretEvents() {
             if (!secretId) return;
             const chatId = getChatId();
             await deleteSecret(chatId, secretId);
-            refreshSecretsSection();
+            openSecretIds.delete(secretId);
+            refreshSecretsSection({ force: true });
             nwstToast('Secret deleted.', 'info');
         };
     });
@@ -794,26 +1466,7 @@ function wireSecretEvents() {
             if (!secretId) return;
             const chatId = getChatId();
 
-            // Gather every field from the entry's DOM
-            const updates = {};
-            const titleEl = entry.querySelector('.nwst-secret-title');
-            if (titleEl) updates.title = titleEl.textContent.trim() || 'Untitled secret';
-
-            entry.querySelectorAll('.nwst-secret-field-content[contenteditable]').forEach(el => {
-                const field = el.getAttribute('data-field');
-                const value = el.textContent.trim();
-                if (field === 'triggerAnchorsFlat') {
-                    updates.triggerAnchors = parseAnchors(value);
-                } else if (field) {
-                    updates[field] = value;
-                }
-            });
-
-            const typeSel = entry.querySelector('.nwst-secret-type-select');
-            if (typeSel) updates.type = typeSel.value;
-            const prioSel = entry.querySelector('.nwst-secret-priority-select');
-            if (prioSel) updates.injectionPriority = prioSel.value;
-
+            const updates = collectSecretEntryUpdates(entry);
             await updateSecret(chatId, secretId, updates);
             entry.classList.remove('nwst-dirty');   // clear edit guard
             nwstToast('Secret saved.', 'success');
@@ -875,33 +1528,67 @@ function wireSecretEvents() {
         };
     });
 
-    // ── Add Who Knows (Enter key) ──────────────────────────────
+    // ── Add / edit knowledge holders ───────────────────────
+    async function addKnowledgeHolder(input, listType) {
+        const name = String(input?.value || '').trim();
+        if (!name) return;
+        const secretId = input.getAttribute('data-secret-id');
+        const chatId = getChatId();
+        if (!secretId || !chatId) return;
+        if (listType === 'knows') await addWhoKnows(chatId, secretId, name);
+        else await addWhoDoesNotKnow(chatId, secretId, name);
+        input.value = '';
+        input.blur(); // release edit guard before rebuilding the chips
+        openSecretIds.add(secretId);
+        refreshSecretsSection({ force: true });
+        nwstToast(`${name} added to ${listType === 'knows' ? 'Who Knows' : 'Who Does Not Know'}.`, 'success');
+    }
+
     container.querySelectorAll('.nwst-who-knows-add').forEach(input => {
         input.onkeydown = async function (e) {
             if (e.key !== 'Enter') return;
             e.preventDefault();
-            const name = this.value.trim();
-            if (!name) return;
-            const secretId = this.getAttribute('data-secret-id');
-            const chatId = getChatId();
-            await addWhoKnows(chatId, secretId, name);
-            this.value = '';
-            refreshSecretsSection();
+            await addKnowledgeHolder(this, 'knows');
         };
     });
-
-    // ── Add Who Does NOT Know (Enter key) ─────────────────────
     container.querySelectorAll('.nwst-who-not-know-add').forEach(input => {
         input.onkeydown = async function (e) {
             if (e.key !== 'Enter') return;
             e.preventDefault();
-            const name = this.value.trim();
-            if (!name) return;
-            const secretId = this.getAttribute('data-secret-id');
-            const chatId = getChatId();
-            await addWhoDoesNotKnow(chatId, secretId, name);
-            this.value = '';
-            refreshSecretsSection();
+            await addKnowledgeHolder(this, 'not');
+        };
+    });
+    container.querySelectorAll('.nwst-who-knows-add-btn').forEach(btn => {
+        btn.onclick = async function () {
+            await addKnowledgeHolder(this.parentElement?.querySelector('.nwst-who-knows-add'), 'knows');
+        };
+    });
+    container.querySelectorAll('.nwst-who-not-know-add-btn').forEach(btn => {
+        btn.onclick = async function () {
+            await addKnowledgeHolder(this.parentElement?.querySelector('.nwst-who-not-know-add'), 'not');
+        };
+    });
+
+    // Inline holder names are real editable fields, not decorative text.
+    container.querySelectorAll('.nwst-knowledge-name').forEach(span => {
+        span.onkeydown = function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); this.blur(); }
+        };
+        span.oninput = function () {
+            this.closest('.nwst-secret-entry')?.classList.add('nwst-dirty');
+        };
+        span.onblur = async function () {
+            const entry = this.closest('.nwst-secret-entry');
+            const secretId = entry?.getAttribute('data-secret-id');
+            if (!entry || !secretId) return;
+            const updates = {
+                whoKnows: Array.from(entry.querySelectorAll('.nwst-who-knows-list .nwst-knowledge-name')).map(el => el.textContent.trim()).filter(Boolean),
+                whoDoesNotKnow: Array.from(entry.querySelectorAll('.nwst-who-not-know-list .nwst-knowledge-name')).map(el => el.textContent.trim()).filter(Boolean)
+            };
+            await updateSecret(getChatId(), secretId, updates);
+            entry.classList.remove('nwst-dirty');
+            openSecretIds.add(secretId);
+            refreshSecretsSection({ force: true });
         };
     });
 
@@ -915,7 +1602,8 @@ function wireSecretEvents() {
             if (!name || !secretId) return;
             const chatId = getChatId();
             await removeWhoKnows(chatId, secretId, name);
-            refreshSecretsSection();
+            openSecretIds.add(secretId);
+            refreshSecretsSection({ force: true });
         };
     });
 
@@ -929,7 +1617,8 @@ function wireSecretEvents() {
             if (!name || !secretId) return;
             const chatId = getChatId();
             await removeWhoDoesNotKnow(chatId, secretId, name);
-            refreshSecretsSection();
+            openSecretIds.add(secretId);
+            refreshSecretsSection({ force: true });
         };
     });
 

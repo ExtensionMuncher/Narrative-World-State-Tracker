@@ -10,5 +10,6 @@ export const LLM_TOKEN_BUDGETS = Object.freeze({
     SMALL: 4096,
     MEDIUM: 8192,
     HEAVY: 12288,
+    HIDDEN_INTENTIONS_PRIMARY: 17000,
     BULK: 16384,
 });

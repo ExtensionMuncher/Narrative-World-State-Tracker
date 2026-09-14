@@ -10,7 +10,7 @@
 //   id: string,
 //   title: string,
 //   description: string,
-//   tier: "immediate" | "week" | "month" | "undetermined" | "future", // "future" is internal/invisible
+//   tier: "immediate" | "week" | "month" | "undetermined" | "persistent" | "future", // "future" is internal/invisible
 //   status: "pending" | "inprogress" | "resolved" | "missed",
 //   isNPC: boolean,
 //   npcOrigin: "detected" | "generated" | null,  // null when isNPC is false
@@ -22,7 +22,9 @@
 //   tierSetElapsedDay: number | null,              // elapsedStoryDays when the event entered its current tier
 //   participants: string[],                        // character names involved in the event (auto-populated or manually set)
 //   promotedSecretId: string | null,               // if this event was promoted to a secret, the secret's ID
-//   knowledgeSummary: string | null                // free-form description of information asymmetry (who knows what about this event's resolution)
+//   knowledgeSummary: string | null,             // free-form description of information asymmetry
+//   sourceIntentionIds: string[],                 // hidden-intention provenance; proposal is not proof of action
+//   resolutionCondition: string|null,              // Persistent only: explicit textual condition required for resolution
 // }
 // =============================================================================
 
@@ -36,6 +38,18 @@ import { extractYearFromText, dateFromDayCount, resolveScheduledElapsedWindow, p
 import { getNotebook } from './notebook.js';
 import { dlog } from "../lib/debug.js";
 import { getChatId } from '../utils.js';
+
+export const PERSISTENT_EVENT_TIER = 'persistent';
+export const MAX_ACTIVE_PERSISTENT_EVENTS = 3;
+
+export function normalizeResolutionCondition(value) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text ? text.slice(0, 600) : null;
+}
+
+export function isPersistentEvent(event) {
+    return event?.tier === PERSISTENT_EVENT_TIER;
+}
 
 // ── Unique ID generator ───────────────────────────────────────────────────
 
@@ -52,6 +66,26 @@ function generateEventId() {
     return `evt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
+
+
+
+function coerceEventBoolean(value) {
+    if (typeof value === 'string') return /^(true|1|yes|npc)$/i.test(value.trim());
+    return value === true || value === 1;
+}
+
+function normalizeParticipantArray(values) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(values) ? values : []) {
+        const name = String(raw || '').trim();
+        const key = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        if (!name || !key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(name);
+    }
+    return out;
+}
 
 function computeScheduledElapsedWindow(chatId, scheduledDate) {
     if (!scheduledDate) return { start: null, end: null };
@@ -101,7 +135,8 @@ function getTimingContext(chatId) {
  * Structurally place a concretely scheduled event into the visible horizon.
  * "future" is an internal queue for dated events beyond the current calendar
  * month; it is intentionally excluded from normal UI and prompt injection.
- * Tighter horizons win across boundaries: today/tomorrow, then current week,
+ * Tighter horizons win across boundaries: today/tomorrow, then the next full
+ * rolling week,
  * then current calendar month, then future.
  */
 export function classifyScheduledEventTier(chatId, scheduledElapsedStart, scheduledElapsedEnd = scheduledElapsedStart) {
@@ -112,7 +147,15 @@ export function classifyScheduledEventTier(chatId, scheduledElapsedStart, schedu
     if (ctx.currentElapsed > end) return 'missed';
     const daysUntilStart = scheduledElapsedStart - ctx.currentElapsed;
     if (daysUntilStart <= 1) return 'immediate';
-    if (daysUntilStart <= ctx.daysUntilWeekEnd) return 'week';
+    // "This Week" is a rolling horizon, not the remainder of the named
+    // Monday-Sunday calendar row. The old anchored-week calculation collapsed
+    // this window to zero on Sunday, stranding Tuesday/Saturday events in
+    // "This Month" until another advancement. A seven-day planning tier must
+    // remain useful on every weekday and may cross a month/year boundary.
+    const weekLength = Array.isArray(ctx.cfg?.weekDays) && ctx.cfg.weekDays.length > 0
+        ? ctx.cfg.weekDays.length
+        : 7;
+    if (daysUntilStart <= weekLength) return 'week';
     if (daysUntilStart <= ctx.daysUntilMonthEnd) return 'month';
     return 'future';
 }
@@ -125,6 +168,26 @@ export function getStructuralTierForScheduledDate(chatId, scheduledDate) {
         start: window.start,
         end: window.end
     };
+}
+
+export async function notifyHiddenIntentionsOfEventChange(chatId, event, reason, options = {}) {
+    try {
+        const actors = Array.isArray(event?.participants) ? [...event.participants] : [];
+        const { getHiddenIntention, updateHiddenIntention } = await import('./hiddenIntentions.js');
+        for (const intentionId of (event?.sourceIntentionIds || [])) {
+            const intention = getHiddenIntention(chatId, intentionId);
+            if (!intention) continue;
+            if (intention.actor) actors.push(intention.actor);
+            const related = options.removeLink
+                ? (intention.relatedEventIds || []).filter(id => id !== event.id)
+                : Array.from(new Set([...(intention.relatedEventIds || []), event.id])).filter(Boolean);
+            await updateHiddenIntention(chatId, intention.id, { relatedEventIds: related });
+        }
+        const { markHiddenIntentionsDirty } = await import('../llm/hiddenIntentions.js');
+        await markHiddenIntentionsDirty(chatId, actors, reason, { worldDirty: event?.isNPC !== true });
+    } catch (e) {
+        dlog('[NWST Events] Hidden Intentions event notice skipped:', e);
+    }
 }
 
 // ── Core CRUD ─────────────────────────────────────────────────────────────
@@ -148,6 +211,81 @@ export async function saveAllEvents(chatId, events) {
 }
 
 /**
+ * Deterministically reconcile every active scheduled event against Current Day
+ * and persist both its correct horizon and chronological ledger order.
+ *
+ * This is intentionally independent of validity/promotion/timing review flags:
+ * those flags govern narrative review, not objective calendar placement.
+ * Events with elapsed timer anchors are supported even when their display date
+ * is blank. Truly timeless Undetermined events remain untouched.
+ *
+ * @param {string} chatId
+ * @param {{markMissed?: boolean}} options
+ * @returns {Promise<{retiered:number, missed:number, reordered:boolean, changed:boolean}>}
+ */
+export async function reconcileEventTiers(chatId, options = {}) {
+    const markMissed = options.markMissed !== false;
+    const events = getAllEvents(chatId);
+    const currentDay = getCurrentDay(chatId) || {};
+    const dayCount = Number.isInteger(currentDay.dayCount) ? currentDay.dayCount : null;
+    const elapsed = Number.isInteger(currentDay.elapsedStoryDays) ? currentDay.elapsedStoryDays : 0;
+    const beforeOrder = events.map(event => event.id).join('\u0000');
+    let retiered = 0;
+    let missed = 0;
+
+    for (const event of events) {
+        if (event.status !== 'pending' && event.status !== 'inprogress') continue;
+        if (isPersistentEvent(event)) continue;
+        if (typeof event.scheduledElapsedStart !== 'number') continue;
+
+        const target = classifyScheduledEventTier(
+            chatId,
+            event.scheduledElapsedStart,
+            typeof event.scheduledElapsedEnd === 'number' ? event.scheduledElapsedEnd : event.scheduledElapsedStart
+        );
+        if (!target) continue;
+
+        if (target === 'missed') {
+            if (!markMissed) continue;
+            event.status = 'missed';
+            if (typeof event.resolveDay !== 'number') event.resolveDay = dayCount;
+            if (typeof event.resolveElapsedDay !== 'number') event.resolveElapsedDay = elapsed;
+            missed++;
+            continue;
+        }
+
+        if (event.tier !== target) {
+            event.tier = target;
+            event.tierSetDay = dayCount;
+            event.tierSetElapsedDay = elapsed;
+            retiered++;
+        }
+    }
+
+    // Keep the stored ledger deterministic. Scheduled items are chronological
+    // inside each horizon; undated items retain creation order after them.
+    const tierRank = { immediate: 0, week: 1, month: 2, undetermined: 3, persistent: 4, future: 5 };
+    events.sort((a, b) => {
+        const tierDelta = (tierRank[a.tier] ?? 99) - (tierRank[b.tier] ?? 99);
+        if (tierDelta) return tierDelta;
+        const aStart = typeof a.scheduledElapsedStart === 'number' ? a.scheduledElapsedStart : Number.POSITIVE_INFINITY;
+        const bStart = typeof b.scheduledElapsedStart === 'number' ? b.scheduledElapsedStart : Number.POSITIVE_INFINITY;
+        if (aStart !== bStart) return aStart - bStart;
+        const aEnd = typeof a.scheduledElapsedEnd === 'number' ? a.scheduledElapsedEnd : aStart;
+        const bEnd = typeof b.scheduledElapsedEnd === 'number' ? b.scheduledElapsedEnd : bStart;
+        if (aEnd !== bEnd) return aEnd - bEnd;
+        const timeDelta = Number(a.timestamp || 0) - Number(b.timestamp || 0);
+        if (timeDelta) return timeDelta;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+
+    const reordered = beforeOrder !== events.map(event => event.id).join('\u0000');
+    const changed = retiered > 0 || missed > 0 || reordered;
+    if (changed) await saveAllEvents(chatId, events);
+    return { retiered, missed, reordered, changed };
+}
+
+/**
  * Get a single event by its ID.
  * @param {string} chatId
  * @param {string} eventId
@@ -165,8 +303,7 @@ export function getEventById(chatId, eventId) {
  * @param {object} eventData - Event fields (id and timestamp auto-generated if not provided)
  * @returns {object} The newly created event
  */
-export async function addEvent(chatId, eventData) {
-    const events = getAllEvents(chatId);
+export function buildEventRecord(chatId, eventData) {
     // Stamp the story day the event enters its tier — the day-advance review
     // uses this to age undated events ("in this tier for N story days").
     let _createdDayCount = null;
@@ -176,26 +313,35 @@ export async function addEvent(chatId, eventData) {
         if (_day && typeof _day.dayCount === 'number') _createdDayCount = _day.dayCount;
         if (_day && Number.isInteger(_day.elapsedStoryDays) && _day.elapsedStoryDays >= 0) _createdElapsedDay = _day.elapsedStoryDays;
     } catch (e) { /* non-fatal */ }
-    const _scheduleWindow = computeScheduledElapsedWindow(chatId, eventData.scheduledDate || null);
-    const _scheduledTier = classifyScheduledEventTier(chatId, _scheduleWindow.start, _scheduleWindow.end);
+    const _requestedTier = eventData.tier || 'undetermined';
+    const _persistent = _requestedTier === PERSISTENT_EVENT_TIER;
+    const _scheduleWindow = _persistent
+        ? { start: null, end: null }
+        : computeScheduledElapsedWindow(chatId, eventData.scheduledDate || null);
+    const _scheduledTier = _persistent ? null : classifyScheduledEventTier(chatId, _scheduleWindow.start, _scheduleWindow.end);
+    const _participants = normalizeParticipantArray(eventData.participants);
+    const _resolutionCondition = _persistent ? normalizeResolutionCondition(eventData.resolutionCondition) : null;
     const newEvent = {
         id: eventData.id || generateEventId(),
         title: eventData.title || '',
         description: eventData.description || '',
-        tier: (_scheduledTier && _scheduledTier !== 'missed') ? _scheduledTier : (eventData.tier || 'undetermined'),
+        tier: _persistent ? PERSISTENT_EVENT_TIER : ((_scheduledTier && _scheduledTier !== 'missed') ? _scheduledTier : _requestedTier),
         status: eventData.status || 'pending',
-        isNPC: eventData.isNPC || false,
+        isNPC: coerceEventBoolean(eventData.isNPC),
         npcOrigin: eventData.isNPC ? (eventData.npcOrigin || 'detected') : null,
         origin: eventData.origin || 'detected',
         timestamp: eventData.timestamp || Date.now(),
-        scheduledDate: eventData.scheduledDate || null,
-        scheduledElapsedStart: (typeof eventData.scheduledElapsedStart === 'number') ? eventData.scheduledElapsedStart : _scheduleWindow.start,
-        scheduledElapsedEnd: (typeof eventData.scheduledElapsedEnd === 'number') ? eventData.scheduledElapsedEnd : _scheduleWindow.end,
+        scheduledDate: _persistent ? null : (eventData.scheduledDate || null),
+        scheduledElapsedStart: _persistent ? null : ((typeof eventData.scheduledElapsedStart === 'number') ? eventData.scheduledElapsedStart : _scheduleWindow.start),
+        scheduledElapsedEnd: _persistent ? null : ((typeof eventData.scheduledElapsedEnd === 'number') ? eventData.scheduledElapsedEnd : _scheduleWindow.end),
         resolveDay: null, // Legacy compatibility field
         resolveElapsedDay: null,
-        participants: eventData.participants || [],
+        participants: _participants,
         promotedSecretId: eventData.promotedSecretId || null,
         knowledgeSummary: eventData.knowledgeSummary || null,
+        sourceIntentionIds: Array.isArray(eventData.sourceIntentionIds) ? eventData.sourceIntentionIds.filter(Boolean) : [],
+        resolutionCondition: _resolutionCondition,
+        persistentResolutionFlag: eventData.persistentResolutionFlag || null,
         tierSetDay: (typeof eventData.tierSetDay === 'number') ? eventData.tierSetDay : _createdDayCount, // legacy compatibility
         tierSetElapsedDay: (typeof eventData.tierSetElapsedDay === 'number') ? eventData.tierSetElapsedDay : _createdElapsedDay,
         // Special-day materialization bookkeeping (see data/specialDays.js):
@@ -205,8 +351,26 @@ export async function addEvent(chatId, eventData) {
         occurrenceDay: (typeof eventData.occurrenceDay === 'number') ? eventData.occurrenceDay : null,
         occurrenceKey: eventData.occurrenceKey || null
     };
+    return newEvent;
+}
+
+export async function addEvent(chatId, eventData) {
+    const events = getAllEvents(chatId);
+    const newEvent = buildEventRecord(chatId, eventData);
+    if (isPersistentEvent(newEvent)) {
+        if (!newEvent.resolutionCondition) {
+            throw new Error('Persistent events require a resolution condition.');
+        }
+        const activePersistent = events.filter(event =>
+            isPersistentEvent(event) && (event.status === 'pending' || event.status === 'inprogress')
+        ).length;
+        if (activePersistent >= MAX_ACTIVE_PERSISTENT_EVENTS) {
+            throw new Error(`Persistent event cap reached (${MAX_ACTIVE_PERSISTENT_EVENTS}). Resolve, replace, or remove one first.`);
+        }
+    }
     events.push(newEvent);
     await saveAllEvents(chatId, events);
+    await notifyHiddenIntentionsOfEventChange(chatId, newEvent, 'An event was added or approved.');
     return newEvent;
 }
 
@@ -222,9 +386,58 @@ export async function updateEvent(chatId, eventId, updates) {
     const index = events.findIndex(e => e.id === eventId);
     if (index === -1) return null;
 
+    // Never mutate the caller's object. UI/editor callers may retain it for
+    // post-save verification, and mutation here previously made silent
+    // calendar rewrites difficult to diagnose.
+    updates = { ...(updates || {}) };
+    const previous = events[index];
+    const explicitTierChange = updates.tier !== undefined && updates.tier !== previous.tier;
+    const nextTier = updates.tier !== undefined ? updates.tier : previous.tier;
+    const nextPersistent = nextTier === PERSISTENT_EVENT_TIER;
+    let scheduleChanged = updates.scheduledDate !== undefined && updates.scheduledDate !== previous.scheduledDate;
+
+    if (nextPersistent) {
+        const nextCondition = updates.resolutionCondition !== undefined
+            ? normalizeResolutionCondition(updates.resolutionCondition)
+            : normalizeResolutionCondition(previous.resolutionCondition);
+        if (!nextCondition) throw new Error('Persistent events require a resolution condition.');
+        if (nextCondition !== normalizeResolutionCondition(previous.resolutionCondition)) {
+            // Evidence for the old condition cannot authorize the edited condition.
+            updates.persistentResolutionFlag = null;
+        }
+        updates.resolutionCondition = nextCondition;
+        updates.scheduledDate = null;
+        updates.scheduledElapsedStart = null;
+        updates.scheduledElapsedEnd = null;
+        scheduleChanged = false;
+        const nextActive = ['pending', 'inprogress'].includes(updates.status ?? previous.status);
+        const previousActive = isPersistentEvent(previous) && ['pending', 'inprogress'].includes(previous.status);
+        if (nextActive && !previousActive) {
+            const activePersistent = events.filter((event, i) => i !== index
+                && isPersistentEvent(event)
+                && (event.status === 'pending' || event.status === 'inprogress')).length;
+            if (activePersistent >= MAX_ACTIVE_PERSISTENT_EVENTS) {
+                throw new Error(`Persistent event cap reached (${MAX_ACTIVE_PERSISTENT_EVENTS}). Resolve, replace, or remove one first.`);
+            }
+        }
+    } else {
+        // Resolution metadata belongs exclusively to Persistent events. Clear it
+        // centrally whenever an event is (or becomes) an ordinary tier so
+        // imports/editors cannot leave a stale hidden condition behind.
+        updates.resolutionCondition = null;
+        updates.persistentResolutionFlag = null;
+    }
+
+    const nextIsNPC = updates.isNPC !== undefined ? coerceEventBoolean(updates.isNPC) : coerceEventBoolean(previous.isNPC);
+    const nextParticipants = updates.participants !== undefined
+        ? normalizeParticipantArray(updates.participants)
+        : normalizeParticipantArray(previous.participants);
+    if (updates.participants !== undefined) updates.participants = nextParticipants;
+    if (updates.isNPC !== undefined) updates.isNPC = nextIsNPC;
+
     // Re-stamp the in-tier age whenever the tier actually changes (unless the
     // caller supplied an explicit stamp).
-    if (updates.tier !== undefined && updates.tier !== events[index].tier && updates.tierSetElapsedDay === undefined) {
+    if (explicitTierChange && updates.tierSetElapsedDay === undefined) {
         try {
             const day = getCurrentDay(chatId);
             updates = {
@@ -237,25 +450,35 @@ export async function updateEvent(chatId, eventId, updates) {
 
     // A changed schedule is resolved immediately against the current cyclical
     // calendar position, then stored as a one-time elapsed occurrence window.
-    if (updates.scheduledDate !== undefined && updates.scheduledDate !== events[index].scheduledDate) {
+    if (scheduleChanged) {
         const window = computeScheduledElapsedWindow(chatId, updates.scheduledDate);
         updates = { ...updates, scheduledElapsedStart: window.start, scheduledElapsedEnd: window.end };
+
+        // When ONLY the date changed, let the deterministic calendar place it
+        // into the correct visible horizon. When the caller explicitly changed
+        // both date and tier, the explicit tier is a deliberate player edit and
+        // must win for this save instead of being silently overwritten.
+        if (!explicitTierChange) {
+            const scheduledTier = classifyScheduledEventTier(chatId, window.start, window.end);
+            if (scheduledTier && scheduledTier !== 'missed') {
+                updates = { ...updates, tier: scheduledTier };
+            }
+        }
     }
 
-    // Concrete dates outrank LLM/manual horizon guesses. Any parseable dated
-    // event is structurally placed into Immediate / This Week / This Month, or
-    // the internal Future Scheduled queue. Undated events keep their supplied
-    // tier and remain eligible for narrative re-tiering.
-    const finalStart = updates.scheduledElapsedStart !== undefined ? updates.scheduledElapsedStart : events[index].scheduledElapsedStart;
-    const finalEnd = updates.scheduledElapsedEnd !== undefined ? updates.scheduledElapsedEnd : events[index].scheduledElapsedEnd;
-    const scheduledTier = classifyScheduledEventTier(chatId, finalStart, finalEnd);
-    if (scheduledTier && scheduledTier !== 'missed') {
-        updates = { ...updates, tier: scheduledTier };
-    }
-
-    events[index] = { ...events[index], ...updates };
+    // Do not reclassify an unchanged scheduled date during unrelated edits.
+    // Day Advancement owns the ongoing deterministic horizon roll. This keeps
+    // title/description/participant saves from unexpectedly moving an event,
+    // and lets a manual tier edit actually persist.
+    events[index] = { ...previous, ...updates };
     await saveAllEvents(chatId, events);
-    return events[index];
+    // A schedule edit takes effect across the whole ledger immediately. Manual
+    // tier-only edits remain deliberate and are not overwritten until the next
+    // explicit reconciliation/day boundary.
+    if (scheduleChanged && !explicitTierChange) await reconcileEventTiers(chatId);
+    const persisted = getEventById(chatId, eventId);
+    await notifyHiddenIntentionsOfEventChange(chatId, persisted, 'An event changed status, timing, or content.');
+    return persisted;
 }
 
 /**
@@ -269,8 +492,10 @@ export async function deleteEvent(chatId, eventId) {
     const index = events.findIndex(e => e.id === eventId);
     if (index === -1) return false;
 
+    const removed = events[index];
     events.splice(index, 1);
     await saveAllEvents(chatId, events);
+    await notifyHiddenIntentionsOfEventChange(chatId, removed, 'A related event was deleted or dismissed.', { removeLink: true });
     return true;
 }
 
@@ -698,6 +923,27 @@ export async function migrateEventData(chatId) {
             event.occurrenceKey = null;
             changed = true;
         }
+        if (event.resolutionCondition === undefined) {
+            event.resolutionCondition = null;
+            changed = true;
+        }
+        if (event.persistentResolutionFlag === undefined) {
+            event.persistentResolutionFlag = null;
+            changed = true;
+        }
+        if (isPersistentEvent(event)) {
+            const normalized = normalizeResolutionCondition(event.resolutionCondition);
+            if (event.resolutionCondition !== normalized) {
+                event.resolutionCondition = normalized;
+                changed = true;
+            }
+            if (event.scheduledDate !== null || event.scheduledElapsedStart !== null || event.scheduledElapsedEnd !== null) {
+                event.scheduledDate = null;
+                event.scheduledElapsedStart = null;
+                event.scheduledElapsedEnd = null;
+                changed = true;
+            }
+        }
 
         if (changed) migrated++;
     }
@@ -729,6 +975,15 @@ export function getActiveEvents(chatId) {
     );
 }
 
+/** Active events that consume the ordinary timed/narrative event pool. Persistent has its own hard cap. */
+export function getActivePoolEvents(chatId) {
+    return getActiveEvents(chatId).filter(event => !isPersistentEvent(event));
+}
+
+export function getActivePersistentEvents(chatId) {
+    return getActiveEvents(chatId).filter(isPersistentEvent);
+}
+
 /**
  * Get all non-concluded events, including internally queued Future Scheduled
  * events. Used by scanner/planning dedup so hidden future commitments are not
@@ -741,10 +996,10 @@ export function getTrackedEvents(chatId) {
 
 /**
  * Get events grouped by tier (for UI display).
- * Returns an object with keys 'immediate', 'week', 'month', 'undetermined',
+ * Returns an object with keys 'immediate', 'week', 'month', 'undetermined', 'persistent',
  * each containing an array of events.
  * @param {string} chatId
- * @returns {object} { immediate: [...], week: [...], month: [...], undetermined: [...] }
+ * @returns {object} { immediate: [...], week: [...], month: [...], undetermined: [...], persistent: [...] }
  */
 export function getEventsGroupedByTier(chatId) {
     const events = getAllEvents(chatId);
@@ -752,7 +1007,8 @@ export function getEventsGroupedByTier(chatId) {
         immediate: events.filter(e => e.tier === 'immediate'),
         week: events.filter(e => e.tier === 'week'),
         month: events.filter(e => e.tier === 'month'),
-        undetermined: events.filter(e => e.tier === 'undetermined')
+        undetermined: events.filter(e => e.tier === 'undetermined'),
+        persistent: events.filter(e => e.tier === PERSISTENT_EVENT_TIER)
     };
 }
 
@@ -778,6 +1034,7 @@ export async function rollEventHorizon(chatId, tierChanges) {
         if (day && Number.isInteger(day.elapsedStoryDays)) elapsedStoryDays = day.elapsedStoryDays;
     } catch (e) { /* non-fatal */ }
     for (const event of events) {
+        if (isPersistentEvent(event)) continue;
         if (tierChanges[event.id]) {
             const newTier = tierChanges[event.id];
             if (newTier === 'missed') {

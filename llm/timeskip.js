@@ -18,10 +18,10 @@
 import { getChatId, nwstToast } from '../utils.js';
 import { getSetting } from '../index.js';
 import {
-    getWorldState, saveWorldState, getCurrentDay, replaceCurrentDay,
+    getWorldState, saveWorldState, getCurrentDay, replaceCurrentDay, updateCurrentDay,
     getForecast, replaceMoonPhases,
     getConditions, updateConditionContent, getSettingContext,
-    saveSnapshot, getSeasonConfig, getCalendarConfig
+    saveSnapshot, getSnapshots, commitTimeSkipSnapshot, getSeasonConfig, getCalendarConfig
 } from '../data/worldState.js';
 import { getAllEvents, saveAllEvents, addEvent, classifyScheduledEventTier } from '../data/events.js';
 import { getNotebook, saveNotebook } from '../data/notebook.js';
@@ -29,10 +29,13 @@ import { resolveProfile, generateWithProfile } from './connections.js';
 import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { getLunarAngle, setLunarAngle, getDegreesPerDay, generateMoonPhases, getPhaseAngle, computeLunarAngleFromDate, getMoonPhaseForAngle, computeSeason, refreshExtraMoons, buildMoonPhenomenaOptions } from './dayAdvancement.js';
 import { getEraPin } from '../data/worldState.js';
-import { advanceCurrentCalendarDate, parseCurrentCalendarDate, dayOfYearFor, daysBetweenCalendarDates, wrapDayCount, extractYearFromText, computeDeterministicDate } from '../lib/calendarMath.js';
+import { advanceCurrentCalendarDate, parseCurrentCalendarDate, dayOfYearFor, daysBetweenCalendarDates, wrapDayCount, extractYearFromText, computeDeterministicDate, calendarMonthLayoutFor } from '../lib/calendarMath.js';
 import { dlog } from "../lib/debug.js";
+import { acquireStoryOperation, releaseStoryOperation } from '../lib/storyOperationLock.js';
 import { getMoonConfig } from '../data/moons.js';
 import { ensureNagerHolidayCacheForCurrentWindow } from '../data/nagerDate.js';
+import { completeEventParticipants } from './eventParticipants.js';
+import { getWeatherProfilesState, saveWeatherProfilesState, prepareSevereWeatherAdvance, commitPreparedWeather } from '../data/severeWeather.js';
 
 // ── Internal prompt ───────────────────────────────────────────────────────
 
@@ -49,9 +52,15 @@ You will receive:
 You must update ALL of the following:
 
 1. CURRENT DAY BLOCK: New date, new season, new weather, new moon phase appropriate to the new time period
-2. ALL EVENTS: Mark past-due events as resolved or missed. Update surviving events to correct tiers. Generate new events where the skip context warrants them. Adjust NPC events based on what would plausibly have occurred.
+2. ALL EVENTS: Mark past-due ordinary events as resolved or missed. Update surviving ordinary events to correct tiers. Generate new dated/ordinary events where the skip context warrants them. Adjust NPC events based on what would plausibly have occurred. PERSISTENT events are excluded from time-skip maintenance: never resolve, miss, re-tier, or create Persistent events merely because time passed; their explicit narrative resolution is handled by the cadence scanner and player review.
 
 CRITICAL — NPC vs User Events: Events driven by NPC characters (events about a character's internal struggle, personal relationships, backstory, or decisions) MUST have "isNPC": true. Events that are world-facing or player-facing (faction movements, festivals, environmental changes, rumors the player can investigate) should have "isNPC": false. When in doubt, if a specific NPC name appears in the title or description, set isNPC: true.
+EVENT PARTICIPANTS — MANDATORY:
+- Every new event must include a participants array.
+- NPC events require at least one named participant. Exhaust the supplied cast context. If none can be responsibly identified, preserve the event with [] so NWST can flag it for user review; never invent a name and never omit the event solely for this field.
+- Non-NPC meetings, reviews, inspections, assignments, hearings, visits, and obligations must still list the named characters who directly attend, organize, perform, or carry responsibility.
+- Use [] only for genuinely ambient world events with no direct named character involvement.
+
 3. WORLD CONDITIONS: Use one of two mental modes for each condition. GROUNDED means the skip description/current state actually establishes the macro condition, with at most ONE conservative inference and no invented actor, reaction, institution, team, rumor, policy, coordination, awareness, or offscreen development. AMBIENT means a restrained low-stakes background condition consistent with Setting Context and the new date/season, independent of the immediate cast. Ambient may introduce modest background motion involving setting-supported institutions/factions/populations/environments, including named overarching institutions, provided it stays something the active cast could plausibly never notice. If an invented development would force immediate plan changes, urgent follow-up, or substantially rewrite the playable world, it is too consequential unless the supplied world state already supports that scale. Keep conditions at macro/durable scale: institutions, factions, populations, districts, regions, cultures, social patterns, spiritual systems, or environments. A named character may be identified as the CAUSE of a genuine grounded macro shift, but do not turn their personal actions into the World Condition itself. Do not invent unseen meetings, rumor circulation, institutional reactions, coordination, mutual awareness, policy shifts, resource strain, new teams/details, or faction-wide sentiment to bridge a local fact into a macro consequence. Preserve information asymmetry. Plausible future consequences are not current conditions. Avoid casually inventing plot-forcing upheavals such as war, coups, states of emergency, sweeping nationwide crackdowns/purges, mass civil disorder, economic collapse, catastrophic disasters, mass-casualty events, widespread infrastructure failure, or supernatural/metaphysical catastrophes. Avoid unsupported unprecedented/historic/system-wide claims.
 
 CATEGORY BOUNDARIES / MACRO THRESHOLDS FOR WORLD CONDITIONS:
@@ -79,7 +88,7 @@ Respond with a JSON object:
 {
   "currentDay": {
     "dateDisplay": "new date string",
-    "dateSub": "era/calendar context only if changed; never include a city, country, region, or general setting label",
+    "dateSub": "era/calendar context only if changed; never include a city, country, region, or setting label",
     "season": "new season",
     "weatherToday": "weather at the new time",
     "flora": "seasonal flora description",
@@ -117,7 +126,7 @@ Respond with a JSON object:
   }
 }
 
-EVENT UPDATE SAFETY: Only list an existing event under resolved, missed, or tierChanges when the time skip clearly changes that event. Existing events omitted from eventUpdates remain unchanged; omission does NOT mean resolved.
+EVENT UPDATE SAFETY: Only list an existing ordinary event under resolved, missed, or tierChanges when the time skip clearly changes that event. Existing events omitted from eventUpdates remain unchanged; omission does NOT mean resolved. Persistent events must NEVER appear under resolved, missed, tierChanges, or newEvents; passage of time is not resolution evidence for them.
 
 Write with atmospheric detail. Ground everything in the setting context and the skip description.`;
 
@@ -140,22 +149,35 @@ export async function executeTimeSkip(skipDescription) {
         nwstToast('Enter a description of the time skip.', 'warning');
         return false;
     }
+    const storyLock = acquireStoryOperation(chatId, 'Time Skip');
+    if (!storyLock.ok) {
+        nwstToast(`${storyLock.active?.kind || 'Another timeline operation'} is already running for this chat.`, 'warning');
+        return false;
+    }
 
     // ── 1. Save pre-skip snapshot (ROLLBACK POINT) ──────────────
     nwstToast('Processing time skip — this may take a moment...', 'info');
     showTimeskipLoading(true);
 
-    const preSkipSnapshot = {
-        worldState: getWorldState(chatId),
-        events: getAllEvents(chatId),
-        notebook: getNotebook(chatId)
-    };
-
-    // Save snapshot for potential rollback
-    const snapshotKey = `pre_skip_${Date.now()}`;
-    await saveSnapshot(chatId, snapshotKey, preSkipSnapshot.worldState, preSkipSnapshot.events, preSkipSnapshot.notebook);
+    let preSkipSnapshot = null;
+    let snapshotKey = null;
+    let rollbackPointSaved = false;
 
     try {
+        preSkipSnapshot = {
+            worldState: getWorldState(chatId),
+            events: getAllEvents(chatId),
+            notebook: getNotebook(chatId),
+            weatherProfiles: getWeatherProfilesState(chatId)
+        };
+
+        // Snapshot persistence is part of the protected operation. If this
+        // write fails, no timeline mutation has begun and finally still clears
+        // the foreground lock/loading state.
+        snapshotKey = `pre_skip_${Date.now()}`;
+        await saveSnapshot(chatId, snapshotKey, preSkipSnapshot.worldState, preSkipSnapshot.events, preSkipSnapshot.notebook, { pendingTimeSkip: true });
+        rollbackPointSaved = true;
+
         // ── 2. Resolve Planning LLM profile ─────────────────────
         const profile = resolveProfile('planningLLM');
         if (!profile) {
@@ -174,6 +196,10 @@ export async function executeTimeSkip(skipDescription) {
 
         // Compute the current season from the pre-skip dayCount so the LLM
         // receives accurate seasonal context for the skip description.
+        const currentCalendarConfig = getCalendarConfig(chatId);
+        const currentParsedDate = currentDay
+            ? parseCurrentCalendarDate(currentDay.dateDisplay || '', currentDay.dateSub || '', currentCalendarConfig, getSetting('dateFormatDMY') === true)
+            : null;
         const currentComputedSeason = (currentDay && typeof currentDay.dayCount === 'number')
             ? computeSeason(currentDay.dayCount, getSeasonConfig(chatId))
             : null;
@@ -282,9 +308,10 @@ export async function executeTimeSkip(skipDescription) {
             }
 
             const computedSeason = computeSeason(newDayCount, seasonConfig);
-            const finalSeason = computedSeason !== null ? computedSeason : (result.currentDay.season || '');
+            const finalSeason = computedSeason !== null ? computedSeason : (result.currentDay.season || preDay.season || '');
+            const mergedCurrentDay = mergeTimeskipCurrentDay(preDay, result.currentDay);
             await replaceCurrentDay(chatId, {
-                ...result.currentDay,
+                ...mergedCurrentDay,
                 season: finalSeason,
                 dayCount: newDayCount,
                 elapsedStoryDays: newElapsedStoryDays
@@ -323,10 +350,16 @@ export async function executeTimeSkip(skipDescription) {
             let newAngle = 0;
             let phaseSource = '';
 
+            const landedCalendarConfig = getCalendarConfig(chatId);
+            const landedDay = getCurrentDay(chatId) || result.currentDay || {};
+            const landedDate = parseCurrentCalendarDate(
+                landedDay.dateDisplay || '', landedDay.dateSub || '', landedCalendarConfig,
+                getSetting('dateFormatDMY') === true
+            );
             // Priority 0: a validated elapsed-day count advances the stored moon
             // angle directly, regardless of whether the displayed calendar date
             // is deterministic or LLM-owned.
-            if (Number.isInteger(appliedDaysSkipped)) {
+            if (!phaseSource && Number.isInteger(appliedDaysSkipped)) {
                 const oldAngleDet = preSkipSnapshot.worldState?.currentDay?.lunarAngle ?? getLunarAngle(chatId) ?? 0;
                 newAngle = ((oldAngleDet + appliedDaysSkipped * getDegreesPerDay(chatId)) % 360 + 360) % 360;
                 phaseSource = `elapsed +${appliedDaysSkipped}d`;
@@ -404,16 +437,16 @@ export async function executeTimeSkip(skipDescription) {
         // We roll once for the landing day (not once per skipped day) so long skips
         // do not become a hidden weather-gacha loop. Forecast regeneration below
         // then renders the stored system without rerolling it.
+        let landedPreparedWeather = null;
         try {
-            const { prepareSevereWeatherAdvance, commitPreparedWeather } = await import('../data/severeWeather.js');
             const landed = getCurrentDay(chatId);
-            const preparedWeather = prepareSevereWeatherAdvance(chatId, {
+            landedPreparedWeather = prepareSevereWeatherAdvance(chatId, {
                 targetElapsedDay: Number.isInteger(landed?.elapsedStoryDays) ? landed.elapsedStoryDays : 0,
                 season: landed?.season || '',
                 dayCount: landed?.dayCount || 1,
             });
-            await commitPreparedWeather(chatId, preparedWeather);
-            if (preparedWeather?.toast) nwstToast(preparedWeather.toast, preparedWeather.system?.source === 'override' ? 'info' : 'warning');
+            await commitPreparedWeather(chatId, landedPreparedWeather);
+            if (landedPreparedWeather?.toast) nwstToast(landedPreparedWeather.toast, landedPreparedWeather.system?.source === 'override' ? 'info' : 'warning');
         } catch (weatherErr) {
             console.warn('[NWST Timeskip] Severe-weather roll failed (non-fatal):', weatherErr);
         }
@@ -426,6 +459,17 @@ export async function executeTimeSkip(skipDescription) {
         try {
             const { regenerateForecast } = await import('./dayAdvancement.js');
             await regenerateForecast('forecast');
+            // Time Skip chooses the landing date before Severe Weather can roll.
+            // If the landed system is active/recovering today, synchronize the
+            // Current Day weather from the newly constrained Day-1 forecast so
+            // the Home journal cannot contradict the simulator until the next
+            // atmospheric synthesis pass.
+            if (['active', 'recovery'].includes(landedPreparedWeather?.status)) {
+                const todayForecast = getForecast(chatId)?.[0];
+                if (todayForecast?.description) {
+                    await updateCurrentDay(chatId, { weatherToday: todayForecast.description });
+                }
+            }
             nwstToast('Forecast updated.', 'info');
         } catch (forecastErr) {
             console.warn('[NWST Timeskip] Forecast regeneration failed (non-fatal):', forecastErr);
@@ -444,6 +488,20 @@ export async function executeTimeSkip(skipDescription) {
             nwstToast('Nager.Date holiday fetch failed. NWST will retry when the story date advances. Check F12 for details.', 'error');
         }
 
+        // A multi-day jump is also a day-boundary reconciliation point for
+        // persistent NPC agency. Run only after the landing world's objective
+        // state, events, Notebook, weather, and date are committed.
+        try {
+            const { runHiddenIntentionsDayAdvance } = await import('./hiddenIntentions.js');
+            await runHiddenIntentionsDayAdvance(chatId);
+        } catch (intentErr) {
+            console.warn('[NWST Timeskip] Hidden Intentions reconciliation failed (non-fatal):', intentErr);
+        }
+
+        // Clear the persisted transaction marker only after every required
+        // landing-state mutation has completed. This leaves a recoverable
+        // checkpoint if the page reloads or the chat changes mid-skip.
+        await commitTimeSkipSnapshot(chatId, snapshotKey);
         nwstToast('Time skip complete.', 'success');
         if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
         return true;
@@ -456,12 +514,19 @@ export async function executeTimeSkip(skipDescription) {
             return false;
         }
 
+        if (!rollbackPointSaved) {
+            nwstToast(`Time skip failed before any story state changed: ${err.message}`, 'error');
+            return false;
+        }
+
         try {
             await saveWorldState(chatId, preSkipSnapshot.worldState);
             await saveAllEvents(chatId, preSkipSnapshot.events);
             await saveNotebook(chatId, preSkipSnapshot.notebook);
+            await saveWeatherProfilesState(chatId, preSkipSnapshot.weatherProfiles);
+            await commitTimeSkipSnapshot(chatId, snapshotKey);
             nwstToast(`Time skip failed: ${err.message}. State rolled back.`, 'error');
-        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
+            if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
         } catch (rollbackErr) {
             console.error('[NWST Timeskip] CRITICAL: Rollback also failed!', rollbackErr);
             nwstToast('Time skip failed and rollback was incomplete. Check console.', 'error');
@@ -470,8 +535,34 @@ export async function executeTimeSkip(skipDescription) {
         return false;
 
     } finally {
+        releaseStoryOperation(chatId, 'Time Skip');
         showTimeskipLoading(false);
     }
+}
+
+/**
+ * Recover a Time Skip that began mutating but never reached its persisted
+ * commit marker (for example, reload/crash/chat switch during the foreground
+ * operation). The existing Previous Day restore path is reused so world state,
+ * events, Notebook, selected context/weather profile, weather simulation and
+ * temporal migrations are restored consistently.
+ */
+export async function recoverInterruptedTimeSkip(chatId = getChatId()) {
+    if (!chatId || getChatId() !== chatId) return false;
+    const snapshots = getSnapshots(chatId);
+    const pending = Object.entries(snapshots || {})
+        .filter(([key, value]) => key.startsWith('pre_skip_') && value?.pendingTimeSkip === true)
+        .sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0));
+    if (pending.length === 0) return false;
+
+    const [snapshotKey] = pending[0];
+    console.warn(`[NWST Timeskip] Recovering interrupted Time Skip from ${snapshotKey}.`);
+    const { restorePreviousDay } = await import('./dayAdvancement.js');
+    const restored = await restorePreviousDay(snapshotKey, { silent: true });
+    if (!restored) return false;
+    await commitTimeSkipSnapshot(chatId, snapshotKey);
+    nwstToast('Recovered the pre-skip state from an interrupted Time Skip.', 'warning');
+    return true;
 }
 
 // ── Date estimation helper ─────────────────────────────────────────────────
@@ -508,13 +599,13 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     prompt += `=== CURRENT WORLD STATE ===\n`;
     prompt += `Date: ${currentDay.dateDisplay || '(not set)'}\n`;
     prompt += `Sub-Date: ${currentDay.dateSub || ''}\n`;
-    prompt += `Sub-Date rule: era/calendar context only. Never append a city, country, region, or general setting label.\n`;
+    prompt += `Sub-Date rule: era/calendar context only. Never append a city, country, region, or setting label such as a city or region name.\n`;
     if (eraPin) {
         prompt += `PLAYER-VERIFIED ERA: the player manually confirmed the era system ("${eraPin}"). Keep the new dateSub in this same era system — update era-relative year numbers for the elapsed time, but do NOT switch to a different era system.\n`;
     }
-    prompt += `Season: ${currentDay.season || '(not set)'}\n`;
+    prompt += `Stored Season: ${currentDay.season || '(not set)'}\n`;
     if (computedSeason) {
-        prompt += `System-computed current season: ${computedSeason}\n`;
+        prompt += `System-computed climatic season: ${computedSeason}\n`;
     }
     prompt += `Weather: ${currentDay.weatherToday || '(not set)'}\n`;
     prompt += `Flora: ${currentDay.flora || ''}\n`;
@@ -539,14 +630,21 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     // ── CALENDAR SYSTEM (date format reference) ─────────────────
     const calConfig = getCalendarConfig(chatId);
     if (calConfig.enabled) {
-        const monthList = calConfig.monthNames.map((name, i) =>
-            `${name} (${calConfig.monthDays[i]} days)`
-        ).join(', ');
+        const parsed = parseCurrentCalendarDate(
+            currentDay?.dateDisplay || '', currentDay?.dateSub || '', calConfig,
+            getSetting('dateFormatDMY') === true
+        );
+        const layout = calendarMonthLayoutFor(calConfig, parsed?.year || 1);
         const dayList = calConfig.weekDays.join(', ');
-        prompt += `=== CALENDAR SYSTEM ===\n`;
-        prompt += `  Months (${calConfig.months} total): ${monthList}\n`;
-        prompt += `  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n`;
-        prompt += `  Use these month and day names when generating scheduledDate values.\n\n`;
+        prompt += `=== CALENDAR SYSTEM ===
+`;
+        prompt += `  Months (${layout.length} this year): ${layout.map(month => `${month.name} (${month.days} days)`).join(', ')}
+`;
+        prompt += `  Days of the week (${calConfig.weekDays.length} total): ${dayList}
+`;
+        prompt += `  Use these month and day names when generating scheduledDate values.
+
+`;
     }
 
     // Conditions
@@ -601,7 +699,7 @@ function getVisibleChatContext(count = 20) {
         });
 
         return visibleMessages.slice(-count).map(msg => {
-            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
             return `[${sender}]: ${msg.mes}`;
         }).join('\n');
     } catch (e) {
@@ -612,7 +710,7 @@ function getVisibleChatContext(count = 20) {
 
 // ── Response parsing ──────────────────────────────────────────────────────
 
-function parseTimeskipResponse(response) {
+export function parseTimeskipResponse(response) {
     if (!response || typeof response !== 'string') return null;
 
     let jsonStr = response.trim();
@@ -622,11 +720,45 @@ function parseTimeskipResponse(response) {
     if (objMatch) jsonStr = objMatch[0];
 
     try {
-        return JSON.parse(jsonStr);
+        const parsed = JSON.parse(jsonStr);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+        // A time skip without a Current Day landing point is not a valid skip.
+        // Accept either a new date label or a usable elapsed-day count because
+        // the deterministic calendar can compute the other from the old date.
+        const day = parsed.currentDay;
+        if (!day || typeof day !== 'object' || Array.isArray(day)) return null;
+        const daysSkipped = Number(day.daysSkipped);
+        const hasDate = typeof day.dateDisplay === 'string' && day.dateDisplay.trim().length > 0;
+        const hasDuration = Number.isInteger(daysSkipped) && daysSkipped >= 0 && daysSkipped <= 36500;
+        if (!hasDate && !hasDuration) return null;
+
+        for (const key of ['eventUpdates', 'conditionUpdates', 'notebookUpdates']) {
+            if (parsed[key] !== undefined && (parsed[key] === null || typeof parsed[key] !== 'object' || Array.isArray(parsed[key]))) {
+                console.warn(`[NWST Timeskip] Ignoring malformed response: ${key} was not an object.`);
+                return null;
+            }
+        }
+        return parsed;
     } catch (e) {
         console.error('[NWST Timeskip] JSON parse error:', e);
         return null;
     }
+}
+
+/**
+ * Merge model-authored descriptive Current Day fields onto the canonical
+ * pre-skip state. Response-only control fields (daysSkipped, moonPhaseName)
+ * never belong in persistent world state, and omitted model fields must not
+ * erase existing canonical data.
+ */
+export function mergeTimeskipCurrentDay(preDay = {}, modelDay = {}) {
+    const merged = { ...(preDay && typeof preDay === 'object' ? preDay : {}) };
+    const stringFields = ['dateDisplay', 'dateSub', 'season', 'weatherToday', 'flora', 'fauna', 'spiritualClimate'];
+    for (const key of stringFields) {
+        if (typeof modelDay?.[key] === 'string') merged[key] = modelDay[key];
+    }
+    return merged;
 }
 
 // ── Apply helpers ─────────────────────────────────────────────────────────
@@ -642,7 +774,7 @@ async function applyEventUpdates(chatId, updates) {
     // response can silently close unrelated future events.
     for (const id of (updates.resolved || [])) {
         const event = events.find(e => e.id === id);
-        if (event) {
+        if (event && event.tier !== 'persistent') {
             event.status = 'resolved';
             event.resolveDay = currentDayCount;
             event.resolveElapsedDay = currentElapsedDay;
@@ -651,7 +783,7 @@ async function applyEventUpdates(chatId, updates) {
 
     for (const id of (updates.missed || [])) {
         const event = events.find(e => e.id === id);
-        if (event) {
+        if (event && event.tier !== 'persistent') {
             event.status = 'missed';
             event.resolveDay = currentDayCount;
             event.resolveElapsedDay = currentElapsedDay;
@@ -664,7 +796,7 @@ async function applyEventUpdates(chatId, updates) {
     const tierChanges = (updates.tierChanges && typeof updates.tierChanges === 'object') ? updates.tierChanges : {};
     for (const [id, tier] of Object.entries(tierChanges)) {
         const event = events.find(e => e.id === id);
-        if (event && event.tier !== 'undetermined' && VALID_TIERS.includes(tier) && event.tier !== tier) {
+        if (event && event.tier !== 'undetermined' && event.tier !== 'persistent' && VALID_TIERS.includes(tier) && event.tier !== tier) {
             event.tier = tier;
             event.tierSetDay = currentDayCount;
             event.tierSetElapsedDay = currentElapsedDay;
@@ -678,6 +810,7 @@ async function applyEventUpdates(chatId, updates) {
     // an event; only explicit LLM decisions can conclude one here.
     for (const event of events) {
         if (event.status !== 'pending' && event.status !== 'inprogress') continue;
+        if (event.tier === 'persistent') continue;
         if (event.tier === 'undetermined' && typeof event.scheduledElapsedStart !== 'number') continue;
         const structuralTier = classifyScheduledEventTier(chatId, event.scheduledElapsedStart, event.scheduledElapsedEnd);
         if (structuralTier && structuralTier !== 'missed' && event.tier !== structuralTier) {
@@ -691,13 +824,25 @@ async function applyEventUpdates(chatId, updates) {
     // so modifications must be saved back explicitly)
     await saveAllEvents(chatId, events);
 
-    // Add new events
-    for (const newEvent of (updates.newEvents || [])) {
+    // Add new events after participant completion. NPC events that still lack
+    // a resolvable named participant are preserved and surfaced for review.
+    const participantResult = await completeEventParticipants(chatId, updates.newEvents || [], {
+        notebook: getNotebook(chatId),
+        reviewAll: true
+    });
+    for (const newEvent of participantResult.events) {
+        // Time skips may create ordinary future events, but never Persistent
+        // trackers. Persistent additions require the scanner/generation approval path.
+        if (newEvent?.tier === 'persistent') continue;
         await addEvent(chatId, {
             ...newEvent,
             status: 'pending',
             origin: 'generated'
         });
+    }
+    if (participantResult.invalidNPC.length) {
+        console.warn('[NWST TimeSkip] Preserved NPC event(s) that still need participant review:', participantResult.invalidNPC);
+        nwstToast(`${participantResult.invalidNPC.length} NPC event(s) failed to generate with a named participant. They were preserved; review them in Events.`, 'warning');
     }
 }
 

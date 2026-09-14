@@ -21,13 +21,15 @@ import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 // =============================================================================
 
 import { getChatId, nwstToast } from '../utils.js';
-import { chatHasData } from '../data/storage.js';
+import { chatHasData, getChatData, setChatData, setAllChatData } from '../data/storage.js';
 import { getSettingContext, getCalendarConfig, getSeasonConfig, getStartDate, saveStartDate, getEraPin } from '../data/worldState.js';
-import { computeDeterministicDate, dayOfYearFor, parseCurrentCalendarDate, daysBetweenCalendarDates, startWeekdayForAnchor } from '../lib/calendarMath.js';
+import { computeDeterministicDate, dayOfYearFor, parseCurrentCalendarDate, daysBetweenCalendarDates, startWeekdayForAnchor, calendarMonthLayoutFor, extractYearFromText } from '../lib/calendarMath.js';
 import { resolveProfile } from './connections.js';
 import { regenerateForecast, computeSeason } from './dayAdvancement.js';
 import { dlog } from "../lib/debug.js";
 import { ensureNagerHolidayCacheForCurrentWindow } from '../data/nagerDate.js';
+import { completeEventParticipants } from './eventParticipants.js';
+import { isNarrativeChatMessage } from './detectedEventValidation.js';
 
 function isActiveBatchChat(chatId) {
     return Boolean(chatId) && getChatId() === chatId;
@@ -97,7 +99,7 @@ function extractOrdinalValue(text, keyword) {
 /**
  * Build a month-name → index map from both English month names and an optional
  * calendar config. Calendar config month names take priority so custom names
- * (e.g. a translated seasonal name) can be matched.
+ * (e.g. "Haru" for spring) can be matched.
  * Also maps written ordinal month patterns like "eleventh month" → 11.
  * @param {object|null} calendarConfig
  * @returns {object} monthName → index (0=jan) mapping
@@ -177,7 +179,7 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
 
     // ── Helper: Unicode-aware word pattern ──
     // Matches any contiguous non-whitespace, non-digit, non-punctuation token.
-    // This handles Unicode month names like Jūgatsu, Shimotsuki, Märzen, etc.
+    // This handles Unicode month names like Frostwane, Märzen, Verdant, etc.
     const WORD = '[^\\s\\d,;:|•·\\-–—=\\/\\\\(){}\\[\\]<>]+';
 
     // ── Method 1: "Month Day, Year" — e.g. "April 15, 2024" or "Jūgatsu 17, 2024"
@@ -242,11 +244,11 @@ export function computeDayOfYearFromDate(dateStr, calendarConfig) {
     }
 
     // ── Method 4: Written ordinals — "the Eleventh Month · Seventh Day"
-    // Handles formats like "Kin'yōbi, Shimotsuki, the Eleventh Month · Seventh Day"
+    // Handles formats like "Sixthday, Frostwane, the Eleventh Month · Seventh Day"
     // where month and day are written as words rather than digits.
     //
     // Strategy: Find the month index by looking for:
-    //   a) A custom month name from calendar config (e.g. "Shimotsuki")
+    //   a) A custom month name from calendar config (e.g. "Frostwane")
     //   b) An ordinal month pattern (e.g. "the Eleventh Month" → 11)
     // Then find the day from ordinal day pattern (e.g. "Seventh Day" → 7)
 
@@ -446,7 +448,7 @@ PRIORITY 2: Explicit in-chat date.
 If a specific date was mentioned in the chat, use it.
 
 PRIORITY 3: Reasoned construction.
-If neither is available, construct the best possible date from the available season, time period, and setting context. Use the setting's era and naming conventions. Write it in the appropriate format for the world — a feudal Japanese date looks nothing like a modern one.
+If neither is available, construct the best possible date from the available season, time period, and setting context. Use the setting's era and naming conventions. Write it in the appropriate format for the world — a historical, fantasy, or custom calendar may look very different from a modern Gregorian one.
 
 NEVER produce:
 - "Unknown era" or "Unknown date"
@@ -508,11 +510,11 @@ Across EVERY Notebook field, preserve explicitly stated motives. Dramatic prose 
 Events describe what is COMING NEXT in the story, NOT what has already happened.
 
 CRITICAL RULE — DO NOT put past-tense summaries of chat content into events:
-WRONG (past — what already happened): "Elias presented a keepsake to trigger a memory"
-RIGHT (future — what happens next): "Elias may escalate his memory-triggering attempts with more direct methods"
+WRONG (past — what already happened): "A character used a mnemonic trigger"
+RIGHT (future — what happens next): "The character may escalate memory-triggering attempts with more direct methods"
 
-WRONG (past — what already happened): "The protective wards in the room became unstable"
-RIGHT (future — what happens next): "The unstable wards may attract attention or escalate further"
+WRONG (past — what already happened): "The cursed energy in the room became disturbed"
+RIGHT (future — what happens next): "The disturbed cursed energy may attract attention or escalate further"
 
 Past events belong in the notebook (established facts, planted details). If something already occurred in the chat, do NOT put it in the events array.
 
@@ -559,12 +561,13 @@ export async function runBatchScan() {
     }
 
     if (hasData) {
-        nwstToast('Batch scan has already been run for this chat. Existing data will not be overwritten.', 'warning');
+        nwstToast('This chat already contains world data (possibly from an incomplete scan). Batch Scan cannot safely overwrite it. Review the saved sections; use their individual scan or regenerate controls to finish missing work.', 'warning');
         return false;
     }
 
     nwstToast('Batch scan started — analyzing chat history...', 'info');
     showBatchScanLoading(true);
+    const finalizationWarnings = [];
 
     try {
         const profile = resolveProfile('planningLLM');
@@ -655,6 +658,9 @@ export async function runBatchScan() {
                 dlog('[NWST BatchScan] Active chat changed during chunk analysis; aborting stale batch scan.');
                 return false;
             }
+            if (typeof response !== 'string' || !response.trim()) {
+                throw new Error(`Batch chunk ${i + 1}/${chunks.length} returned no analysis. Retry the scan; incomplete history was not synthesized.`);
+            }
             if (response) {
                 // Accumulate with structured scene headers
                 const sceneCount = detectChunkScenes(chunk).length;
@@ -703,7 +709,7 @@ export async function runBatchScan() {
             return false;
         }
 
-        nwstToast('Batch scan complete.', 'success');
+        nwstToast('Core batch synthesis complete. Finalizing secrets and Hidden Intentions...', 'info');
         if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
 
         // Run a dedicated secrets scan to pick up anything the synthesis pass missed.
@@ -715,9 +721,38 @@ export async function runBatchScan() {
             }
         } catch (e) {
             console.warn('[NWST BatchScan] Secrets scan failed (non-fatal):', e);
+            finalizationWarnings.push('Secrets scan failed; retry the Secrets scan separately.');
         }
         if (!isActiveBatchChat(chatId)) {
             dlog('[NWST BatchScan] Active chat changed after secret scan; suppressing stale completion actions.');
+            return false;
+        }
+
+        // Hidden Intentions is a separate character-reasoning pass, but Batch
+        // Scan owns its initial population. Build the live alias registry from
+        // the freshly synthesized events/communities/secrets, dirty every known
+        // character, and GENERATE additions for the highest-priority NPCs now.
+        // Automatic cadence/day advancement only reconcile records after they exist.
+        try {
+            const { getHiddenIntentionsConfig } = await import('../settings.js');
+            if (getHiddenIntentionsConfig().enabled !== false) {
+                const { buildAliasRegistry } = await import('../data/aliasRegistry.js');
+                const { markHiddenIntentionsDirty, runHiddenIntentionsGenerate } = await import('./hiddenIntentions.js');
+                const registry = buildAliasRegistry(chatId);
+                const actors = registry.allEntities()
+                    .filter(entity => (entity.kinds || []).includes('character'))
+                    .filter(entity => !(entity.kinds || []).includes('group') && !(entity.kinds || []).includes('user_pc'))
+                    .map(entity => entity.display || entity.canonical);
+                await markHiddenIntentionsDirty(chatId, actors, 'Full Batch Scan synthesized current character/world state.', { worldDirty: true });
+                const result = await runHiddenIntentionsGenerate({ trigger: 'batch_scan', expectedChatId: chatId });
+                dlog(`[NWST BatchScan] Hidden Intentions initial generation ${result?.ran ? `created ${result.created} record(s)` : 'skipped or produced no eligible generation'}.`);
+            }
+        } catch (e) {
+            console.warn('[NWST BatchScan] Hidden Intentions generation failed (non-fatal):', e);
+            finalizationWarnings.push('Hidden Intentions generation failed; retry Generate in Hidden Intentions.');
+        }
+        if (!isActiveBatchChat(chatId)) {
+            dlog('[NWST BatchScan] Active chat changed after Hidden Intentions scan; suppressing stale completion actions.');
             return false;
         }
 
@@ -729,22 +764,33 @@ export async function runBatchScan() {
             notifyBatchScanComplete();
         } catch (e) { /* non-fatal — scanner may not be running */ }
 
+        if (finalizationWarnings.length) {
+            nwstToast(`Core batch data saved. ${finalizationWarnings.join(' ')}`, 'warning');
+        } else {
+            nwstToast('Batch scan complete.', 'success');
+        }
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events', 'world', 'notebook', 'settings');
         return true;
 
     } catch (err) {
         console.error('[NWST BatchScan] Failed:', err);
-        nwstToast(`Batch scan failed at processing stage. Check console for details.`, 'error');
+        if (isActiveBatchChat(chatId)) {
+            const partial = chatHasData(chatId);
+            nwstToast(partial
+                ? 'Batch Scan stopped after saving partial data. Review Current Day, Events, Notebook and Communities. Use individual scan/regenerate controls for missing sections; export a backup before resetting anything. Details are in the console.'
+                : 'Batch Scan failed before world data was saved. You can retry the scan. Details are in the console.', 'error');
+        }
         return false;
     } finally {
         showBatchScanLoading(false);
     }
 }
 
-// ── Message access (BATCH SCAN EXCEPTION — reads ALL messages) ────────────
+// ── Message access (reads full narrative history, excluding utility output) ─
 
 function getAllMessagesUnfiltered() {
     try {
-        return SillyTavern.getContext().chat || [];
+        return (SillyTavern.getContext().chat || []).filter(isNarrativeChatMessage);
     } catch (e) {
         console.error('[NWST BatchScan] Error accessing chat:', e);
         return [];
@@ -845,7 +891,7 @@ function chunkMessages(messages, approxTokensPerChunk) {
 
         for (let i = chunkStart; i < messages.length; i++) {
             const msg = messages[i];
-            const msgText = `[${msg.name || (msg.is_user ? 'User' : 'Character')}]: ${msg.mes || ''}`;
+            const msgText = `[${msg.is_user ? 'USER/PC' : 'NARRATION'}]: ${msg.mes || ''}`;
             const msgChars = msgText.length;
 
             // If adding this message would exceed budget and we already have content
@@ -910,7 +956,7 @@ function detectChunkScenes(chunk) {
     for (let i = 1; i < chunk.length; i++) {
         const msg = chunk[i];
         const prev = chunk[i - 1];
-        const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+        const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
         const prevSender = prev.name || (prev.is_user ? 'User' : 'Character');
 
         // Check for scene break
@@ -982,7 +1028,7 @@ function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg, setti
 
     for (let i = 0; i < chunk.length; i++) {
         const msg = chunk[i];
-        const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+        const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
 
         // Insert scene break annotation when we cross into a new scene
         if (sceneIdx < scenes.length && i === scenes[sceneIdx].startIndex) {
@@ -1071,8 +1117,9 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
     // ── Synthesis Budget Guidance ───────────────────────────────────
     prompt += `\n─── SYNTHESIS BUDGET (${budgetScale}) ───\n`;
     prompt += `Based on the chat volume (${messageCount} messages), use these output targets:\n`;
-    prompt += `  Events: ${eventTargetMin}–${eventTargetMax} total (across all tiers and categories)\n`;
-    prompt += `    - Distribute: ~40% immediate/week, ~30% month, ~30% undetermined\n`;
+    prompt += `  Ordinary Events: ${eventTargetMin}–${eventTargetMax} total (immediate/week/month/undetermined)\n`;
+    prompt += `  Persistent Events: 0–2 strong durable pressures/states, separate from the ordinary target (hard active cap 3)\n`;
+    prompt += `    - Distribute: ~40% immediate/week, ~30% month, ~30% narratively timed (return tier value "undetermined"; no fixed schedule, available for the roleplaying model to introduce when narratively appropriate)\n`;
     prompt += `    - World events per tier: max ${Math.min(5, Math.ceil(eventTargetMax / 4))}\n`;
     prompt += `    - Generated NPC events per tier: max ${Math.min(5, Math.ceil(eventTargetMax / 4))}\n`;
     prompt += `    - Detected NPC events: no cap (facts from chat)\n`;
@@ -1092,20 +1139,26 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
         prompt += `and contextual clues. Use the world's own calendar system and era naming conventions.\n\n`;
     }
 
-    // Inject calendar month names if configured
+    // Inject the active generic calendar layout if configured. Lunisolar
+    // calendars use the year-specific 29/30-day layout and any intercalary month.
     const calConfig = getCalendarConfig(chatId);
     if (calConfig.enabled) {
-        const monthList = calConfig.monthNames.map((name, i) =>
-            `${name} (${calConfig.monthDays[i]} days)`
-        ).join(', ');
+        const targetYear = extractYearFromText(settingContext || '') || 1;
+        const layout = calendarMonthLayoutFor(calConfig, targetYear);
         const dayList = calConfig.weekDays.join(', ');
-        prompt += `CALENDAR SYSTEM:\n  Months (${calConfig.months} total): ${monthList}\n  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n  Use these month and day names when generating dates.\n\n`;
+        prompt += `CALENDAR SYSTEM:
+  Months (${layout.length} this year): ${layout.map(month => `${month.name} (${month.days} days)`).join(', ')}
+  Days of the week (${calConfig.weekDays.length} total): ${dayList}
+  Use these month and day names when generating dates.
+
+`;
     }
 
-    prompt += `CRITICAL DATE FORMAT RULES — READ BEFORE GENERATING:\n`;
-    prompt += `  1. dateDisplay MUST start with the day of the week (e.g. "${calConfig.enabled && calConfig.weekDays.length > 0 ? calConfig.weekDays[0] : 'Monday'}", "${calConfig.enabled && calConfig.weekDays.length > 1 ? calConfig.weekDays[1] : 'Thursday'}", "Kin'yōbi")\n`;
+    prompt += `CRITICAL DATE FORMAT RULES — READ BEFORE GENERATING:
+`;
+    prompt += `  1. dateDisplay MUST start with the configured day-of-week when the calendar has weekdays (for example, "${calConfig.enabled && calConfig.weekDays.length > 0 ? calConfig.weekDays[0] : 'Monday'}").\n`;
     prompt += `  2. dateDisplay MUST NOT contain a pipe | character — that belongs in dateSub\n`;
-    prompt += `  3. Use dateSub for era/calendar context ONLY, in whatever era system fits the setting (e.g. "Reiwa 6", "Tang Dynasty · Kaiyuan 5", "Reign of Augustus · Year 12", "Victorian Era", "1st Century BC"). NEVER append a city, country, region, or general setting label such as "Modern City" or "Present-day Region".\n`;
+    prompt += `  3. Use dateSub for era/calendar context ONLY, in whatever era system fits the setting (for example, "Third Age 312", "Victorian Era", or "1st Century BC"). NEVER append a city, country, region, or general setting label.\n`;
     prompt += `  4. dayCount = the 1-based cyclical day position within the CURRENT configured calendar year. Its maximum is the sum of that year's configured month lengths; it resets to 1 at New Year.\n`;
     prompt += `  5. FAILURE TO FOLLOW THESE RULES WILL CORRUPT THE DATE DISPLAY IN THE UI.\n\n`;
 
@@ -1118,13 +1171,13 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
     prompt += `    * Example: "The merchant caravan is expected to arrive next week"\n`;
     prompt += `    * Example: "Bandit raids have been increasing along the eastern road"\n\n`;
     prompt += `  WRONG — DO NOT summarize past chat as events. These are WRONG:\n`;
-    prompt += `    ✗ "Elias presented a keepsake to trigger Mira's memory" — this ALREADY HAPPENED in chat\n`;
-    prompt += `    ✗ "The protective wards in the room became unstable" — this ALREADY HAPPENED in chat\n`;
-    prompt += `    ✗ "Memory trigger attempt by Elias" — this ALREADY HAPPENED in chat\n\n`;
+    prompt += `    ✗ "A character used a mnemonic trigger on another character" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "The cursed energy in the room became disturbed" — this ALREADY HAPPENED in chat\n`;
+    prompt += `    ✗ "A completed memory-trigger attempt" — this ALREADY HAPPENED in chat\n\n`;
     prompt += `  RIGHT — Turn past events into future projections. Convert the above to:\n`;
-    prompt += `    ✓ "Elias may escalate memory-triggering tactics as the memory block resists" — what COMES NEXT\n`;
-    prompt += `    ✓ "The ward disturbance could attract unwanted attention" — what COMES NEXT\n`;
-    prompt += `    ✓ "Mira's buried memories may surface under continued pressure" — what COMES NEXT\n\n`;
+    prompt += `    ✓ "The character may escalate memory-triggering tactics as the block resists" — what COMES NEXT\n`;
+    prompt += `    ✓ "The cursed energy disturbance could attract unwanted attention" — what COMES NEXT\n`;
+    prompt += `    ✓ "A character's buried memories may surface under continued pressure" — what COMES NEXT\n\n`;
     prompt += `  KIND B — World-Level Events (from setting, conditions, season, context):\n`;
     prompt += `    * Events that the WORLD itself is generating — natural, political, societal, seasonal\n`;
     prompt += `    * NOT mentioned in chat, but driven by the setting context and world conditions\n`;
@@ -1132,9 +1185,10 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
     prompt += `    * Example (seasonal): "The autumn harvest festival preparations are underway across the region"\n`;
     prompt += `    * Example (environmental): "The river's rise threatens low-lying farmlands as spring melt accelerates"\n`;
     prompt += `    * Example (supernatural): "Strange lights have been reported along the ley line convergence"\n\n`;
-    prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 5 WORLD events per tier, max 5 GENERATED NPC events per tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
+    prompt += `  EVENT COUNT LIMITS PER CATEGORY: max 5 WORLD events per ordinary tier, max 5 GENERATED NPC events per ordinary tier. DETECTED NPC events (explicitly stated plans) have NO cap.\n`;
+    prompt += `  PERSISTENT EVENTS are a separate sparse category for durable ongoing pressures/states that should remain active until a concrete textual condition is explicitly shown in future narrative. Propose at most 1-2 strong Persistent events in this batch (hard tracker cap: 3 active). Do NOT use Persistent for appointments, one-time plans, current activities, ordinary unresolved questions, or anything that should age with the calendar. Every Persistent event MUST include one concise observable resolutionCondition and MUST omit scheduledDate. If nothing clearly merits persistence, propose none.\n`;
     prompt += `  scheduledDate — REQUIRED for seasonal/relative-timing events. Use a configured month/date when known, or calculate the actual target cyclical "Day #" from dayCount. Never emit arithmetic placeholders such as "Day N+14". Omit only for genuinely vague events.\n\n`;
-    prompt += `  CRITICAL — SEED GENEROUSLY: This is the INITIAL batch scan. The tracker should start with a robust set of events so the world feels alive. Aim for roughly 12-20 events total across all tiers and categories. Distribute world events across multiple tiers — immediate (today/tomorrow), week (before the current weekday cycle ends), month (later in the current calendar month), undetermined (someday).\n\n`;
+    prompt += `  CRITICAL — SEED GENEROUSLY: This is the INITIAL batch scan. The tracker should start with a robust set of ordinary events so the world feels alive. Aim for roughly 12-20 ordinary events across immediate/week/month/undetermined, plus 0-2 Persistent events only when strongly justified. Distribute world events across multiple ordinary tiers — immediate (today/tomorrow), week (within the rolling seven-day horizon after the immediate window), month (later in the current calendar month), undetermined (narratively timed: no fixed schedule; the roleplaying model may introduce it whenever pacing and character logic make it appropriate).\n\n`;
     prompt += `  CRITICAL — USER CHARACTER BOUNDARY: NEVER create events about the user character's personal/mundane actions.\n`;
     prompt += `  Events must describe what the WORLD, NPCs, and natural/societal forces are doing — not what the user character will do.\n\n`;
 
@@ -1149,11 +1203,19 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
     prompt += `    "normal" — standard secrets with clear dramatic potential (default)\n`;
     prompt += `    "low" — minor secrets, background details, or secrets with low immediate impact\n\n`;
 
+    prompt += `EVENT PARTICIPANTS — MANDATORY DATA RULES:\n`;
+    prompt += `- Every event object MUST contain a participants array.\n`;
+    prompt += `- NPC events MUST contain at least one named participant. Exhaust the supplied cast and community context. If no named participant can be responsibly identified, preserve the event with [] so NWST can flag it for user review; never invent a name and never omit the event solely for this field.\n`;
+    prompt += `- Non-NPC events still require named participants when specific characters directly attend, organize, perform, review, inspect, lead, or carry responsibility for the event.\n`;
+    prompt += `- Meetings, resource reviews, financial reviews, hearings, inspections, visits, outings, assignments, and scheduled obligations are NOT participant-free merely because isNPC is false.\n`;
+    prompt += `- Use [] only for genuinely ambient world events with no direct named character involvement, such as weather, ecological shifts, or public festivals with no specified cast.\n`;
+    prompt += `- Use exact names from the chat or community membership. Do not invent characters.\n\n`;
+
     prompt += `Use this EXACT JSON structure:\n\n`;
     prompt += `{
   "currentDay": {
-    "dateDisplay": "MUST start with day-of-week followed by ', Month Date, Year'. No pipe characters. Modern: 'Monday, April 15th, 2024'. Historical: 'Kin'yōbi, Chrysanthemum Month · Sixth Day of the Waxing Moon'.",
-    "dateSub": "Era/calendar context only, matching the setting's culture and period — e.g. 'Reiwa 6', 'Imperial Era · 1125 CE', 'Tang Dynasty · Kaiyuan 5', 'Victorian Era', '21st Century', '1st Century BC'. Never include a city, country, region, or general setting label. Leave empty if no applicable era.",
+    "dateDisplay": "Use the configured calendar and weekday labels. No pipe characters. Example Gregorian: 'Monday, April 15th, 2024'. Example custom: 'Moonday, Embermonth 6th, Year 312'.",
+    "dateSub": "Era/calendar context only, matching the setting's culture and period — e.g. 'Third Age 312', 'Victorian Era', '21st Century', or another setting-appropriate era label. Never include a city, country, region, or general setting label. Leave empty if no applicable era.",
     "season": "Current season — evocative, sensory, grounded in the setting. Faction names fine if relevant; individual character actions should not appear.",
     "weatherToday": "Today's weather as a physical experience. Faction names fine if relevant; individual character actions should not appear.",
     "flora": "What is growing or changing in the natural world. Faction names fine if relevant; individual character actions should not appear.",
@@ -1165,13 +1227,14 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
     {
       "title": "FORWARD-FACING only. Ask: did this already happen in chat? If YES → DELETE it.",
       "description": "What is PROJECTED to happen NEXT. Future tense. NEVER a past-tense recap of chat content.",
-      "tier": "immediate|week|month|undetermined",
+      "tier": "immediate|week|month|undetermined|persistent",
       "isNPC": "true if NPC-driven (character struggles, relationships, backstory, decisions — NPC name appears in title/description), false if world/player-facing (factions, festivals, environment, rumors)",
-      "scheduledDate": "REQUIRED when timing is clear. Use the configured month/date or calculate the actual target cyclical 'Day #' from dayCount, wrapping at the configured year length. NEVER output arithmetic placeholders like 'Day N+1'. OMIT for vague/uncertain timing.",
-      "participants": ["CharacterName1", "CharacterName2"],
-      "participants_instructions": "List ALL characters involved in this event. Use the character names EXACTLY as they appear in chat. If a character is mentioned in relation to this event, include them. NPC events MUST include the NPC character. Use empty array [] only for world events with no direct character involvement (e.g. weather, natural disaster, festival with unspecified participants)."
+      "scheduledDate": "REQUIRED when timing is clear for ordinary timed events. Use the configured month/date or calculate the actual target cyclical 'Day #' from dayCount, wrapping at the configured year length. NEVER output arithmetic placeholders like 'Day N+1'. OMIT for vague/uncertain timing and ALWAYS omit for persistent.",
+      "resolutionCondition": "REQUIRED only when tier is persistent: one concrete, observable narrative condition whose explicit occurrence resolves the ongoing state. OMIT/null for all other tiers.",
+      "participants": ["CharacterName1", "CharacterName2"]
     }
   ],
+
   "conditions": {
     "political": "Durable macro political/institutional/faction state. Do not summarize one case, target, operative, restraining order, arrest, or investigation unless it establishes a wider institutional/faction change.",
     "social": "Durable collective social behavior/norms/community/public routines/workplaces/commerce/social-space patterns. Season/weather may explain behavior but must not dominate; do not summarize private relationships.",
@@ -1203,7 +1266,8 @@ function buildSynthesisPrompt(chatId, accumulatedContext, messageCount, settingC
       "evidenceShown": "What evidence has been shown in the chat so far (if any)",
       "pressureRisk": "What pressure or risk would be created if this secret were revealed",
       "revealConditions": "Under what circumstances this secret might be revealed",
-      "injectionPriority": "high|normal|low"
+      "injectionPriority": "high|normal|low",
+      "triggerAnchors": ["3-7 distinctive words or short phrases unique to this secret; include specific names, objects, places, or concepts and avoid generic themes"]
     }
   ],
   "communities": [
@@ -1270,7 +1334,8 @@ async function applyBatchResults(chatId, result) {
                     evidenceShown: secret.evidenceShown || '',
                     pressureRisk: secret.pressureRisk || '',
                     revealConditions: secret.revealConditions || '',
-                    injectionPriority: secret.injectionPriority || 'normal'
+                    injectionPriority: secret.injectionPriority || 'normal',
+                    triggerAnchors: secret.triggerAnchors
                 });
                 addedCount++;
             } catch (err) {
@@ -1286,9 +1351,9 @@ async function applyBatchResults(chatId, result) {
         const { replaceCurrentDay } = await import('../data/worldState.js');
 
         // ── Post-process dateDisplay ──────────────────────────────
-        // If the LLM put sub-date information after a pipe, split it into
-        // dateDisplay and dateSub. Storage normalization later removes any
-        // accidental city/country/general-setting label. Also ensure day-of-week is present.
+        // If the LLM put sub-date information after a pipe, split it out. Storage
+        // normalization later removes any accidental city/country setting label.
+        // split it into dateDisplay and dateSub. Also ensure day-of-week is present.
         if (result.currentDay.dateDisplay && typeof result.currentDay.dateDisplay === 'string') {
             const pipeIdx = result.currentDay.dateDisplay.indexOf('|');
             if (pipeIdx !== -1) {
@@ -1339,7 +1404,9 @@ async function applyBatchResults(chatId, result) {
                     dlog(`[NWST BatchScan] Set default dayCount: 1`);
                 }
             }
-            // else: keep LLM's dayCount since it's a plausible positive integer and no date to compute from
+            else {
+                result.currentDay.dayCount = parsedDayCount;
+            }
         }
 
         // ── Normalize season ──────────────────────────────────────
@@ -1421,7 +1488,6 @@ async function applyBatchResults(chatId, result) {
                 }
             } else {
                 result.currentDay.elapsedStoryDays = 0;
-
                 // Preserve the existing Gregorian convenience: if no Starting
                 // Date exists, the scanned current date may seed one as a
                 // correctable baseline. This does not drive the calendar.
@@ -1445,6 +1511,7 @@ async function applyBatchResults(chatId, result) {
 
         if (result.currentDay.dayCount > 0) {
             const seasonConfig = getSeasonConfig(chatId);
+            const calCfg = getCalendarConfig(chatId);
             const computedSeason = computeSeason(result.currentDay.dayCount, seasonConfig);
             if (computedSeason !== null && computedSeason !== undefined) {
                 result.currentDay.season = computedSeason;
@@ -1469,19 +1536,79 @@ async function applyBatchResults(chatId, result) {
     }
 
     if (result.events && Array.isArray(result.events)) {
-        const { addEvent } = await import('../data/events.js');
-        // Category-aware caps per tier (generous for initial seed):
+        const { addEvent, getActivePersistentEvents, getTrackedEvents, MAX_ACTIVE_PERSISTENT_EVENTS } = await import('../data/events.js');
+        const participantResult = await completeEventParticipants(chatId, result.events, {
+            communities: Array.isArray(result.communities) ? result.communities : [],
+            notebook: result.notebook || null,
+            secrets: Array.isArray(result.secrets) ? result.secrets : [],
+            reviewAll: true
+        });
+        result.events = participantResult.events;
+        if (participantResult.invalidNPC.length) {
+            for (const unresolved of participantResult.invalidNPC) {
+                console.warn('[NWST BatchScan] Preserving NPC event that still needs participant review:', unresolved);
+            }
+        }
+
+        // Persistent proposals are deliberately NOT auto-committed by Batch Scan.
+        // They have their own max-3 pool and require player approval because a
+        // mistaken durable tracker can influence the story for a long time.
+        const persistentCandidates = result.events
+            .filter(event => event?.tier === 'persistent')
+            .map(event => ({
+                ...event,
+                title: String(event?.title || '').trim(),
+                description: String(event?.description || '').trim(),
+                tier: 'persistent',
+                scheduledDate: null,
+                resolutionCondition: String(event?.resolutionCondition || '').replace(/\s+/g, ' ').trim().slice(0, 600),
+                participants: Array.isArray(event?.participants) ? event.participants : [],
+                status: 'pending',
+                origin: event?.origin || 'generated',
+                npcOrigin: event?.isNPC ? (event?.npcOrigin || 'generated') : null,
+            }))
+            .filter(event => event.title && event.description && event.resolutionCondition)
+            .slice(0, 2);
+
+        if (persistentCandidates.length > 0) {
+            const pending = getChatData(chatId, 'pendingEvents') || [];
+            const activePersistent = getActivePersistentEvents(chatId).length;
+            const pendingPersistent = pending.filter(event => event?.tier === 'persistent').length;
+            let persistentSlots = Math.max(0, MAX_ACTIVE_PERSISTENT_EVENTS - activePersistent - pendingPersistent);
+            const existingTitles = new Set([
+                ...getTrackedEvents(chatId).map(event => String(event?.title || '').toLowerCase().trim()),
+                ...(result.events || []).filter(event => event?.tier !== 'persistent').map(event => String(event?.title || '').toLowerCase().trim()),
+                ...pending.map(event => String(event?.title || '').toLowerCase().trim()),
+            ].filter(Boolean));
+
+            for (const event of persistentCandidates) {
+                if (persistentSlots <= 0) break;
+                const key = event.title.toLowerCase();
+                if (existingTitles.has(key)) continue;
+                pending.push({
+                    ...event,
+                    id: `pending_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                    proposedAt: Date.now(),
+                });
+                existingTitles.add(key);
+                persistentSlots--;
+            }
+            await setChatData(chatId, 'pendingEvents', pending.slice(-100));
+        }
+
+        // Category-aware caps per ordinary tier (generous for initial seed):
         //   Detected NPC events  — no cap (facts from chat)
         //   Generated NPC events — max 5 per tier
         //   World events         — max 5 per tier
+        // Persistent is excluded because it was staged above for review.
+        const ordinaryEvents = result.events.filter(event => event?.tier !== 'persistent');
         const batchCounts = {};
-        const cappedEvents = result.events.filter(ev => {
+        const cappedEvents = ordinaryEvents.filter(ev => {
             const tier = ev.tier || 'undetermined';
             if (!batchCounts[tier]) batchCounts[tier] = { detected_npc: 0, generated_npc: 0, world: 0 };
             const tc = batchCounts[tier];
 
             if (ev.isNPC && ev.npcOrigin === 'detected') {
-                // No cap on detected NPC events
                 return true;
             } else if (ev.isNPC) {
                 if (tc.generated_npc >= 5) return false;
@@ -1493,16 +1620,16 @@ async function applyBatchResults(chatId, result) {
                 return true;
             }
         });
-        // Respect active pool cap for generated events.
-        // EXCEPTION: detected NPC events (explicit plans from chat) always bypass the cap.
+
+        // Respect active pool cap for generated ordinary events.
+        // EXCEPTION: detected NPC events (explicit plans from chat) bypass it.
         const { getMaxActiveEvents } = await import('../settings.js');
         const poolCap = getMaxActiveEvents();
         let poolUsed = 0;
+        let unresolvedParticipantCount = 0;
 
         for (const event of cappedEvents) {
             const isDetected = event.isNPC && event.npcOrigin === 'detected';
-
-            // Detected NPC events bypass the pool cap — they are facts, not generated content
             if (!isDetected && poolUsed >= poolCap) {
                 dlog(`[NWST BatchScan] Event pool cap (${poolCap}) reached — skipping generated event: "${event.title}"`);
                 continue;
@@ -1517,8 +1644,13 @@ async function applyBatchResults(chatId, result) {
             });
 
             if (!isDetected) poolUsed++;
+            if (event.isNPC && (!Array.isArray(event.participants) || event.participants.length === 0)) unresolvedParticipantCount++;
         }
-        nwstToast('Events complete.', 'info');
+        if (unresolvedParticipantCount > 0) {
+            nwstToast(`${unresolvedParticipantCount} NPC event(s) failed to generate with a named participant. They were preserved; review them in Events.`, 'warning');
+        } else {
+            nwstToast('Events complete.', 'info');
+        }
     }
 
     if (result.conditions) {
@@ -1567,7 +1699,10 @@ async function applyBatchResults(chatId, result) {
         const existingNotebook = getNotebook(chatId);
         const notebookToSave = {
             ...result.notebook,
-            secrets: existingNotebook.secrets || []
+            // Batch Scan owns Core/Mystery seeding. Preserve the two private
+            // ledgers that are maintained by their own dedicated systems.
+            secrets: existingNotebook.secrets || [],
+            hiddenIntentions: existingNotebook.hiddenIntentions || []
         };
         dlog(`[NWST BatchScan] DIAG: About to saveNotebook — preserving ${notebookToSave.secrets.length} existing secret(s), core keys: ${Object.keys(notebookToSave.core || {}).join(', ')}`);
         await saveNotebook(chatId, notebookToSave);
@@ -1644,108 +1779,21 @@ function showBatchScanLoading(show) {
  * @returns {Promise<{reviewed: number, updated: number}>}
  */
 export async function reviewEventParticipants(chatId) {
-    if (!chatId || !isActiveBatchChat(chatId)) return { reviewed: 0, updated: 0 };
-    const { getAllEvents, saveAllEvents } = await import('../data/events.js');
-    if (!isActiveBatchChat(chatId)) return { reviewed: 0, updated: 0 };
-
+    if (!chatId || !isActiveBatchChat(chatId)) return { reviewed: 0, updated: 0, invalidNPC: 0 };
+    const { getAllEvents } = await import('../data/events.js');
     const events = getAllEvents(chatId);
-    if (!events || events.length === 0) {
-        return { reviewed: 0, updated: 0 };
-    }
+    if (!events?.length) return { reviewed: 0, updated: 0, invalidNPC: 0 };
 
-    // Only review events that need participants
-    const needsReview = events.filter(e =>
-        !Array.isArray(e.participants) || e.participants.length === 0
-    );
-
-    if (needsReview.length === 0) {
-        return { reviewed: events.length, updated: 0 };
-    }
-
-    const profile = resolveProfile('planningLLM');
-    if (!profile) {
-        throw new Error('No Planning LLM profile configured. Please set one in NWST Settings.');
-    }
-
-    const systemMessage = {
-        role: 'system',
-        content: 'You are an event analysis assistant. Given a list of narrative events, determine which characters are participants in each event. Return ONLY valid JSON — no markdown, no code fences, no extra text.'
-    };
+    const expectedEvents = JSON.parse(JSON.stringify(events));
+    const before = new Map(events.map(event => [event.id, JSON.stringify(event.participants || [])]));
+    const result = await completeEventParticipants(chatId, events, { reviewAll: true });
+    if (!isActiveBatchChat(chatId)) return { reviewed: events.length, updated: 0, invalidNPC: result.invalidNPC.length };
 
     let updated = 0;
-
-    // Process in batches of 10 to stay within context limits
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < needsReview.length; i += BATCH_SIZE) {
-        const batch = needsReview.slice(i, i + BATCH_SIZE);
-
-        const eventList = batch.map((ev, idx) =>
-            `[${idx + 1}] Title: "${ev.title}"\n` +
-            `    Description: ${ev.description || '(none)'}\n` +
-            `    Tier: ${ev.tier || 'undetermined'}\n` +
-            `    Type: ${ev.isNPC ? 'NPC event' : 'World event'}`
-        ).join('\n\n');
-
-        const userMessage = {
-            role: 'user',
-            content: [
-                'Review these events and add participants (character names involved):',
-                '',
-                eventList,
-                '',
-                'For each event, list the character names that are participants.',
-                'Use exact character names as they appear in the event title/description.',
-                'If an event has no clear character participants (e.g. a weather event or festival',
-                'with no specific characters), return an empty array.',
-                '',
-                'Return ONLY this JSON structure (no markdown, no code fences):',
-                '{',
-                '  "events": [',
-                '    { "index": 1, "participants": ["Name1", "Name2"] },',
-                '    { "index": 2, "participants": [] }',
-                '  ]',
-                '}'
-            ].join('\n')
-        };
-
-        try {
-            const { generateWithProfile } = await import('./connections.js');
-            const response = await generateWithProfile(profile, [systemMessage, userMessage], {
-                maxTokens: LLM_TOKEN_BUDGETS.SMALL
-            });
-            if (!isActiveBatchChat(chatId)) {
-                dlog('[NWST BatchScan] Active chat changed during participant review; stopping stale review.');
-                return { reviewed: needsReview.length, updated };
-            }
-
-            if (!response) continue;
-
-            // Parse JSON
-            let jsonStr = response.trim();
-            const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (fenceMatch) jsonStr = fenceMatch[1].trim();
-
-            const result = JSON.parse(jsonStr);
-            if (!result.events || !Array.isArray(result.events)) continue;
-
-            for (const entry of result.events) {
-                const evIdx = entry.index - 1;
-                if (evIdx < 0 || evIdx >= batch.length) continue;
-                if (!Array.isArray(entry.participants)) continue;
-
-                const event = batch[evIdx];
-                event.participants = entry.participants;
-                updated++;
-            }
-        } catch (e) {
-            console.warn('[NWST BatchScan] Failed to review participant batch:', e);
-        }
+    for (const event of result.events) {
+        if (before.get(event.id) !== JSON.stringify(event.participants || [])) updated++;
     }
+    if (updated > 0) await setAllChatData(chatId, { events: result.events }, { events: expectedEvents });
 
-    // Save all updated events
-    if (updated > 0 && isActiveBatchChat(chatId)) {
-        await saveAllEvents(chatId, events);
-    }
-
-    return { reviewed: needsReview.length, updated };
+    return { reviewed: events.length, updated, invalidNPC: result.invalidNPC.length };
 }

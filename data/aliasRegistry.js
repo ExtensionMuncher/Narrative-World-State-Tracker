@@ -4,8 +4,10 @@
 // =============================================================================
 // Resolves the many ways a character/entity can be named in prose down to a
 // single canonical ID. This is the foundation of the prose-based secrets
-// engine: ST may store a full card title in msg.name (e.g. "Captain Renée Dubois")
-// while secrets reference a short name ("Renée"), and prose may use other variants.
+// engine: character identities are discovered from narrative prose and existing
+// NWST state. SillyTavern character-card titles / assistant speaker labels are
+// deliberately excluded because a card can narrate multiple NPCs and is not
+// itself a character.
 // Automatic normalization handles spelling-form differences; semantic titles or
 // honorific variants should be connected explicitly through manual aliases.
 //
@@ -19,11 +21,14 @@
 //
 // Manual aliases are stored per-chat through NWST's guarded storage layer.
 // Auto-built entries are computed fresh each call (not persisted) so they
-// always reflect current data.
+// always reflect current data. Auto-detected groups that the user deletes are
+// persisted separately as blacklist entries and filtered before manual aliases
+// are applied, so a deliberate manual group can still override a suppression.
 // =============================================================================
 
 import { getChatId } from '../utils.js';
 import { getAllSecrets } from './notebook.js';
+import { getHiddenIntentions } from './hiddenIntentions.js';
 import { getAllEvents } from './events.js';
 import { getAllCommunities } from './communities.js';
 import { getUserCharacterIdentity } from './secretsMeta.js';
@@ -85,25 +90,59 @@ export async function saveManualAliases(chatId, aliasGroups) {
  * @param {string} displayName - The canonical display name (e.g. "Renée Dubois")
  * @param {string[]} aliases - Alternate names that resolve to it
  */
+function normalizeManualAliasDisplays(values) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(values) ? values : []) {
+        const display = String(raw || '').trim();
+        const key = toCanonicalId(display);
+        if (!display || !key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(display);
+    }
+    return out;
+}
+
 export async function addManualAlias(chatId, displayName, aliases) {
     if (!chatId) chatId = getChatId();
     const groups = getManualAliases(chatId);
     const canonical = toCanonicalId(displayName);
+    if (!canonical) return null;
 
-    // Merge into existing group if canonical already exists
+    // Merge into existing group if canonical already exists. Preserve display
+    // spelling/case in storage; buildAliasRegistry canonicalizes only for matching.
     const existing = groups.find(g => g.canonical === canonical);
     if (existing) {
-        const merged = new Set([...existing.aliases, ...aliases.map(toCanonicalId)]);
-        existing.aliases = Array.from(merged).filter(Boolean);
-        existing.display = displayName; // refresh display
+        existing.aliases = normalizeManualAliasDisplays([...(existing.aliases || []), ...(aliases || [])]);
+        existing.display = String(displayName || '').trim() || existing.display || canonical;
     } else {
         groups.push({
             canonical,
-            display: displayName,
-            aliases: Array.from(new Set(aliases.map(toCanonicalId))).filter(Boolean)
+            display: String(displayName || '').trim() || canonical,
+            aliases: normalizeManualAliasDisplays(aliases)
         });
     }
     await saveManualAliases(chatId, groups);
+    return groups.find(g => g.canonical === canonical) || null;
+}
+
+/**
+ * Edit an existing manual group without changing its stable internal ID.
+ * The visible canonical/display name may be corrected freely; it is also
+ * registered as an alias so resolution follows the edited spelling.
+ */
+export async function updateManualAlias(chatId, originalCanonical, displayName, aliases) {
+    if (!chatId) chatId = getChatId();
+    const groups = getManualAliases(chatId);
+    const group = groups.find(g => g.canonical === originalCanonical);
+    if (!group) return null;
+    const display = String(displayName || '').trim();
+    if (!display) return null;
+    group.display = display;
+    group.aliases = normalizeManualAliasDisplays([display, ...(aliases || [])])
+        .filter(alias => toCanonicalId(alias) !== group.canonical);
+    await saveManualAliases(chatId, groups);
+    return group;
 }
 
 /**
@@ -115,6 +154,130 @@ export async function removeManualAlias(chatId, canonical) {
     if (!chatId) chatId = getChatId();
     const groups = getManualAliases(chatId).filter(g => g.canonical !== canonical);
     await saveManualAliases(chatId, groups);
+}
+
+
+// ── Auto-detected alias blacklist ─────────────────────────────────────────
+
+function normalizeBlacklistAliases(values) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(values) ? values : []) {
+        const key = toCanonicalId(String(raw || ''));
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(key);
+    }
+    return out;
+}
+
+function normalizeBlacklistEntry(raw, index = 0) {
+    if (!raw || typeof raw !== 'object') return null;
+    const canonical = toCanonicalId(raw.canonical || raw.display || '');
+    const aliases = normalizeBlacklistAliases([
+        canonical,
+        raw.display,
+        ...(Array.isArray(raw.aliases) ? raw.aliases : [])
+    ]);
+    if (!canonical && !aliases.length) return null;
+    return {
+        id: String(raw.id || `alias_blacklist_${canonical || index}`),
+        canonical: canonical || aliases[0],
+        display: String(raw.display || raw.canonical || aliases[0] || '').trim(),
+        aliases,
+        kinds: normalizeBlacklistAliases(raw.kinds || []),
+        blacklistedAt: Number(raw.blacklistedAt) || 0
+    };
+}
+
+/** Return persistent suppressions for deleted auto-detected alias groups. */
+export function getAutoAliasBlacklist(chatId) {
+    if (!chatId) chatId = getChatId();
+    if (!chatId) return [];
+    const raw = getChatData(chatId, 'aliasBlacklist');
+    return (Array.isArray(raw) ? raw : [])
+        .map((entry, index) => normalizeBlacklistEntry(entry, index))
+        .filter(Boolean);
+}
+
+export async function saveAutoAliasBlacklist(chatId, entries) {
+    if (!chatId) chatId = getChatId();
+    if (!chatId) return;
+    const normalized = (Array.isArray(entries) ? entries : [])
+        .map((entry, index) => normalizeBlacklistEntry(entry, index))
+        .filter(Boolean);
+    await setChatData(chatId, 'aliasBlacklist', normalized);
+}
+
+function aliasOverlapMatch(entry, canonical, aliases) {
+    const entryAliases = new Set(normalizeBlacklistAliases([
+        entry?.canonical,
+        entry?.display,
+        ...(entry?.aliases || [])
+    ]));
+    const entityAliases = new Set(normalizeBlacklistAliases([canonical, ...(aliases || [])]));
+    if (!entryAliases.size || !entityAliases.size) return false;
+
+    if (canonical && entry.canonical === canonical) return true;
+
+    const overlap = [];
+    for (const alias of entityAliases) {
+        if (entryAliases.has(alias)) overlap.push(alias);
+    }
+    if (overlap.length >= 2) return true;
+
+    // A matching multi-word/full-name alias is strong enough on its own. This
+    // avoids suppressing an unrelated future character merely because both use
+    // the same short first name.
+    return overlap.some(alias => alias.includes(' ') || alias.length >= 8);
+}
+
+/**
+ * Persistently suppress an auto-detected alias group. The complete alias set is
+ * stored so the group stays hidden even if auto-merging later picks a different
+ * canonical member as the survivor.
+ */
+export async function blacklistAutoAliasGroup(chatId, entity) {
+    if (!chatId) chatId = getChatId();
+    if (!chatId || !entity) return null;
+    const canonical = toCanonicalId(entity.canonical || entity.display || '');
+    const aliases = normalizeBlacklistAliases([
+        canonical,
+        entity.display,
+        ...(Array.isArray(entity.aliases) ? entity.aliases : [])
+    ]);
+    if (!canonical || !aliases.length) return null;
+
+    const entries = getAutoAliasBlacklist(chatId);
+    const existing = entries.find(entry => aliasOverlapMatch(entry, canonical, aliases));
+    if (existing) {
+        existing.aliases = normalizeBlacklistAliases([...(existing.aliases || []), ...aliases]);
+        existing.display = String(entity.display || existing.display || canonical).trim();
+        existing.kinds = normalizeBlacklistAliases([...(existing.kinds || []), ...(entity.kinds || [])]);
+        existing.blacklistedAt = Date.now();
+        await saveAutoAliasBlacklist(chatId, entries);
+        return existing;
+    }
+
+    const entry = {
+        id: `alias_blacklist_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        canonical,
+        display: String(entity.display || entity.canonical || canonical).trim(),
+        aliases,
+        kinds: normalizeBlacklistAliases(entity.kinds || []),
+        blacklistedAt: Date.now()
+    };
+    entries.push(entry);
+    await saveAutoAliasBlacklist(chatId, entries);
+    return entry;
+}
+
+/** Restore a previously deleted auto-detected group. */
+export async function restoreAutoAliasGroup(chatId, blacklistId) {
+    if (!chatId) chatId = getChatId();
+    if (!chatId || !blacklistId) return;
+    const entries = getAutoAliasBlacklist(chatId).filter(entry => entry.id !== blacklistId);
+    await saveAutoAliasBlacklist(chatId, entries);
 }
 
 // ── Registry building ─────────────────────────────────────────────────────
@@ -174,7 +337,15 @@ export function buildAliasRegistry(chatId) {
         if (!source || !target) return;
         for (const a of source.aliases) target.aliases.add(a);
         for (const k of source.kinds) target.kinds.add(k);
-        if (target.display === target.canonical && source.display) target.display = source.display;
+        if (source.display) {
+            const targetWords = toCanonicalId(target.display || '').split(' ').filter(Boolean).length;
+            const sourceWords = toCanonicalId(source.display || '').split(' ').filter(Boolean).length;
+            // Prefer an informative full personal name over a bare short name.
+            // Title wrappers were already collapsed by mergeContainedNameVariants,
+            // so this selects "Alden Reed" rather than "Alden" without
+            // restoring "Captain Alden Reed" as the display label.
+            if (target.display === target.canonical || sourceWords > targetWords) target.display = source.display;
+        }
         entities.delete(sourceCanonical);
     }
 
@@ -187,6 +358,31 @@ export function buildAliasRegistry(chatId) {
 
     function isSafeShortAlias(token) {
         return token && token.length >= 3 && !UNSAFE_SHORT_ALIASES.has(token) && !/^\d+$/.test(token);
+    }
+
+    function mergeContainedNameVariants() {
+        // Fold exact title/full-name wrappers before short-name collision
+        // analysis. Example: "Captain Alden Reed" contains the complete
+        // canonical name "Alden Reed"; treating those as separate people
+        // later defeats per-actor caps and duplicate reconciliation.
+        let changed = true;
+        while (changed) {
+            changed = false;
+            const names = Array.from(entities.keys()).sort((a, b) => b.length - a.length);
+            outer: for (const longer of names) {
+                if (!entities.has(longer) || !longer.includes(' ')) continue;
+                for (const shorter of names.slice().sort((a, b) => b.length - a.length)) {
+                    if (longer === shorter || !entities.has(shorter) || !shorter.includes(' ')) continue;
+                    if (longer.endsWith(' ' + shorter) || longer.startsWith(shorter + ' ')) {
+                        const preferredDisplay = entities.get(shorter)?.display;
+                        mergeEntities(longer, shorter);
+                        if (preferredDisplay && entities.get(shorter)) entities.get(shorter).display = preferredDisplay;
+                        changed = true;
+                        break outer;
+                    }
+                }
+            }
+        }
     }
 
     function addOrMergeShortNameAliases() {
@@ -221,8 +417,16 @@ export function buildAliasRegistry(chatId) {
 
     // ── 1. Auto-build from secrets ─────────────────────────────
     const secrets = getAllSecrets(chatId) || [];
+    const userPcSecrets = secrets.filter(secret => secret?.type === 'user_pc');
+    const userPcKnowerCounts = new Map();
     for (const secret of secrets) {
-        for (const n of (secret.whoKnows || []))       addName(n);
+        for (const n of (secret.whoKnows || [])) {
+            addName(n);
+            if (secret?.type === 'user_pc') {
+                const key = toCanonicalId(n);
+                if (key) userPcKnowerCounts.set(key, (userPcKnowerCounts.get(key) || 0) + 1);
+            }
+        }
         for (const n of (secret.whoDoesNotKnow || []))  addName(n);
         // Trigger anchors if present (v2 secrets)
         if (secret.triggerAnchors) {
@@ -231,6 +435,27 @@ export function buildAliasRegistry(chatId) {
             for (const n of (secret.triggerAnchors.groups    || [])) addName(n, 'group');
             for (const n of (secret.triggerAnchors.organizations || [])) addName(n, 'group');
         }
+    }
+
+    // When explicit/runtime persona metadata is missing, repeated User / PC
+    // secrets still provide a cautious fallback: only a single name shared by
+    // every User / PC secret is treated as the protagonist. Do not mark every
+    // knower, because an NPC confidant may legitimately know a PC secret too.
+    if (userPcSecrets.length) {
+        const sharedPcCandidates = Array.from(userPcKnowerCounts.entries())
+            .filter(([, count]) => count === userPcSecrets.length)
+            .map(([canonical]) => canonical);
+        if (sharedPcCandidates.length === 1) {
+            const canonical = sharedPcCandidates[0];
+            const entity = entities.get(canonical);
+            if (entity) entity.kinds.add('user_pc');
+        }
+    }
+
+    // Hidden Intention actors are canonical entities even when they are not
+    // currently present in events/communities/secrets.
+    for (const intention of getHiddenIntentions(chatId) || []) {
+        if (intention.actor) addName(intention.actor, 'character');
     }
 
     // Configured user/PC identity is treated as a real entity, but only
@@ -245,6 +470,24 @@ export function buildAliasRegistry(chatId) {
             if (ac) e.aliases.add(ac);
         }
     }
+
+    // SillyTavern already knows which speaker is the user/active persona. Use
+    // those runtime names as additional authoritative PC signals. This covers
+    // older chats where the Secrets identity fields were never configured.
+    try {
+        const ctx = SillyTavern.getContext();
+        const runtimeNames = new Set();
+        for (const candidate of [ctx?.name1, ctx?.user_name, ctx?.userName, ctx?.persona?.name]) {
+            const name = String(candidate || '').trim();
+            if (name && !/^(user|you|me)$/i.test(name)) runtimeNames.add(name);
+        }
+        for (const msg of ctx?.chat || []) {
+            if (!msg?.is_user) continue;
+            const name = String(msg?.name || '').trim();
+            if (name && !/^(user|you|me)$/i.test(name)) runtimeNames.add(name);
+        }
+        for (const name of runtimeNames) addName(name, 'user_pc');
+    } catch (_) { /* Runtime identity is optional outside SillyTavern. */ }
 
     // ── 2. Auto-build from events ──────────────────────────────
     const events = getAllEvents(chatId) || [];
@@ -266,8 +509,28 @@ export function buildAliasRegistry(chatId) {
         if (com.name) addName(com.name, 'group');
     }
 
-    // ── 3.5 Auto-merge safe first/full-name variants ───────────
+    // ── 3.25 Character-card titles are intentionally excluded ──
+    // Do not add ctx.name2 / character_name / non-user msg.name here. Those
+    // values identify the SillyTavern card or narrator surface, not necessarily
+    // an in-story NPC. Real actors are recovered from prose and structured NWST
+    // state instead.
+
+    // ── 3.5 Auto-merge safe title/full/short-name variants ─────
+    mergeContainedNameVariants();
     addOrMergeShortNameAliases();
+
+    // ── 3.75 Apply persistent auto-detected suppressions ──────
+    // Suppress only the auto-built registry. Manual groups are merged afterward
+    // and therefore remain an intentional user-controlled override.
+    const autoBlacklist = getAutoAliasBlacklist(chatId);
+    if (autoBlacklist.length) {
+        for (const [canonical, entity] of Array.from(entities.entries())) {
+            const aliases = Array.from(entity.aliases || []);
+            if (autoBlacklist.some(entry => aliasOverlapMatch(entry, canonical, aliases))) {
+                entities.delete(canonical);
+            }
+        }
+    }
 
     // ── 4. Merge manual alias groups (these take precedence) ───
     const manualGroups = getManualAliases(chatId);
@@ -292,7 +555,7 @@ export function buildAliasRegistry(chatId) {
     }
 
     // ── Merge word-order permutation duplicates ────────────────
-    // "Mara Ellis" and "Ellis Mara" produce different canonical IDs
+    // "Maya Ishikawa" and "Ishikawa Maya" produce different canonical IDs
     // (we never reorder words in toCanonicalId, to stay safe). But they are the
     // same person. Detect entities whose canonical token-sets are identical and
     // merge them into the one with the most aliases (most established).
@@ -325,6 +588,12 @@ export function buildAliasRegistry(chatId) {
             }
         }
     }
+
+    // Word-order duplicate merging can remove the collision that originally
+    // prevented a unique short name from being attached (e.g. "Alden Reed"
+    // and "Reed, Alden" both blocked "Alden" on the first pass). Run
+    // the guarded short-name merge once more against the consolidated registry.
+    addOrMergeShortNameAliases();
 
     // ── Build reverse lookup: alias string -> canonical ID ─────
     const aliasToCanonical = new Map();

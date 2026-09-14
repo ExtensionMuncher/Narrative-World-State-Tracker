@@ -690,6 +690,23 @@
     color: #3C3489;
 }
 
+
+/* ── Custom Nager holiday labels / tooltips ───────────────────────────── */
+.nwst-holiday-tag {
+    cursor: help;
+    border-radius: 3px;
+    padding: 0 2px;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    outline: none;
+}
+
+.nwst-holiday-tag:hover,
+.nwst-holiday-tag:focus-visible {
+    color: var(--SmartThemeQuoteColor, #7F77DD);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #7F77DD) 12%, transparent);
+}
+
 /* ── Moon Phenomena Tags ─────────────────────────────────────────────────── */
 
 .nwst-mn-phenomena {
@@ -793,6 +810,10 @@
     background: #bbb;
 }
 
+.nwst-event-dot.nwst-persistent {
+    background: #9a72c7;
+}
+
 .nwst-event-title {
     flex: 1;
     font-size: 13px;
@@ -862,6 +883,11 @@
 .nwst-badge-undetermined {
     background: #F1EFE8;
     color: #555;
+}
+
+.nwst-badge-persistent {
+    background: rgba(154,114,199,.16);
+    color: #744aa8;
 }
 
 /* NPC badge */
@@ -1597,3 +1623,475 @@
 .nwst-scan-health[data-status="paused"] .nwst-scan-health-dot,
 .nwst-scan-health[data-status="disabled"] .nwst-scan-health-dot,
 .nwst-scan-health[data-status="warmup"] .nwst-scan-health-dot { color: #a99a6c; }
+
+/* ── Hidden Intentions — grouped, responsive Notebook layout ───────────── */
+.nwst-hi-actor-group {
+    border: 1px solid rgba(127, 127, 127, 0.55);
+    border-radius: 10px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.nwst-hi-actor-summary,
+.nwst-hi-card-summary {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    list-style: none;
+    min-width: 0;
+}
+
+.nwst-hi-actor-summary::-webkit-details-marker,
+.nwst-hi-card-summary::-webkit-details-marker {
+    display: none;
+}
+
+.nwst-hi-actor-summary {
+    padding: 9px 10px;
+    background: rgba(127, 127, 127, 0.12);
+    flex-wrap: wrap;
+}
+
+.nwst-hi-actor-summary strong {
+    flex: 1 1 150px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.nwst-hi-actor-summary > span:not(.nwst-hi-badge) {
+    font-size: 11px;
+    color: #999;
+}
+
+.nwst-hi-actor-body {
+    padding: 8px;
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+.nwst-hi-card {
+    border: 1px solid rgba(127, 127, 127, 0.48);
+    border-radius: 8px;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.nwst-hi-card-summary {
+    padding: 8px 10px;
+    background: rgba(127, 127, 127, 0.06);
+    flex-wrap: wrap;
+}
+
+.nwst-hi-summary-objective {
+    flex: 1 1 180px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.nwst-hi-badge {
+    flex: 0 0 auto;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+    line-height: 1.3;
+    border: 1px solid #777;
+    border-radius: 999px;
+    padding: 1px 6px;
+}
+
+.nwst-hi-badge-review {
+    color: #c98225;
+    border-color: #c98225;
+}
+
+.nwst-hi-card-body {
+    padding: 10px;
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+.nwst-hi-card-body label,
+.nwst-hi-card-body input,
+.nwst-hi-card-body select,
+.nwst-hi-card-body textarea {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.nwst-hi-card-body input,
+.nwst-hi-card-body select,
+.nwst-hi-card-body textarea {
+    width: 100%;
+    margin-top: 3px;
+}
+
+.nwst-hi-card-body textarea {
+    resize: vertical;
+}
+
+.nwst-hi-text-field {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    justify-content: initial;
+    gap: 5px;
+    margin-bottom: 0;
+    min-width: 0;
+}
+
+.nwst-hi-field-caption {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
+    width: fit-content;
+    max-width: 100%;
+    min-width: 0;
+    margin: 0;
+    white-space: normal;
+}
+
+.nwst-hi-textarea-shell {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-width: 0;
+}
+
+.nwst-hi-textarea-shell textarea {
+    display: block;
+    width: 100%;
+    min-height: 82px;
+    margin-top: 0;
+    padding-right: 31px;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+    line-height: 1.45;
+}
+
+.nwst-hi-text-field[data-hi-field="strategy"] textarea,
+.nwst-hi-text-field[data-hi-field="triggerConditions"] textarea,
+.nwst-hi-text-field[data-hi-field="constraints"] textarea,
+.nwst-hi-text-field[data-hi-field="progressNote"] textarea {
+    min-height: 104px;
+}
+
+.nwst-hi-text-field[data-hi-field="basis"] textarea {
+    min-height: 148px;
+}
+
+.nwst-hi-text-expand {
+    position: absolute;
+    right: 6px;
+    bottom: 6px;
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    padding: 0;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.22);
+    color: #bbb;
+    opacity: 0.82;
+    z-index: 2;
+}
+
+.nwst-hi-text-expand:hover {
+    opacity: 1;
+    background: rgba(127, 127, 127, 0.22);
+}
+
+.nwst-hi-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 7px;
+    min-width: 0;
+}
+
+.nwst-hi-level-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 7px;
+    min-width: 0;
+}
+
+.nwst-hi-optional,
+.nwst-hi-evidence {
+    border: 1px dashed rgba(127, 127, 127, 0.45);
+    border-radius: 7px;
+    padding: 7px 8px;
+    min-width: 0;
+}
+
+.nwst-hi-optional > summary,
+.nwst-hi-evidence > summary {
+    cursor: pointer;
+    color: #999;
+    font-size: 11px;
+}
+
+.nwst-hi-optional-body {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.nwst-hi-evidence ul {
+    font-size: 11px;
+    line-height: 1.45;
+    margin: 6px 0 0 18px;
+    padding: 0;
+}
+
+.nwst-hi-record-meta {
+    font-size: 10px;
+    color: #999;
+    overflow-wrap: anywhere;
+}
+
+.nwst-hi-actions {
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+    .nwst-hi-card-summary {
+        flex-wrap: wrap;
+    }
+
+    .nwst-hi-summary-objective {
+        flex-basis: 100%;
+        order: -1;
+    }
+
+    .nwst-hi-meta-grid,
+    .nwst-hi-level-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .nwst-hi-card-body {
+        padding: 8px;
+    }
+
+    .nwst-hi-textarea-shell textarea {
+        min-height: 96px;
+    }
+
+    .nwst-hi-text-field[data-hi-field="strategy"] textarea,
+    .nwst-hi-text-field[data-hi-field="triggerConditions"] textarea,
+    .nwst-hi-text-field[data-hi-field="constraints"] textarea,
+    .nwst-hi-text-field[data-hi-field="progressNote"] textarea {
+        min-height: 118px;
+    }
+
+    .nwst-hi-text-field[data-hi-field="basis"] textarea {
+        min-height: 168px;
+    }
+}
+
+.nwst-hi-history-group {
+    border: 1px dashed rgba(127, 127, 127, 0.45);
+    border-radius: 8px;
+    padding: 6px 7px;
+    min-width: 0;
+}
+
+.nwst-hi-history-group > summary {
+    cursor: pointer;
+    font-size: 11px;
+    color: #999;
+    list-style-position: inside;
+}
+
+.nwst-hi-history-body {
+    display: grid;
+    gap: 8px;
+    margin-top: 7px;
+    min-width: 0;
+}
+
+.nwst-hi-parked-note {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.nwst-hi-required {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #d6a75c;
+}
+
+
+/* ── Moon override editor cleanup ───────────────────────────────────────── */
+.nwst-moon-actions {
+    width: 100%;
+}
+
+.nwst-moon-actions .nwst-btn {
+    flex: 1 1 170px;
+    min-width: 0;
+}
+
+.nwst-moon-override-entry {
+    overflow: hidden;
+}
+
+.nwst-moon-override-entry select,
+.nwst-moon-override-entry input {
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.nwst-moon-override-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+
+.nwst-moon-override-enabled {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px !important;
+    height: 20px !important;
+    border-radius: 50%;
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    background: transparent;
+    margin: 0;
+    display: inline-grid;
+    place-content: center;
+    cursor: pointer;
+    flex: 0 0 20px;
+}
+
+.nwst-moon-override-enabled::before {
+    content: '';
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    transform: scale(0);
+    transition: transform 120ms ease-in-out;
+    background: #5aa8ff;
+}
+
+.nwst-moon-override-enabled:checked::before {
+    transform: scale(1);
+}
+
+.nwst-moon-override-enabled-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #888;
+    white-space: nowrap;
+}
+
+.nwst-moon-override-field {
+    margin-bottom: 8px;
+}
+
+.nwst-moon-override-label {
+    font-size: 11px;
+    color: #888;
+    margin-bottom: 4px;
+    line-height: 1.2;
+}
+
+.nwst-moon-override-date-wrap {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.nwst-moon-override-date-head,
+.nwst-moon-override-date-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+}
+
+.nwst-moon-override-date-head {
+    font-size: 10px;
+    color: #777;
+    margin-bottom: 3px;
+}
+
+.nwst-moon-override-date-head span {
+    text-align: center;
+}
+
+.nwst-moon-override-quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.nwst-moon-override-quick-actions .menu_button {
+    flex: 1 1 170px;
+    min-width: 0;
+    font-size: 11px;
+}
+
+.nwst-moon-override-help {
+    font-size: 11px;
+    color: #888;
+    margin-bottom: 6px;
+    line-height: 1.35;
+}
+
+@media (max-width: 640px) {
+    .nwst-moon-override-date-wrap {
+        grid-template-columns: 1fr;
+    }
+
+    .nwst-moon-override-quick-actions .menu_button {
+        flex-basis: 100%;
+    }
+}
+
+/* Notebook explicit-save + autosave feedback (v1.3.54) */
+.nwst-nb-section-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.nwst-nb-section-save {
+    font-size: 11px !important;
+    padding: 2px 8px !important;
+    min-height: 0 !important;
+    line-height: 1.35 !important;
+}
+
+.nwst-nb-bullet-text.nwst-dirty {
+    box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--SmartThemeQuoteColor, #d2a400) 75%, transparent);
+}
+
+.nwst-nb-bullet-text.nwst-save-error {
+    box-shadow: inset 0 -2px 0 var(--SmartThemeDangerColor, #b94a48);
+}

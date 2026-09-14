@@ -38,14 +38,14 @@ export function getChatId() {
 
 /**
  * Keep the Current Day sub-line limited to era/calendar context.
- * LLMs sometimes append setting labels such as "Modern City" or
- * "Present-day Region" after a valid era. Those are locations, not dates,
+ * LLMs sometimes append setting labels such as "Modern Tokyo" or
+ * "Modern-day capital" after a valid era. Those are locations, not dates,
  * and become actively misleading when the story changes regions.
  *
  * This intentionally preserves legitimate temporal segments such as:
- *   Reiwa 6
- *   Imperial Era · 1125 CE
- *   Third Dynasty · Reign Year 5
+ *   Regnal Year 6
+ *   Second Age · 1125 CE
+ *   Tang Dynasty · Kaiyuan 5
  * while removing non-temporal trailing labels after a separator.
  *
  * @param {*} value

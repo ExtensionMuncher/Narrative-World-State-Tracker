@@ -7,7 +7,7 @@
 //
 // Global settings (stored in extension_settings.nwst):
 //   • enabled, scanPaused, debugMode
-//   • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM, secretsSidecarLLM)
+//   • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM, secretsSidecarLLM, hiddenIntentionsLLM)
 //   • scanFrequency
 //   • injection settings
 //   • plannerPrompt
@@ -28,7 +28,9 @@ import {
 
 import {
     getAllChatData,
-    setAllChatData
+    setAllChatData,
+    getChatData,
+    DEFAULTS
 } from './data/storage.js';
 
 // A handful of NWST runtime records intentionally live as standalone metadata
@@ -44,6 +46,19 @@ const STANDALONE_CHAT_META_KEYS = [
 
 function cloneJson(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+async function persistNormalizedImportedWeatherProfiles(chatId) {
+    try {
+        // Dynamic import avoids the settings -> severeWeather -> worldState -> settings
+        // static cycle while still making legacy Weather Profile migration durable.
+        const { getWeatherProfilesState, saveWeatherProfilesState } = await import('./data/severeWeather.js');
+        await saveWeatherProfilesState(chatId, getWeatherProfilesState(chatId));
+        return true;
+    } catch (e) {
+        console.error('[NWST Settings] Could not normalize imported Weather Profiles:', e);
+        return false;
+    }
 }
 
 function getActiveChatContext(expectedChatId, operation = 'operate on chat data') {
@@ -63,12 +78,10 @@ function getActiveChatContext(expectedChatId, operation = 'operate on chat data'
 
 function getStandaloneChatMeta(chatId) {
     try {
-        const ctx = getActiveChatContext(chatId, 'export standalone chat metadata');
-        if (!ctx) return {};
-        const meta = ctx.chatMetadata || {};
         const out = {};
         for (const key of STANDALONE_CHAT_META_KEYS) {
-            if (Object.prototype.hasOwnProperty.call(meta, key)) out[key] = cloneJson(meta[key]);
+            const dataType = key.slice('nwst:'.length);
+            out[key] = cloneJson(getChatData(chatId, dataType));
         }
         return out;
     } catch (e) {
@@ -77,21 +90,22 @@ function getStandaloneChatMeta(chatId) {
     }
 }
 
-async function restoreStandaloneChatMeta(chatId, snapshot = {}) {
-    const ctx = getActiveChatContext(chatId, 'restore standalone chat metadata');
-    if (!ctx) return false;
-    const meta = ctx.chatMetadata || {};
-    // Full import is overwrite semantics. Clear current standalone NWST state
-    // first so an older bundle that lacks these fields cannot leave unrelated
-    // pending/scanner data from the destination chat behind.
-    for (const key of STANDALONE_CHAT_META_KEYS) delete meta[key];
-    if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
-        for (const key of STANDALONE_CHAT_META_KEYS) {
-            if (Object.prototype.hasOwnProperty.call(snapshot, key)) meta[key] = cloneJson(snapshot[key]);
-        }
+async function restoreStandaloneChatMeta(chatId, snapshot = {}, fallbackBundle = {}) {
+    if (!getActiveChatContext(chatId, 'restore standalone chat metadata')) return false;
+    const bundle = {};
+    for (const key of STANDALONE_CHAT_META_KEYS) {
+        const dataType = key.slice('nwst:'.length);
+        const hasStandalone = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
+            && Object.prototype.hasOwnProperty.call(snapshot, key);
+        const hasLegacyBundled = fallbackBundle && typeof fallbackBundle === 'object' && !Array.isArray(fallbackBundle)
+            && Object.prototype.hasOwnProperty.call(fallbackBundle, dataType);
+        bundle[dataType] = hasStandalone
+            ? cloneJson(snapshot[key])
+            : hasLegacyBundled
+                ? cloneJson(fallbackBundle[dataType])
+                : cloneJson(DEFAULTS[dataType]);
     }
-    if (!getActiveChatContext(chatId, 'finish restoring standalone chat metadata')) return false;
-    await ctx.saveMetadata();
+    await setAllChatData(chatId, bundle);
     return true;
 }
 
@@ -119,7 +133,7 @@ export function setDebugMode(value) { setSetting('debugMode', value); }
 
 /**
  * Get all connection profile IDs.
- * @returns {{ planningLLM: string, dayAdvancementLLM: string, narrativeConsistencyLLM: string, secretsSidecarLLM: string }}
+ * @returns {{ planningLLM: string, dayAdvancementLLM: string, narrativeConsistencyLLM: string, secretsSidecarLLM: string, hiddenIntentionsLLM: string }}
  */
 export function getConnectionProfiles() {
     return getSetting('connections');
@@ -127,7 +141,7 @@ export function getConnectionProfiles() {
 
 /**
  * Get a specific connection profile ID.
- * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM' | 'secretsSidecarLLM'
+ * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM' | 'secretsSidecarLLM' | 'hiddenIntentionsLLM'
  * @returns {string} The profile ID (empty string if not set)
  */
 export function getConnectionProfile(profileKey) {
@@ -137,7 +151,7 @@ export function getConnectionProfile(profileKey) {
 
 /**
  * Set a specific connection profile ID.
- * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM' | 'secretsSidecarLLM'
+ * @param {string} profileKey - 'planningLLM' | 'dayAdvancementLLM' | 'narrativeConsistencyLLM' | 'secretsSidecarLLM' | 'hiddenIntentionsLLM'
  * @param {string} profileId - The connection profile ID from ST's connection manager
  */
 export function setConnectionProfile(profileKey, profileId) {
@@ -166,10 +180,54 @@ export function getMaxSnapshotCount() { return getSetting('maxSnapshotCount') ||
 /** Set the snapshot retention target. @param {number} value */
 export function setMaxSnapshotCount(value) { setSetting('maxSnapshotCount', Math.max(1, parseInt(value) || 30)); }
 
+// ── Hidden Intentions ─────────────────────────────────────────────────────
+
+export function getHiddenIntentionsConfig() {
+    const cfg = getSetting('hiddenIntentions') || {};
+    const intOr = (value, fallback) => {
+        const parsed = parseInt(value, 10);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    return {
+        enabled: cfg.enabled !== false,
+        cadence: Math.max(1, intOr(cfg.cadence, 30)),
+        minimumMessages: Math.max(1, intOr(cfg.minimumMessages, 20)),
+        cooldownMessages: Math.max(0, intOr(cfg.cooldownMessages, 15)),
+        scanRange: Math.max(8, Math.min(100, intOr(cfg.scanRange, 40))),
+        dayAdvancement: cfg.dayAdvancement !== false,
+        maxActorsPerScan: Math.max(1, Math.min(10, intOr(cfg.maxActorsPerScan, 4))),
+        // v2 semantics: five-slot current working set across every record type for one NPC.
+        // Parked, resolved, abandoned, and stale records do not consume a slot.
+        // Old imported settings without recordCapVersion use the new default of 5
+        // instead of preserving the obsolete actionable-only default of 2.
+        maxActivePerActor: Math.max(1, Math.min(5, intOr(cfg.recordCapVersion, 0) >= 2 ? intOr(cfg.maxActivePerActor, 5) : 5)),
+        recordCapVersion: 2,
+        maxContingenciesPerActor: Math.max(0, Math.min(4, intOr(cfg.maxContingenciesPerActor, 1))),
+        reviewNewIntentions: cfg.reviewNewIntentions === true,
+        autoAddConfidence: ['low','medium','high'].includes(cfg.autoAddConfidence) ? cfg.autoAddConfidence : 'medium'
+    };
+}
+
+export function setHiddenIntentionsConfigValue(key, value) {
+    const cfg = { ...getHiddenIntentionsConfig(), [key]: value };
+    setSetting('hiddenIntentions', cfg);
+}
+
 // ── Injection settings ────────────────────────────────────────────────────
 
-/** Get all injection settings. @returns {object} */
-export function getInjectionSettings() { return getSetting('injection'); }
+function normalizeInjectionSettings(raw = {}) {
+    const inj = { ...(raw || {}) };
+    if (inj.placement === 'top_an') inj.placement = 'before_main';
+    if (inj.placement === 'bottom_an') inj.placement = 'after_main';
+    if (!['before_main', 'after_main', 'at_depth'].includes(inj.placement)) inj.placement = 'before_main';
+    const depth = Number(inj.depth);
+    inj.depth = Number.isFinite(depth) ? Math.max(0, Math.min(999, Math.trunc(depth))) : 2;
+    if (!['system', 'user', 'assistant'].includes(inj.depthRole)) inj.depthRole = 'system';
+    return inj;
+}
+
+/** Get all injection settings. Legacy placement values are normalized. @returns {object} */
+export function getInjectionSettings() { return normalizeInjectionSettings(getSetting('injection')); }
 
 /** Check if Current Day injection is enabled. @returns {boolean} */
 export function isInjectCurrentDay() { return getSetting('injection').injectCurrentDay; }
@@ -180,14 +238,14 @@ export function isInjectEvents() { return getSetting('injection').injectEvents; 
 /** Check if World Conditions injection is enabled. @returns {boolean} */
 export function isInjectWorldConditions() { return getSetting('injection').injectWorldConditions; }
 
-/** Get injection placement. @returns {string} 'before_main' | 'after_main' | 'top_an' | 'bottom_an' | 'at_depth' */
-export function getInjectionPlacement() { return getSetting('injection').placement; }
+/** Get injection placement. @returns {string} 'before_main' | 'after_main' | 'at_depth' */
+export function getInjectionPlacement() { return getInjectionSettings().placement; }
 
-/** Get injection depth (only used when placement is 'at_depth'). @returns {number} */
-export function getInjectionDepth() { return getSetting('injection').depth; }
+/** Get injection depth (only used when placement is 'at_depth'). 0-999. @returns {number} */
+export function getInjectionDepth() { return getInjectionSettings().depth; }
 
 /** Get injection depth role. @returns {string} 'system' | 'user' | 'assistant' */
-export function getInjectionDepthRole() { return getSetting('injection').depthRole; }
+export function getInjectionDepthRole() { return getInjectionSettings().depthRole; }
 
 /** Get the current output density mode. @returns {'token-budget'|'combined'|'atmospheric'} */
 export function getDensityMode() { return getSetting('injection').densityMode || 'combined'; }
@@ -266,7 +324,7 @@ export function setSecretBudgetTokens(value) { setInjectionSetting('secretBudget
 export function setInjectionSetting(key, value) {
     const inj = JSON.parse(JSON.stringify(getInjectionSettings()));
     inj[key] = value;
-    setSetting('injection', inj);
+    setSetting('injection', normalizeInjectionSettings(inj));
 }
 
 // ── Planner prompt ────────────────────────────────────────────────────────
@@ -295,6 +353,7 @@ export function exportGlobalSettings() {
         scanFrequency: getScanFrequency(),
         injection: getInjectionSettings(),
         secrets: getSecretsConfig(),
+        hiddenIntentions: getHiddenIntentionsConfig(),
         noThink: getSetting('noThink'),
         noThinkHard: getSetting('noThinkHard'),
         noThinkProfiles: getSetting('noThinkProfiles'),
@@ -326,10 +385,18 @@ export function importGlobalSettings(jsonString) {
         if (imported.enabled !== undefined) setEnabled(imported.enabled);
         if (imported.scanPaused !== undefined) setPaused(imported.scanPaused);
         if (imported.debugMode !== undefined) setDebugMode(imported.debugMode);
-        if (imported.connections) setSetting('connections', imported.connections);
+        if (imported.connections) {
+            const current = getConnectionProfiles() || {};
+            setSetting('connections', {
+                ...current,
+                ...imported.connections,
+                hiddenIntentionsLLM: imported.connections.hiddenIntentionsLLM ?? current.hiddenIntentionsLLM ?? '__planning__'
+            });
+        }
         if (imported.scanFrequency !== undefined) setScanFrequency(imported.scanFrequency);
-        if (imported.injection) setSetting('injection', imported.injection);
+        if (imported.injection) setSetting('injection', normalizeInjectionSettings(imported.injection));
         if (imported.secrets) setSetting('secrets', imported.secrets);
+        if (imported.hiddenIntentions) setSetting('hiddenIntentions', imported.hiddenIntentions);
         if (imported.noThink !== undefined) setSetting('noThink', imported.noThink);
         if (imported.noThinkHard !== undefined) setSetting('noThinkHard', imported.noThinkHard);
         if (imported.noThinkProfiles !== undefined) setSetting('noThinkProfiles', imported.noThinkProfiles);
@@ -377,6 +444,10 @@ export async function importChatData(chatId, jsonString) {
         const data = JSON.parse(jsonString);
         if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
         await setAllChatData(chatId, data);
+        if (!getActiveChatContext(chatId, 'continue importing chat data')) return false;
+        if (Object.prototype.hasOwnProperty.call(data, 'weatherProfiles')) {
+            if (!await persistNormalizedImportedWeatherProfiles(chatId)) return false;
+        }
         if (!getActiveChatContext(chatId, 'finish importing chat data')) return false;
         return true;
     } catch (e) {
@@ -399,7 +470,7 @@ export function exportAll(chatId) {
     try {
         if (!getActiveChatContext(chatId, 'export all data')) return null;
         const bundle = {
-            version: '1.0.2',
+            version: '1.3.54',
             exportedAt: new Date().toISOString(),
             globalSettings: JSON.parse(exportGlobalSettings()),
             chatData: getAllChatData(chatId),
@@ -439,7 +510,10 @@ export async function importAll(chatId, jsonString) {
         if (bundle.chatData) {
             await setAllChatData(chatId, bundle.chatData);
             if (!getActiveChatContext(chatId, 'continue importing all data')) return false;
-            const restoredMeta = await restoreStandaloneChatMeta(chatId, bundle.standaloneChatMeta || {});
+            if (Object.prototype.hasOwnProperty.call(bundle.chatData, 'weatherProfiles')) {
+                if (!await persistNormalizedImportedWeatherProfiles(chatId)) return false;
+            }
+            const restoredMeta = await restoreStandaloneChatMeta(chatId, bundle.standaloneChatMeta || {}, bundle.chatData || {});
             if (!restoredMeta) return false;
         }
 

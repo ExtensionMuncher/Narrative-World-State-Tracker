@@ -24,6 +24,7 @@ import {
     getMaxSecretsInjected, getSidecarCadence, getSidecarScanRange, getInjectionThreshold,
     getSecretDecayThreshold, getReconcileCadence,
     getScoringWeights, setScoringWeight, setSecretsConfigValue,
+    getHiddenIntentionsConfig, setHiddenIntentionsConfigValue,
     exportAll, importAll
 } from '../settings.js';
 
@@ -38,14 +39,14 @@ import {
     getNagerCacheStatus,
     isNagerDateAvailable
 } from '../data/nagerDate.js';
-import { getChatId, nwstToast, getSetting, setSetting } from '../index.js';
+import { getChatId, nwstToast, getSetting, setSetting, updateStatusLabel, updatePauseButton } from '../index.js';
 import { download } from '../../../../utils.js';
-import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG } from '../data/storage.js';
+import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG, getChatData, setChatData } from '../data/storage.js';
 import { runBatchScan } from '../llm/batchScan.js';
 import { getSecretsMeta, setSecretsMeta } from '../data/secretsMeta.js';
 import { rebaseElapsedStoryDays } from '../data/timeMigration.js';
-import { getWeatherProfilesState, saveWeatherProfilesState, getActiveWeatherProfile, setActiveWeatherProfile, deleteWeatherProfile, makeDefaultWeatherProfile, upsertWeatherProfile, profileSummary, WEATHER_EVENT_DEFS } from '../data/severeWeather.js';
-import { analyzeSettingContextToWeatherProfile } from '../llm/weatherProfile.js';
+import { getWeatherProfilesState, saveWeatherProfilesState, getActiveWeatherProfile, setActiveWeatherProfile, deleteWeatherProfile, makeDefaultWeatherProfile, upsertWeatherProfile, profileSummary, WEATHER_EVENT_DEFS, REGIONAL_HAZARD_LEVELS, normalizeRegionalHazards } from '../data/severeWeather.js';
+import { analyzeSettingContextToWeatherProfile, analyzeRegionalHazardsForProfiles } from '../llm/weatherProfile.js';
 import { getContextSnapshots, getContextSnapshot, saveContextSnapshot, deleteContextSnapshot, clearContextSnapshots } from '../data/contextSnapshots.js';
 import { dlog } from '../lib/debug.js';
 
@@ -100,6 +101,13 @@ export function buildSettingsTab() {
                         Analyzes each scene for the prose-based secrets engine — who is present (resolving pronouns), what kind of scene it is, and which narrative pressures are active. Runs frequently on its own cadence, so use a <strong>cheap, fast model</strong> (Mistral-Nemo, Haiku, a local 8B). This is NOT the heavy consistency model.
                     </div>
                     <select id="nwst-setting-secretsSidecarLLM" style="margin-bottom:12px"></select>
+
+                    <!-- Hidden Intentions LLM -->
+                    <div style="font-size:12px;color:#666;margin-bottom:4px">Hidden Intentions</div>
+                    <div style="font-size:11px;color:#999;margin-bottom:6px;line-height:1.4">
+                        Reconciles durable private NPC objectives, plans, contingencies, and whether they were acted upon. Use a model with restrained social reasoning and good character judgment. By default this inherits the Planning profile.
+                    </div>
+                    <select id="nwst-setting-hiddenIntentionsLLM" style="margin-bottom:12px"></select>
 
                     <!-- No-think (per connection profile) -->
                     <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin-bottom:4px">No-think (per profile)</div>
@@ -165,7 +173,7 @@ export function buildSettingsTab() {
                         <button type="button" class="menu_button nwst-btn-danger" id="nwst-setting-deleteContextProfile">Delete</button>
                     </div>
                     <textarea id="nwst-setting-context" rows="4" style="margin-bottom:8px"
-                        placeholder="e.g. Feudal Japan, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
+                        placeholder="e.g. Feudal island realm, late autumn, mountain valley surrounded by cedar forests. Climate is temperate with cold winters. Humidity is moderate. OR: High fantasy desert kingdom, perpetually arid, rare thunderstorms in the dry season..."></textarea>
                     <div class="nwst-btn-row">
                         <button class="menu_button nwst-btn" id="nwst-setting-saveContext">Save Active Profile</button>
                         <button class="menu_button nwst-btn" id="nwst-setting-refreshContextState">Refresh Setting State…</button>
@@ -185,7 +193,7 @@ export function buildSettingsTab() {
                         <div id="nwst-startdate-status" style="font-size:11px;color:#888;margin-bottom:10px"></div>
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
                             <div style="font-size:12px;color:#666;white-space:nowrap">Era</div>
-                            <input type="text" id="nwst-setting-eraPin" placeholder="optional — correct or set the era, e.g. Reiwa 8" style="flex:1;min-width:100px">
+                            <input type="text" id="nwst-setting-eraPin" placeholder="optional — correct or set the era, e.g. Regnal Year 8" style="flex:1;min-width:100px">
                             <button type="button" class="menu_button nwst-btn" id="nwst-setting-saveEraPin" style="font-size:11px;padding:3px 9px">Save</button>
                         </div>
                         <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">
@@ -229,7 +237,7 @@ export function buildSettingsTab() {
             <div class="nwst-accordion-body" id="nwst-accordion-severe-weather">
                 <div class="nwst-card">
                     <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
-                        Deterministic severe-weather RNG weighted by the active profile's climate, terrain, characteristics, and current season. The RNG decides the system; the Day Advancement LLM only renders that decision into the 7-day forecast. <strong>Weather Profiles are saved per-chat and switched manually.</strong>
+                        Deterministic severe-weather RNG weighted by the active profile's climate, terrain, characteristics, Regional Hazards, and current season. The RNG decides the system; the Day Advancement LLM only renders that decision into the 7-day forecast. <strong>Weather Profiles are saved per-chat and switched manually.</strong>
                     </div>
                     <div class="nwst-setting-row" style="margin-bottom:10px">
                         <div><div class="nwst-setting-label">Enable Severe Weather</div><div class="nwst-setting-sub">Roll only on story-day advancement. Regenerating the forecast never rerolls weather.</div></div>
@@ -258,6 +266,12 @@ export function buildSettingsTab() {
                         <input id="nwst-weather-characteristics" type="text" placeholder="harsh winters, humid summers, rainy season" style="margin-bottom:8px">
                         <div class="nwst-setting-label">Notes</div>
                         <textarea id="nwst-weather-notes" rows="2" placeholder="Weather-relevant notes for this region/profile"></textarea>
+                        <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
+                            <div class="nwst-setting-label">Regional Hazards</div>
+                            <div class="nwst-setting-sub" style="margin-bottom:8px">Location-specific likelihood modifiers layered on top of climate, terrain, season, and overall frequency. <strong>Neutral</strong> applies no extra adjustment.</div>
+                            <div id="nwst-weather-regional-hazards"></div>
+                            <div class="nwst-btn-row" style="margin-top:8px"><button type="button" class="menu_button nwst-btn" id="nwst-weather-analyze-hazards">Analyze Active Profile Hazards</button></div>
+                        </div>
                         <div class="nwst-btn-row" style="margin-top:8px"><button type="button" class="menu_button nwst-btn" id="nwst-weather-save-profile">Save Weather Profile</button></div>
                     </div>
                     <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
@@ -335,11 +349,11 @@ export function buildSettingsTab() {
 
                     <div style="border-top:0.5px solid var(--SmartThemeBorderColor,#444);margin:12px 0 10px;padding-top:10px">
                         <div style="font-size:12px;color:#666;margin-bottom:4px">Phenomenon overrides</div>
-                        <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.4">
-                            Per-chat calendar ranges layered over the mathematical forecast. Use these for deliberate anomalies such as a three-day Blood Moon. Blue Moon remains calendar-detected and cannot be assigned here.
+                        <div style="font-size:11px;color:#999;margin-bottom:8px;line-height:1.45">
+                            Choose a moon, choose a phenomenon, then enter the date as <strong>Year / Month / Day</strong>. Use the same start and end date for a one-day override. Blue Moon remains calendar-detected and cannot be assigned here.
                         </div>
                         <div id="nwst-moon-overrides-list" style="margin-bottom:8px"></div>
-                        <div class="nwst-btn-row">
+                        <div class="nwst-btn-row nwst-moon-actions">
                             <button type="button" class="menu_button nwst-btn" id="nwst-setting-addMoonOverride" style="font-size:11px;padding:3px 9px">+ Add Override</button>
                             <button type="button" class="menu_button nwst-btn" id="nwst-setting-saveMoonOverrides" style="font-size:11px;padding:3px 9px">💾 Save Overrides</button>
                         </div>
@@ -358,23 +372,47 @@ export function buildSettingsTab() {
 
                     <template id="nwst-moon-override-tpl">
                         <div class="nwst-moon-override-entry" style="padding:8px;margin-bottom:7px;border-radius:6px;background:var(--dark1,rgba(0,0,0,0.04));border:0.5px solid var(--SmartThemeBorderColor,#444)">
-                            <div style="display:flex;align-items:center;gap:7px;margin-bottom:7px">
-                                <input type="checkbox" class="nwst-moon-override-enabled" checked title="Enable this override">
-                                <select class="nwst-moon-override-moon" style="min-width:110px;flex:0 1 150px"></select>
-                                <select class="nwst-moon-override-type" style="min-width:150px;flex:1"></select>
+                            <div class="nwst-moon-override-header">
+                                <label class="nwst-moon-override-enabled-wrap" title="Enable this override">
+                                    <input type="checkbox" class="nwst-moon-override-enabled" checked>
+                                    <span>Enabled</span>
+                                </label>
                                 <button type="button" class="menu_button nwst-moon-override-remove" style="font-size:11px;padding:1px 6px;color:#c33" title="Remove override">✕</button>
                             </div>
-                            <input type="text" class="nwst-moon-override-custom" placeholder="Custom phenomenon label" style="display:none;width:100%;margin-bottom:7px;box-sizing:border-box">
-                            <div style="display:grid;grid-template-columns:auto repeat(3,minmax(52px,1fr));gap:5px;align-items:center;margin-bottom:5px;font-size:11px">
-                                <span style="color:#888">Start</span>
-                                <input type="number" class="nwst-moon-override-start-year" placeholder="Year">
-                                <input type="number" class="nwst-moon-override-start-month" min="1" placeholder="Month">
-                                <input type="number" class="nwst-moon-override-start-day" min="1" placeholder="Day">
-                                <span style="color:#888">End</span>
-                                <input type="number" class="nwst-moon-override-end-year" placeholder="Year">
-                                <input type="number" class="nwst-moon-override-end-month" min="1" placeholder="Month">
-                                <input type="number" class="nwst-moon-override-end-day" min="1" placeholder="Day">
+                            <div class="nwst-moon-override-field">
+                                <div class="nwst-moon-override-label">Moon</div>
+                                <select class="nwst-moon-override-moon"></select>
                             </div>
+                            <div class="nwst-moon-override-field">
+                                <div class="nwst-moon-override-label">Phenomenon</div>
+                                <select class="nwst-moon-override-type"></select>
+                            </div>
+                            <input type="text" class="nwst-moon-override-custom" placeholder="Custom phenomenon label" style="display:none;width:100%;margin-bottom:7px;box-sizing:border-box">
+                            <div class="nwst-moon-override-date-wrap">
+                                <div class="nwst-moon-override-date-block">
+                                    <div class="nwst-moon-override-label">Start date</div>
+                                    <div class="nwst-moon-override-date-head"><span>Year</span><span>Month</span><span>Day</span></div>
+                                    <div class="nwst-moon-override-date-row">
+                                        <input type="number" class="nwst-moon-override-start-year" placeholder="YYYY">
+                                        <input type="number" class="nwst-moon-override-start-month" min="1" placeholder="MM">
+                                        <input type="number" class="nwst-moon-override-start-day" min="1" placeholder="DD">
+                                    </div>
+                                </div>
+                                <div class="nwst-moon-override-date-block">
+                                    <div class="nwst-moon-override-label">End date</div>
+                                    <div class="nwst-moon-override-date-head"><span>Year</span><span>Month</span><span>Day</span></div>
+                                    <div class="nwst-moon-override-date-row">
+                                        <input type="number" class="nwst-moon-override-end-year" placeholder="YYYY">
+                                        <input type="number" class="nwst-moon-override-end-month" min="1" placeholder="MM">
+                                        <input type="number" class="nwst-moon-override-end-day" min="1" placeholder="DD">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="nwst-moon-override-quick-actions">
+                                <button type="button" class="menu_button nwst-moon-override-use-current">Use Current Day</button>
+                                <button type="button" class="menu_button nwst-moon-override-copy-start">Make End = Start</button>
+                            </div>
+                            <div class="nwst-moon-override-help">Example: Year 1, Month 1, Day 1 = 1 / 1 / 1. For a one-day anomaly, make End date match Start date.</div>
                             <input type="text" class="nwst-moon-override-description" placeholder="Optional tooltip / anomaly description" style="width:100%;box-sizing:border-box">
                         </div>
                     </template>
@@ -413,12 +451,13 @@ export function buildSettingsTab() {
                     <div style="margin-bottom:12px;padding:10px;border:0.5px solid var(--SmartThemeBorderColor,#444);border-radius:6px">
                         <div style="font-size:12px;color:#666;margin-bottom:5px">Calendar system</div>
                         <select id="nwst-setting-calendarSystem" style="width:100%;margin-bottom:6px">
-                            <option value="standard">Standard / solar — fixed configured month lengths</option>
-                            <option value="lunisolar">East Asian lunisolar — dynamic 29/30-day months + intercalary months</option>
+                            <option value="gregorian">Gregorian — real-world month lengths and weekdays</option>
+                            <option value="lunisolar">Lunisolar — dynamic 29/30-day months + intercalary months</option>
+                            <option value="custom">Custom — configured month lengths, names, and weekdays</option>
                         </select>
                         <div id="nwst-lunisolar-settings" style="display:none;margin-top:8px">
                             <div style="font-size:11px;color:#888;line-height:1.45;margin-bottom:7px">
-                                Uses the 12 configured month names as base months. NWST supplies each year's 29/30-day layout and inserts an intercalary month when needed. This is a reusable East-Asian lunisolar engine, not a scholarly reconstruction of every historical calendar method.
+                                Uses the 12 configured month names as base months. NWST supplies each year's 29/30-day layout and inserts an intercalary month when needed. This is a reusable lunisolar engine, not a scholarly reconstruction of every historical calendar method.
                             </div>
                             <div style="display:flex;align-items:center;gap:8px">
                                 <div style="font-size:11px;color:#888;white-space:nowrap">Intercalary month label</div>
@@ -672,7 +711,7 @@ export function buildSettingsTab() {
                     <div class="nwst-setting-row">
                         <div>
                             <div class="nwst-setting-label">Inject upcoming events</div>
-                            <div class="nwst-setting-sub">Immediate, this week, this month, undetermined — resolved and missed events excluded</div>
+                            <div class="nwst-setting-sub">Immediate, this week, this month, narratively timed — resolved and missed events excluded</div>
                         </div>
                         <label class="nwst-toggle">
                             <input type="checkbox" id="nwst-setting-injectEvents" checked>
@@ -733,7 +772,7 @@ export function buildSettingsTab() {
                     <div class="nwst-setting-row">
                         <div>
                             <div class="nwst-setting-label">Event validity review on day advance</div>
-                            <div class="nwst-setting-sub">After each day advancement, one Planning LLM call reviews event validity (queued for Keep / Mark Resolved / Mark Missed), reassesses undated-event urgency, proposes timing when an Undetermined event gains a concrete schedule, and—if enabled above—queues concluded events holding concealed knowledge for promotion review. Still one extra API call per day advance, skipped when there is nothing to review.</div>
+                            <div class="nwst-setting-sub">After each day advancement, one Planning LLM call reviews event validity (queued for Keep / Mark Resolved / Mark Missed), reassesses undated-event urgency, proposes timing when a Narratively Timed event gains a concrete schedule, and—if enabled above—queues concluded events holding concealed knowledge for promotion review. Still one extra API call per day advance, skipped when there is nothing to review.</div>
                         </div>
                         <label class="nwst-toggle">
                             <input type="checkbox" id="nwst-setting-eventValidityReview" checked>
@@ -745,18 +784,16 @@ export function buildSettingsTab() {
                         <select id="nwst-setting-placement" style="width:180px;flex-shrink:0">
                             <option value="before_main">Before Main Prompt / Story String</option>
                             <option value="after_main">After Main Prompt / Story String</option>
-                            <option value="top_an">Top of Author's Note</option>
-                            <option value="bottom_an">Bottom of Author's Note</option>
                             <option value="at_depth">Inject at Depth</option>
                         </select>
                     </div>
                     <div class="nwst-setting-row" id="nwst-depth-row" style="display:none">
                         <div>
                             <div class="nwst-setting-label">Depth</div>
-                            <div class="nwst-setting-sub">Number of messages from the bottom</div>
+                            <div class="nwst-setting-sub">In-chat depth: 0 = newest message, up to 999 messages back</div>
                         </div>
                         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-                            <input type="number" id="nwst-setting-depth" value="2" min="0" max="99" style="width:52px;text-align:center">
+                            <input type="number" id="nwst-setting-depth" value="2" min="0" max="999" style="width:52px;text-align:center">
                             <select id="nwst-setting-depthRole" style="width:90px">
                                 <option value="system">System</option>
                                 <option value="user">User</option>
@@ -779,6 +816,73 @@ export function buildSettingsTab() {
             </div>
         </div>
 
+
+        <!-- ── Hidden Intentions ─────────────────────────────── -->
+        <div class="nwst-accordion-section">
+            <div class="nwst-accordion-header" data-accordion="nwst-accordion-hidden-intentions">
+                <div class="nwst-accordion-header-left">
+                    <span class="nwst-accordion-title">Hidden intentions</span>
+                    <span class="nwst-experimental-badge">Experimental</span>
+                </div>
+                <span class="nwst-accordion-arrow">▶</span>
+            </div>
+            <div class="nwst-accordion-body" id="nwst-accordion-hidden-intentions">
+                <div class="nwst-card">
+                    <div style="font-size:11px;color:#999;margin-bottom:12px;line-height:1.5">
+                        Maintains compact, evidence-grounded NPC objectives, active plans, commitments, ongoing priorities, contingencies, and emerging interests in the Notebook. These records are never injected directly. Generation creates new records; reconciliation only maintains records that already exist.
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Enable Hidden Intentions</div><div class="nwst-setting-sub">Disabling preserves existing records but stops automatic scans and downstream use.</div></div>
+                        <label class="nwst-toggle"><input type="checkbox" id="nwst-hi-enabled"><span class="nwst-slider"></span></label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Message cadence</div><div class="nwst-setting-sub">Minimum messages between dirty-gated reconciliations of existing records. Automatic cadence does not generate new intentions.</div></div>
+                        <div style="display:flex;align-items:center;gap:6px"><input type="number" id="nwst-hi-cadence" min="5" max="200" value="30" style="width:58px;text-align:center"><span style="font-size:12px;color:#666">msgs</span></div>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Minimum messages</div><div class="nwst-setting-sub">Warmup floor before automatic reconciliation can begin after records exist.</div></div>
+                        <input type="number" id="nwst-hi-minimum" min="1" max="200" value="20" style="width:58px;text-align:center">
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Cooldown</div><div class="nwst-setting-sub">Minimum messages after a successful Hidden Intentions operation before automatic reconciliation may run again.</div></div>
+                        <div style="display:flex;align-items:center;gap:6px"><input type="number" id="nwst-hi-cooldown" min="0" max="200" value="15" style="width:58px;text-align:center"><span style="font-size:12px;color:#666">msgs</span></div>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Narrative scan range</div><div class="nwst-setting-sub">Maximum recent messages considered before actor-centered filtering narrows the packet.</div></div>
+                        <div style="display:flex;align-items:center;gap:6px"><input type="number" id="nwst-hi-scan-range" min="8" max="100" value="40" style="width:58px;text-align:center"><span style="font-size:12px;color:#666">msgs</span></div>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Reconcile on day advancement</div><div class="nwst-setting-sub">Runs after date, events, world conditions, and compaction update, before world-event top-up.</div></div>
+                        <label class="nwst-toggle"><input type="checkbox" id="nwst-hi-day-advance"><span class="nwst-slider"></span></label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Maximum actors per scan</div><div class="nwst-setting-sub">Prioritizes dirty actors, existing record owners, immediate event participants, and recent cast.</div></div>
+                        <input type="number" id="nwst-hi-max-actors" min="1" max="10" value="4" style="width:58px;text-align:center">
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Current working set per actor</div><div class="nwst-setting-sub">Up to five current records across all types. Stronger later intentions can park weaker generated records; parked, resolved, abandoned, and stale history does not consume a slot. Manual, locked, and pending-review records are protected.</div></div>
+                        <input type="number" id="nwst-hi-max-active" min="1" max="5" value="5" style="width:58px;text-align:center">
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Contingencies per actor</div><div class="nwst-setting-sub">Conditional plans are capped separately.</div></div>
+                        <input type="number" id="nwst-hi-max-contingencies" min="0" max="4" value="1" style="width:58px;text-align:center">
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Review new intentions</div><div class="nwst-setting-sub">New model-created records remain Pending Review until accepted. Lifecycle updates to existing records still apply automatically.</div></div>
+                        <label class="nwst-toggle"><input type="checkbox" id="nwst-hi-review-new"><span class="nwst-slider"></span></label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Automatic-add confidence</div><div class="nwst-setting-sub">When review is off, additions below this confidence are discarded.</div></div>
+                        <select id="nwst-hi-auto-confidence" style="width:120px"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
+                    </div>
+                    <div class="nwst-btn-row" style="margin-top:10px;flex-wrap:wrap">
+                        <button class="menu_button nwst-btn" id="nwst-hi-generate-now" title="Create new grounded Hidden Intention records from the recent visible-message window. At five active records, a clearly stronger candidate may park the weakest eligible generated record; manual, locked, and pending-review records are protected.">✨ Generate new intentions</button>
+                        <button class="menu_button nwst-btn" id="nwst-hi-reconcile-now" title="Review only existing records for progress, blocking, revision, completion, abandonment, or staleness. Does not create new records.">🔄 Reconcile existing</button>
+                        <button class="menu_button nwst-btn" id="nwst-hi-debug-report">📋 Status report</button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- ── Secrets Engine (prose-based scoring) ─────────────── -->
         <div class="nwst-accordion-section">
@@ -867,18 +971,18 @@ export function buildSettingsTab() {
                     </div>
                     <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
                         <input type="text" id="nwst-secret-pc-name" placeholder="User/PC canonical name (e.g. Mira)" style="font-size:12px">
-                        <input type="text" id="nwst-secret-pc-aliases" placeholder="PC aliases, comma-separated (e.g. Mira Rowan)" style="font-size:12px">
+                        <input type="text" id="nwst-secret-pc-aliases" placeholder="PC aliases, comma-separated (e.g. Mira Vale)" style="font-size:12px">
                         <button class="menu_button nwst-btn" id="nwst-secret-pc-save" style="font-size:11px;padding:3px 9px;align-self:flex-start">Save PC identity</button>
                     </div>
 
                     <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#888;margin:16px 0 6px">Alias manager</div>
                     <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.4">
-                        Collapse the different ways a character is named in prose down to one canonical name. The engine auto-detects names from your secrets and communities, but you can add aliases it can't infer (e.g. "The Silver Fox" → Rowan). Pretty names show in the UI; matching happens internally.
+                        Collapse the different ways a character is named in prose down to one canonical identity. Manual groups are editable in place. The live automatic registry below shows what NWST inferred from Secrets, events, communities, Hidden Intentions, and PC identity. Auto-detected groups can be made editable or deleted; deleted groups are persistently blacklisted until restored.
                     </div>
                     <div id="nwst-alias-list" style="margin-bottom:10px"></div>
                     <div style="display:flex;flex-direction:column;gap:6px">
-                        <input type="text" id="nwst-alias-canonical" placeholder="Canonical name (e.g. Rowan)" style="font-size:12px">
-                        <input type="text" id="nwst-alias-variants" placeholder="Aliases, comma-separated (e.g. The Silver Fox, Captain, Rowan Vale)" style="font-size:12px">
+                        <input type="text" id="nwst-alias-canonical" placeholder="Canonical name (e.g. Alden)" style="font-size:12px">
+                        <input type="text" id="nwst-alias-variants" placeholder="Aliases, comma-separated (e.g. Captain, The Warden, Alden Reed)" style="font-size:12px">
                         <button class="menu_button nwst-btn" id="nwst-alias-add" style="font-size:11px;padding:3px 9px;align-self:flex-start">+ Add alias group</button>
                     </div>
                 </div>
@@ -896,7 +1000,7 @@ export function buildSettingsTab() {
             <div class="nwst-accordion-body" id="nwst-accordion-batchscan">
                 <div class="nwst-card">
                     <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
-                        Scan your full chat history to generate an initial world state. Creates a current day entry, populates the event horizon, fills active world conditions, seeds the notebook, and groups any detected communities. Runs once — does not overwrite existing data.
+                        Scan your full chat history to generate an initial world state. Creates a current day entry, populates the event horizon, fills active world conditions, seeds the notebook, groups detected communities, then runs dedicated Hidden Intentions generation for the highest-priority NPCs. Additional eligible actors remain queued for later cadence. Runs once — does not overwrite existing data.
                     </div>
                     <button class="menu_button nwst-btn" id="nwst-setting-batchScan" style="font-size:11px;padding:3px 9px">Run batch scan</button>
                     <span id="nwst-batchScan-spinner" style="display:none;margin-left:8px;" class="nwst-spinner"></span>
@@ -943,12 +1047,20 @@ export function buildSettingsTab() {
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-secrets">🔍 Scan for secrets</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-communities">👥 Scan for communities</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-scan-worldstate">🌍 Scan world state</button>
-                    <button class="menu_button nwst-btn-debug" id="nwst-debug-review-participants" title="Use the Planning LLM to review all events and add participants where missing">🔎 Review event participants</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-generate-hidden-intentions" title="Backfill Hidden Intentions into an older chat. Chronological segments are checkpointed transactionally. Actor rosters and large narrative ranges are proactively batched before GLM can choke, recovery retries are logged by cause, each segment has a 12-call safety ceiling, and final lifecycle cleanup is local with zero additional LLM calls. Interrupted or paused work resumes from the saved checkpoint.">🧱 Debug Backfill Hidden Intentions</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-pause-hidden-intentions" title="Request a safe pause after the current in-flight request or transactional segment. Completed segments remain saved; Debug Backfill resumes from the same checkpoint.">⏸️ Pause Backfill</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-repair-hidden-intentions" title="Audit and repair the stored Hidden Intentions locally: clear obsolete next actions, correct reinforcement timestamps, normalize lifecycle contradictions, repair wording contamination, and reassign unmistakable character-card/title records to the actual NPC while preserving distinct intentions. Only strict duplicates may merge. Uses zero LLM calls and saves an undo backup first.">🧹 Audit & Repair Intentions</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-undo-repair-hidden-intentions" title="Restore the complete Hidden Intentions ledger and runtime state saved immediately before the last manual repair. Uses zero LLM calls.">↩️ Undo Last Repair</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-reconcile-hidden-intentions" title="Force a broad LLM maintenance pass over existing Hidden Intentions only. This uses API credits; use Audit & Repair first for mechanical state cleanup.">🔄 Debug Reconcile Hidden Intentions</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-clear-hidden-intentions" title="Delete every Hidden Intention in this chat and reset all Hidden Intentions cadence, backfill checkpoints, counters, actor caches, cooldowns, and diagnostics. Does not affect other Notebook data.">🗑️ Clear All Hidden Intentions</button>
+                    <button class="menu_button nwst-btn-debug" id="nwst-debug-review-participants" title="Use the Planning LLM to review every event, remove incorrect participants, add missing direct participants, and flag NPC events that still have no named actor">🔎 Review event participants</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-secrets-report" title="Show the secrets scoring report — scene context, per-secret scores, and inject/skip reasons">📊 Secrets scoring report</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-run-sidecar" title="Run the secrets sidecar scene analyzer now (uses one API call)">🔬 Run sidecar now</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-consistency-scan" title="Deep scan: reads ALL visible chat messages against every secret and applies updates — characters who learned a secret are moved to Who Knows, revealed secrets are flagged for archive review, contradictions are noted. One API call; long chats mean a large prompt.">🩺 Consistency scan (visible)</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-backfill-anchors" title="Generate trigger anchors for secrets that don't have them yet (one Planning LLM call per secret)">🏷️ Generate missing anchors</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-reconcile-event-tiers" title="Immediately recalculate every dated or timer-anchored active event against Current Day, move it to the correct rolling horizon, and sort each tier chronologically. No API calls.">🗓️ Reconcile Event Tiers</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-assign-weather-profile" title="Use the Planning LLM to analyze the active Setting Context and create + activate a new Weather Profile for this chat.">🌦️ Assign Weather Profile</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-backfill-weather-hazards" title="Use one Planning LLM call to classify Regional Hazards for every existing Weather Profile in this chat. Preserves climate, terrain, notes, overrides, active systems, and history.">🌐 Backfill Regional Hazards</button>
                 </div>
                 <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--SmartThemeBorderColor,#ddd)">
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
@@ -1132,7 +1244,7 @@ function populateCalendarConfigUI() {
     setCheckbox('nwst-setting-enableCalendarConfig', config.enabled);
 
     const systemSelect = document.getElementById('nwst-setting-calendarSystem');
-    if (systemSelect) systemSelect.value = isLunisolarCalendar(config) ? 'lunisolar' : 'standard';
+    if (systemSelect) systemSelect.value = ['gregorian','lunisolar','custom'].includes(config.calendarSystem) ? config.calendarSystem : 'gregorian';
     const leapLabelInput = document.getElementById('nwst-setting-lunisolarLeapLabel');
     if (leapLabelInput) leapLabelInput.value = config.lunisolar?.leapMonthLabel || 'Intercalary {month}';
 
@@ -1171,22 +1283,30 @@ function currentCalendarYearForConfig(config) {
 
 function applyCalendarSystemUIState(config = getCalendarConfig(getChatId())) {
     const lunisolar = isLunisolarCalendar(config);
+    const gregorian = config?.calendarSystem === 'gregorian';
     const monthCountInput = document.getElementById('nwst-setting-monthCount');
     if (monthCountInput) {
-        if (lunisolar) monthCountInput.value = 12;
-        monthCountInput.disabled = lunisolar;
-        monthCountInput.title = lunisolar ? 'Lunisolar calendars use 12 base months; intercalary months are inserted automatically.' : '';
+        if (lunisolar || gregorian) monthCountInput.value = 12;
+        monthCountInput.disabled = lunisolar || gregorian;
+        monthCountInput.title = lunisolar
+            ? 'Lunisolar calendars use 12 base months; intercalary months are inserted automatically.'
+            : (gregorian ? 'Gregorian calendars use the fixed 12-month real-world structure.' : '');
     }
 
     const lunisolarWrap = document.getElementById('nwst-lunisolar-settings');
     if (lunisolarWrap) lunisolarWrap.style.display = lunisolar ? 'block' : 'none';
 
     const leapToggle = document.getElementById('nwst-setting-leapYears');
-    if (leapToggle) leapToggle.disabled = lunisolar;
+    if (leapToggle) {
+        leapToggle.disabled = lunisolar || gregorian;
+        if (gregorian) leapToggle.checked = true;
+    }
     const leapNote = document.getElementById('nwst-leap-years-note');
     if (leapNote) leapNote.textContent = lunisolar
         ? 'Not used in lunisolar mode — year-specific 29/30-day months and intercalary months handle calendar alignment instead.'
-        : 'Adds a leap day (Feb 29th) in real-world leap years. Also applies to custom calendars that mirror the real structure (12 months with a 28-day second month); other shapes never leap.';
+        : (gregorian
+            ? 'Gregorian leap-year behavior is automatic.'
+            : 'Adds a leap day in real-world leap years only when the Custom calendar mirrors Gregorian structure (12 months with a 28-day second month).');
 }
 
 function translateDateAcrossCalendarSystems(date, oldConfig, newConfig) {
@@ -1358,7 +1478,8 @@ function renderCalendarMonthsList() {
     if (!template) return;
 
     const lunisolar = isLunisolarCalendar(config);
-    const baseMonthCount = lunisolar ? 12 : config.months;
+    const gregorian = config.calendarSystem === 'gregorian';
+    const baseMonthCount = (lunisolar || gregorian) ? 12 : config.months;
     const year = currentCalendarYearForConfig(config);
     const layout = lunisolar ? calendarMonthLayoutFor(config, year) : [];
     const regularLengths = new Map(
@@ -1378,8 +1499,10 @@ function renderCalendarMonthsList() {
         indexSpan.textContent = `${i + 1}.`;
         nameInput.value = config.monthNames[i] || `Month ${i + 1}`;
         daysInput.value = lunisolar ? (regularLengths.get(i + 1) || 29) : (config.monthDays[i] || 30);
-        daysInput.disabled = lunisolar;
-        daysInput.title = lunisolar ? `Automatically calculated for calendar year ${formatYear(year)}.` : '';
+        nameInput.disabled = gregorian;
+        nameInput.title = gregorian ? 'Gregorian month names are fixed. Use Custom for editable names.' : '';
+        daysInput.disabled = lunisolar || gregorian;
+        daysInput.title = lunisolar ? `Automatically calculated for calendar year ${formatYear(year)}.` : (gregorian ? 'Gregorian month lengths are fixed.' : '');
         if (daysLabel && lunisolar) daysLabel.textContent = 'days (auto)';
 
         // Keep display names live-saved as before. Fixed day counts are only
@@ -1689,6 +1812,9 @@ function renderCalendarDaysList() {
 
         indexSpan.textContent = `${i + 1}.`;
         nameInput.value = config.weekDays[i] || `Day ${i + 1}`;
+        const gregorian = config.calendarSystem === 'gregorian';
+        nameInput.disabled = gregorian;
+        nameInput.title = gregorian ? 'Gregorian weekday names are fixed. Use Custom for editable weekdays.' : '';
 
         // Wire live updates to store
         const updateDay = async () => {
@@ -1754,35 +1880,136 @@ async function renderAliasList() {
     const container = document.getElementById('nwst-alias-list');
     if (!container) return;
     try {
-        const { getManualAliases } = await import('../data/aliasRegistry.js');
-        const groups = getManualAliases(getChatId());
-        if (!groups || groups.length === 0) {
-            container.innerHTML = '<div style="font-size:11px;color:#999;font-style:italic">No manual aliases yet.</div>';
-            return;
-        }
+        const aliasModule = await import('../data/aliasRegistry.js');
+        const chatId = getChatId();
+        const groups = aliasModule.getManualAliases(chatId);
+        const blacklistedGroups = aliasModule.getAutoAliasBlacklist(chatId);
+        const registry = aliasModule.buildAliasRegistry(chatId);
+        const autoGroups = registry.allEntities()
+            .filter(entity => !(entity.kinds || []).includes('manual'))
+            .filter(entity => (entity.aliases || []).some(alias => alias !== entity.canonical))
+            .sort((a, b) => String(a.display || a.canonical).localeCompare(String(b.display || b.canonical)));
+
         let html = '';
-        for (const g of groups) {
-            const aliasStr = (g.aliases || []).filter(a => a !== g.canonical).join(', ');
-            html += `
-            <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:0.5px solid var(--SmartThemeBorderColor,#444)">
-                <div style="flex:1">
-                    <div style="font-size:12px;font-weight:500">${escapeHtmlLocal(g.display || g.canonical)}</div>
-                    <div style="font-size:11px;color:#999">${escapeHtmlLocal(aliasStr || '(no extra aliases)')}</div>
-                </div>
-                <button class="menu_button nwst-btn-danger nwst-alias-remove" data-canonical="${escapeHtmlLocal(g.canonical)}" style="font-size:11px;padding:2px 8px;flex-shrink:0">Remove</button>
-            </div>`;
+        html += `<div style="font-size:11px;font-weight:600;color:#bbb;margin-bottom:6px">Editable manual groups (${groups.length})</div>`;
+        if (!groups.length) {
+            html += '<div style="font-size:11px;color:#999;font-style:italic;margin-bottom:10px">No manual aliases yet.</div>';
+        } else {
+            for (const g of groups) {
+                const aliasStr = (g.aliases || []).join(', ');
+                html += `
+                <div class="nwst-alias-manual-card" data-canonical="${escapeHtmlLocal(g.canonical)}" style="padding:7px 0;border-bottom:0.5px solid var(--SmartThemeBorderColor,#444)">
+                    <input type="text" class="nwst-alias-edit-display" value="${escapeHtmlLocal(g.display || g.canonical)}" placeholder="Canonical display name" style="width:100%;font-size:12px;margin-bottom:5px">
+                    <input type="text" class="nwst-alias-edit-variants" value="${escapeHtmlLocal(aliasStr)}" placeholder="Aliases, comma-separated" style="width:100%;font-size:11px;margin-bottom:5px">
+                    <div class="nwst-btn-row" style="gap:5px">
+                        <button class="menu_button nwst-btn nwst-alias-save" style="font-size:10px;padding:2px 8px">Save changes</button>
+                        <button class="menu_button nwst-btn-danger nwst-alias-remove" style="font-size:10px;padding:2px 8px">Remove</button>
+                        <span style="font-size:10px;color:#777;margin-left:auto">Internal ID: ${escapeHtmlLocal(g.canonical)}</span>
+                    </div>
+                </div>`;
+            }
         }
+
+        html += `<details style="margin-top:10px"${autoGroups.length ? '' : ''}>
+            <summary style="font-size:11px;font-weight:600;color:#bbb;cursor:pointer">Auto-detected alias groups (${autoGroups.length})</summary>
+            <div style="font-size:10px;color:#888;line-height:1.4;margin:6px 0 8px">Live registry derived from Secrets holders, event participants, communities, Hidden Intention actors, and the configured PC identity. Delete permanently suppresses a generated group from this chat; it can be restored from the blacklist below.</div>`;
+        if (!autoGroups.length) {
+            html += '<div style="font-size:11px;color:#999;font-style:italic">No automatic multi-name groups detected yet.</div>';
+        } else {
+            for (const entity of autoGroups) {
+                const aliases = (entity.aliases || []).filter(alias => alias !== entity.canonical).join(', ');
+                const kinds = (entity.kinds || []).join(', ') || 'character';
+                html += `<div class="nwst-alias-auto-card" data-auto-canonical="${escapeHtmlLocal(entity.canonical)}" style="display:flex;align-items:flex-start;gap:7px;padding:6px 0;border-bottom:0.5px solid var(--SmartThemeBorderColor,#444)">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:12px;font-weight:500">${escapeHtmlLocal(entity.display || entity.canonical)}</div>
+                        <div style="font-size:11px;color:#999;overflow-wrap:anywhere">${escapeHtmlLocal(aliases || '(no alternate aliases)')}</div>
+                        <div style="font-size:10px;color:#777">Source types: ${escapeHtmlLocal(kinds)}</div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:5px;flex-shrink:0">
+                        <button class="menu_button nwst-btn nwst-alias-promote-auto" style="font-size:10px;padding:2px 7px" title="Create a manual group from this live automatic entry so you can add or correct aliases">Make editable</button>
+                        <button class="menu_button nwst-btn-danger nwst-alias-delete-auto" style="font-size:10px;padding:2px 7px" title="Delete and blacklist this auto-detected group so it does not regenerate">Delete</button>
+                    </div>
+                </div>`;
+            }
+        }
+        html += '</details>';
+
+        html += `<details style="margin-top:10px">
+            <summary style="font-size:11px;font-weight:600;color:#bbb;cursor:pointer">Blacklisted auto groups (${blacklistedGroups.length})</summary>
+            <div style="font-size:10px;color:#888;line-height:1.4;margin:6px 0 8px">Deleted automatic groups remain suppressed even when their source names are still present elsewhere in NWST. Restore removes the suppression and lets the registry detect the group again.</div>`;
+        if (!blacklistedGroups.length) {
+            html += '<div style="font-size:11px;color:#999;font-style:italic">No auto-detected alias groups are blacklisted.</div>';
+        } else {
+            for (const entry of blacklistedGroups) {
+                const aliases = (entry.aliases || []).filter(alias => alias !== entry.canonical).join(', ');
+                html += `<div class="nwst-alias-blacklist-card" data-blacklist-id="${escapeHtmlLocal(entry.id)}" style="display:flex;align-items:flex-start;gap:7px;padding:6px 0;border-bottom:0.5px solid var(--SmartThemeBorderColor,#444)">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:12px;font-weight:500">${escapeHtmlLocal(entry.display || entry.canonical)}</div>
+                        <div style="font-size:11px;color:#999;overflow-wrap:anywhere">${escapeHtmlLocal(aliases || '(no alternate aliases recorded)')}</div>
+                    </div>
+                    <button class="menu_button nwst-btn nwst-alias-restore-auto" style="font-size:10px;padding:2px 7px;flex-shrink:0">Restore</button>
+                </div>`;
+            }
+        }
+        html += '</details>';
         container.innerHTML = html;
+
+        container.querySelectorAll('.nwst-alias-save').forEach(btn => {
+            btn.onclick = async function () {
+                const card = this.closest('.nwst-alias-manual-card');
+                const canonical = card?.getAttribute('data-canonical');
+                const display = (card?.querySelector('.nwst-alias-edit-display')?.value || '').trim();
+                const variants = splitTagInput(card?.querySelector('.nwst-alias-edit-variants')?.value || '');
+                if (!canonical || !display) { nwstToast('Canonical display name cannot be blank.', 'warning'); return; }
+                await aliasModule.updateManualAlias(chatId, canonical, display, variants);
+                await renderAliasList();
+                nwstToast(`Alias group "${display}" updated.`, 'success');
+            };
+        });
         container.querySelectorAll('.nwst-alias-remove').forEach(btn => {
             btn.onclick = async function () {
-                const canonical = this.getAttribute('data-canonical');
-                const { removeManualAlias } = await import('../data/aliasRegistry.js');
-                await removeManualAlias(getChatId(), canonical);
-                renderAliasList();
+                const canonical = this.closest('.nwst-alias-manual-card')?.getAttribute('data-canonical');
+                if (!canonical) return;
+                await aliasModule.removeManualAlias(chatId, canonical);
+                await renderAliasList();
                 nwstToast('Alias group removed.', 'info');
             };
         });
+        container.querySelectorAll('.nwst-alias-promote-auto').forEach(btn => {
+            btn.onclick = async function () {
+                const canonical = this.closest('.nwst-alias-auto-card')?.getAttribute('data-auto-canonical');
+                const entity = registry.allEntities().find(item => item.canonical === canonical);
+                if (!entity) return;
+                const variants = (entity.aliases || []).filter(alias => alias !== entity.canonical);
+                await aliasModule.addManualAlias(chatId, entity.display || entity.canonical, variants);
+                await renderAliasList();
+                nwstToast(`Created an editable alias group for "${entity.display || entity.canonical}".`, 'success');
+            };
+        });
+        container.querySelectorAll('.nwst-alias-delete-auto').forEach(btn => {
+            btn.onclick = async function () {
+                const canonical = this.closest('.nwst-alias-auto-card')?.getAttribute('data-auto-canonical');
+                const entity = registry.allEntities().find(item => item.canonical === canonical);
+                if (!entity) return;
+                const label = entity.display || entity.canonical;
+                const confirmed = window.confirm(`Delete and blacklist the auto-detected alias group "${label}"?\n\nNWST will stop regenerating this group until you restore it from the blacklist.`);
+                if (!confirmed) return;
+                await aliasModule.blacklistAutoAliasGroup(chatId, entity);
+                await renderAliasList();
+                nwstToast(`Auto-detected alias group "${label}" blacklisted.`, 'success');
+            };
+        });
+        container.querySelectorAll('.nwst-alias-restore-auto').forEach(btn => {
+            btn.onclick = async function () {
+                const blacklistId = this.closest('.nwst-alias-blacklist-card')?.getAttribute('data-blacklist-id');
+                if (!blacklistId) return;
+                await aliasModule.restoreAutoAliasGroup(chatId, blacklistId);
+                await renderAliasList();
+                nwstToast('Auto-detected alias group restored.', 'success');
+            };
+        });
     } catch (e) {
+        console.error('[NWST Settings] Could not render alias registry:', e);
         container.innerHTML = '<div style="font-size:11px;color:#999">Could not load aliases.</div>';
     }
 }
@@ -1819,6 +2046,40 @@ function weatherEventOptions(selected = '') {
     );
     opts.push(`<option value="custom" ${selected === 'custom' ? 'selected' : ''}>⚠️ Custom</option>`);
     return opts.join('');
+}
+
+
+function regionalHazardLevelOptions(selected = 'neutral') {
+    return Object.entries(REGIONAL_HAZARD_LEVELS).map(([value, meta]) =>
+        `<option value="${value}" ${value === selected ? 'selected' : ''}>${escapeHtmlLocal(meta.label)}</option>`
+    ).join('');
+}
+
+function renderRegionalHazards(profile) {
+    const container = document.getElementById('nwst-weather-regional-hazards');
+    if (!container) return;
+    if (!profile) {
+        container.innerHTML = '<div class="nwst-setting-sub">Select or create a Weather Profile first.</div>';
+        return;
+    }
+    const hazards = normalizeRegionalHazards(profile.regionalHazards);
+    container.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px">${Object.entries(WEATHER_EVENT_DEFS).map(([eventId, def]) => `
+        <label style="display:flex;align-items:center;gap:7px;padding:6px 7px;border:0.5px solid var(--SmartThemeBorderColor,#444);border-radius:6px;background:var(--dark1,rgba(0,0,0,0.04))">
+            <span style="flex:1;font-size:11px;line-height:1.25">${escapeHtmlLocal(def.icon + ' ' + def.label)}</span>
+            <select class="nwst-weather-hazard-level" data-event-id="${escapeHtmlLocal(eventId)}" style="width:98px;font-size:11px;padding:3px 5px">${regionalHazardLevelOptions(hazards[eventId])}</select>
+        </label>`).join('')}</div>`;
+}
+
+function collectRegionalHazardsIntoProfile(profile) {
+    if (!profile) return;
+    const current = normalizeRegionalHazards(profile.regionalHazards);
+    document.querySelectorAll('.nwst-weather-hazard-level').forEach(select => {
+        const eventId = String(select.dataset.eventId || '');
+        if (Object.prototype.hasOwnProperty.call(current, eventId)) current[eventId] = select.value || 'neutral';
+    });
+    profile.regionalHazards = normalizeRegionalHazards(current);
+    profile.regionalHazardsSource = 'manual';
+    profile.regionalHazardsUpdatedAt = Date.now();
 }
 
 function renderWeatherOverrides(profile) {
@@ -1936,6 +2197,7 @@ function renderWeatherProfileUI() {
         else if (!p.activeSystem) status.textContent = `Profile: ${p.name} — ${profileSummary(p) || 'no climate/terrain tags yet'} · no severe weather active.`;
         else status.textContent = `Profile: ${p.name} · ${p.activeSystem.icon || '⚠️'} ${p.activeSystem.severity} ${p.activeSystem.label}`;
     }
+    renderRegionalHazards(p);
     renderWeatherOverrides(p);
 }
 
@@ -1961,6 +2223,26 @@ function populateSettingsUI() {
 
     const freqInput = document.getElementById('nwst-setting-scanFrequency');
     if (freqInput) freqInput.value = getScanFrequency();
+
+
+    const hi = getHiddenIntentionsConfig();
+    setCheckbox('nwst-hi-enabled', hi.enabled);
+    setCheckbox('nwst-hi-day-advance', hi.dayAdvancement);
+    setCheckbox('nwst-hi-review-new', hi.reviewNewIntentions);
+    const hiValues = {
+        'nwst-hi-cadence': hi.cadence,
+        'nwst-hi-minimum': hi.minimumMessages,
+        'nwst-hi-cooldown': hi.cooldownMessages,
+        'nwst-hi-scan-range': hi.scanRange,
+        'nwst-hi-max-actors': hi.maxActorsPerScan,
+        'nwst-hi-max-active': hi.maxActivePerActor,
+        'nwst-hi-max-contingencies': hi.maxContingenciesPerActor
+    };
+    for (const [id, value] of Object.entries(hiValues)) {
+        const el = document.getElementById(id); if (el) el.value = value;
+    }
+    const hiConfidence = document.getElementById('nwst-hi-auto-confidence');
+    if (hiConfidence) hiConfidence.value = hi.autoAddConfidence;
 
     // Moon cycle (per-chat)
     const moonConfig = getMoonConfig(getChatId());
@@ -2161,6 +2443,8 @@ function renderMoonOverridesList() {
         const custom = row.querySelector('.nwst-moon-override-custom');
         const description = row.querySelector('.nwst-moon-override-description');
         const remove = row.querySelector('.nwst-moon-override-remove');
+        const useCurrent = row.querySelector('.nwst-moon-override-use-current');
+        const copyStart = row.querySelector('.nwst-moon-override-copy-start');
 
         enabled.checked = override.enabled !== false;
         moonSelect.innerHTML = '<option value="all">All moons</option>' + moons.map(m => `<option value="${escapeHtmlLocal(m.id)}">${escapeHtmlLocal(m.name)}</option>`).join('');
@@ -2179,6 +2463,23 @@ function renderMoonOverridesList() {
 
         typeSelect.addEventListener('change', () => {
             custom.style.display = typeSelect.value === '__custom__' ? 'block' : 'none';
+        });
+        useCurrent?.addEventListener('click', () => {
+            const date = currentOverrideDate();
+            if (!date) {
+                nwstToast('Set or repair the Current Day date first.', 'warning');
+                return;
+            }
+            for (const prefix of ['start', 'end']) {
+                row.querySelector(`.nwst-moon-override-${prefix}-year`).value = date.year;
+                row.querySelector(`.nwst-moon-override-${prefix}-month`).value = date.month;
+                row.querySelector(`.nwst-moon-override-${prefix}-day`).value = date.day;
+            }
+        });
+        copyStart?.addEventListener('click', () => {
+            row.querySelector('.nwst-moon-override-end-year').value = row.querySelector('.nwst-moon-override-start-year').value;
+            row.querySelector('.nwst-moon-override-end-month').value = row.querySelector('.nwst-moon-override-start-month').value;
+            row.querySelector('.nwst-moon-override-end-day').value = row.querySelector('.nwst-moon-override-start-day').value;
         });
         remove.addEventListener('click', async () => {
             const current = getMoonPhenomenonOverrides(chatId);
@@ -2252,7 +2553,8 @@ function populateConnectionProfileDropdowns() {
         { id: 'nwst-setting-planningLLM', profileKey: 'planningLLM' },
         { id: 'nwst-setting-dayAdvancementLLM', profileKey: 'dayAdvancementLLM' },
         { id: 'nwst-setting-narrativeConsistencyLLM', profileKey: 'narrativeConsistencyLLM' },
-        { id: 'nwst-setting-secretsSidecarLLM', profileKey: 'secretsSidecarLLM' }
+        { id: 'nwst-setting-secretsSidecarLLM', profileKey: 'secretsSidecarLLM' },
+        { id: 'nwst-setting-hiddenIntentionsLLM', profileKey: 'hiddenIntentionsLLM', allowPlanningInheritance: true }
     ];
 
     // Get connection profiles from ST's connection manager
@@ -2272,7 +2574,9 @@ function populateConnectionProfileDropdowns() {
         if (!select) continue;
 
         // Clear and add default option
-        select.innerHTML = '<option value="">— Not configured (feature disabled) —</option>';
+        select.innerHTML = dd.allowPlanningInheritance
+            ? '<option value="__planning__">— Use Planning LLM —</option><option value="">— Not configured (feature disabled) —</option>'
+            : '<option value="">— Not configured (feature disabled) —</option>';
 
         // Add each connection profile as an option
         for (const profile of profiles) {
@@ -2301,6 +2605,7 @@ function renderNoThinkRows() {
         dayAdvancementLLM: 'Day advancement',
         narrativeConsistencyLLM: 'Narrative consistency',
         secretsSidecarLLM: 'Secrets sidecar',
+        hiddenIntentionsLLM: 'Hidden intentions',
     };
     const conns = getConnectionProfiles() || {};
     const softMap = (getSetting('noThinkProfiles') && typeof getSetting('noThinkProfiles') === 'object') ? getSetting('noThinkProfiles') : {};
@@ -2308,7 +2613,8 @@ function renderNoThinkRows() {
 
     container.innerHTML = '';
     for (const roleKey of Object.keys(roleLabels)) {
-        const pid = conns[roleKey] || '';
+        const configuredPid = conns[roleKey] || '';
+        const pid = (roleKey === 'hiddenIntentionsLLM' && configuredPid === '__planning__') ? (conns.planningLLM || '') : configuredPid;
         const row = document.createElement('div');
         row.style.cssText = 'display:flex;align-items:center;gap:14px;padding:5px 0;border-bottom:0.5px solid #2a2a2a';
         const label = pid ? roleLabels[roleKey] : `${roleLabels[roleKey]} <span style="color:#a66">(no profile)</span>`;
@@ -2435,10 +2741,7 @@ async function capturePreSettingRefreshSnapshot(options = {}) {
         const eventsModule = await import('../data/events.js');
         if (!isActiveSettingsChat(chatId)) return null;
         payload.eventsSnapshot = cloneForContextSnapshot(eventsModule.getAllEvents(chatId) || []);
-        const ctx = SillyTavern.getContext();
-        payload.pendingEventsSnapshot = cloneForContextSnapshot(
-            Array.isArray(ctx.chatMetadata['nwst:pendingEvents']) ? ctx.chatMetadata['nwst:pendingEvents'] : []
-        );
+        payload.pendingEventsSnapshot = cloneForContextSnapshot(getChatData(chatId, 'pendingEvents') || []);
     }
 
     const activeSetting = currentSettingLibrary.profiles.find(p => p.id === currentSettingLibrary.activeProfileId);
@@ -2482,15 +2785,19 @@ async function restoreContextProfileSnapshot(snapshotId) {
 
     const payload = snapshot.payload || {};
     try {
+        // Build the entire restoration first and commit it once. Sequential
+        // saves could leave half-restored state when any later write failed.
+        const { getAllChatData, setAllChatData } = await import('../data/storage.js');
+        const restoreBundle = getAllChatData(chatId);
         if (payload.settingContextProfilesSnapshot) {
-            await saveSettingContextProfiles(chatId, cloneForContextSnapshot(payload.settingContextProfilesSnapshot));
+            restoreBundle.settingContextProfiles = cloneForContextSnapshot(payload.settingContextProfilesSnapshot);
         }
         if (payload.weatherProfilesSnapshot) {
-            await saveWeatherProfilesState(chatId, cloneForContextSnapshot(payload.weatherProfilesSnapshot));
+            restoreBundle.weatherProfiles = cloneForContextSnapshot(payload.weatherProfilesSnapshot);
         }
 
         if (payload.environmentSnapshot || payload.conditionsSnapshot) {
-            const ws = getWorldState(chatId);
+            const ws = cloneForContextSnapshot(restoreBundle.worldState || getWorldState(chatId));
             if (payload.environmentSnapshot) {
                 ws.currentDay = {
                     ...ws.currentDay,
@@ -2501,20 +2808,17 @@ async function restoreContextProfileSnapshot(snapshotId) {
             if (payload.conditionsSnapshot) {
                 ws.conditions = cloneForContextSnapshot(payload.conditionsSnapshot);
             }
-            await saveWorldState(chatId, ws);
+            restoreBundle.worldState = ws;
         }
 
         if (payload.eventsSnapshot) {
-            const eventsModule = await import('../data/events.js');
-            if (!isActiveSettingsChat(chatId)) return;
-            await eventsModule.saveAllEvents(chatId, cloneForContextSnapshot(payload.eventsSnapshot));
+            restoreBundle.events = cloneForContextSnapshot(payload.eventsSnapshot);
         }
         if (payload.pendingEventsSnapshot) {
-            if (!isActiveSettingsChat(chatId)) return;
-            const ctx = SillyTavern.getContext();
-            ctx.chatMetadata['nwst:pendingEvents'] = cloneForContextSnapshot(payload.pendingEventsSnapshot);
-            await ctx.saveMetadata();
+            restoreBundle.pendingEvents = cloneForContextSnapshot(payload.pendingEventsSnapshot);
         }
+        if (!isActiveSettingsChat(chatId)) return;
+        await setAllChatData(chatId, restoreBundle);
 
         renderSettingContextProfileUI();
         renderWeatherProfileUI();
@@ -2611,7 +2915,8 @@ async function refreshSettingDependentState(options = {}) {
                 const active = event?.status === 'pending' || event?.status === 'inprogress';
                 const generatedWorld = event?.isNPC === false && event?.origin === 'generated';
                 const specialDay = Boolean(event?.sourceSpecialDayId) || event?.origin === 'special_day';
-                return !(active && generatedWorld && !specialDay);
+                const persistent = event?.tier === 'persistent';
+                return !(active && generatedWorld && !specialDay && !persistent);
             });
             const removedCount = allEvents.length - keptEvents.length;
 
@@ -2619,14 +2924,10 @@ async function refreshSettingDependentState(options = {}) {
             // suppress replacement ideas as duplicates. If generation fails or
             // produces nothing, restore them and keep the active old events too.
             if (!isActiveSettingsChat(chatId)) return false;
-            const ctx = SillyTavern.getContext();
-            const pendingBefore = Array.isArray(ctx.chatMetadata['nwst:pendingEvents'])
-                ? [...ctx.chatMetadata['nwst:pendingEvents']]
-                : [];
-            const keptPending = pendingBefore.filter(event => !(event?.isNPC === false && event?.origin === 'generated'));
+            const pendingBefore = getChatData(chatId, 'pendingEvents') || [];
+            const keptPending = pendingBefore.filter(event => !(event?.isNPC === false && event?.origin === 'generated' && event?.tier !== 'persistent'));
             if (keptPending.length !== pendingBefore.length) {
-                ctx.chatMetadata['nwst:pendingEvents'] = keptPending;
-                await ctx.saveMetadata();
+                await setChatData(chatId, 'pendingEvents', keptPending);
             }
 
             const { regenerateAllWorldEvents } = await import('../llm/eventGen.js');
@@ -2638,8 +2939,7 @@ async function refreshSettingDependentState(options = {}) {
                 // The old generated proposals were hidden only to keep stale-setting
                 // duplicates out of the replacement prompt. Never lose them on error.
                 if (keptPending.length !== pendingBefore.length) {
-                    ctx.chatMetadata['nwst:pendingEvents'] = pendingBefore;
-                    await ctx.saveMetadata();
+                    await setChatData(chatId, 'pendingEvents', pendingBefore);
                 }
                 throw generationErr;
             }
@@ -2648,8 +2948,7 @@ async function refreshSettingDependentState(options = {}) {
                 nwstToast(`Setting refresh removed ${removedCount} old generated world event(s) and proposed ${proposed} replacement(s) for review.`, 'success');
             } else {
                 if (keptPending.length !== pendingBefore.length) {
-                    ctx.chatMetadata['nwst:pendingEvents'] = pendingBefore;
-                    await ctx.saveMetadata();
+                    await setChatData(chatId, 'pendingEvents', pendingBefore);
                 }
                 nwstToast('No replacement world-event proposals were generated, so the existing generated world events were preserved.', 'warning');
             }
@@ -2750,6 +3049,7 @@ function wireSettingsEvents() {
     wireSelect('nwst-setting-dayAdvancementLLM', (val) => { setConnectionProfile('dayAdvancementLLM', val); renderNoThinkRows(); });
     wireSelect('nwst-setting-narrativeConsistencyLLM', (val) => { setConnectionProfile('narrativeConsistencyLLM', val); renderNoThinkRows(); });
     wireSelect('nwst-setting-secretsSidecarLLM', (val) => { setConnectionProfile('secretsSidecarLLM', val); renderNoThinkRows(); });
+    wireSelect('nwst-setting-hiddenIntentionsLLM', (val) => { setConnectionProfile('hiddenIntentionsLLM', val); renderNoThinkRows(); });
 
     // ── Scan frequency ───────────────────────────────────────────
     wireInput('nwst-setting-scanMinimumMessages', (val) => {
@@ -2777,6 +3077,46 @@ function wireSettingsEvents() {
     wireInput('nwst-setting-scanFrequency', (val) => {
         const num = parseInt(val, 10);
         if (num >= 1 && num <= 100) setScanFrequency(num);
+    });
+
+
+    wireCheckbox('nwst-hi-enabled', (checked) => setHiddenIntentionsConfigValue('enabled', checked));
+    wireCheckbox('nwst-hi-day-advance', (checked) => setHiddenIntentionsConfigValue('dayAdvancement', checked));
+    wireCheckbox('nwst-hi-review-new', (checked) => setHiddenIntentionsConfigValue('reviewNewIntentions', checked));
+    wireInput('nwst-hi-cadence', (val) => setHiddenIntentionsConfigValue('cadence', Math.max(5, parseInt(val, 10) || 30)));
+    wireInput('nwst-hi-minimum', (val) => setHiddenIntentionsConfigValue('minimumMessages', Math.max(1, parseInt(val, 10) || 20)));
+    wireInput('nwst-hi-cooldown', (val) => setHiddenIntentionsConfigValue('cooldownMessages', Math.max(0, parseInt(val, 10) || 0)));
+    wireInput('nwst-hi-scan-range', (val) => setHiddenIntentionsConfigValue('scanRange', Math.max(8, Math.min(100, parseInt(val, 10) || 40))));
+    wireInput('nwst-hi-max-actors', (val) => setHiddenIntentionsConfigValue('maxActorsPerScan', Math.max(1, Math.min(10, parseInt(val, 10) || 4))));
+    wireInput('nwst-hi-max-active', (val) => setHiddenIntentionsConfigValue('maxActivePerActor', Math.max(1, Math.min(5, parseInt(val, 10) || 5))));
+    wireInput('nwst-hi-max-contingencies', (val) => setHiddenIntentionsConfigValue('maxContingenciesPerActor', Math.max(0, Math.min(4, parseInt(val, 10) || 0))));
+    wireSelect('nwst-hi-auto-confidence', (val) => setHiddenIntentionsConfigValue('autoAddConfidence', ['low','medium','high'].includes(val) ? val : 'medium'));
+
+    const hiGenerateNow = document.getElementById('nwst-hi-generate-now');
+    if (hiGenerateNow) hiGenerateNow.addEventListener('click', async () => {
+        hiGenerateNow.disabled = true; const original = hiGenerateNow.textContent; hiGenerateNow.textContent = '⏳ Generating...';
+        try {
+            const { runHiddenIntentionsGenerate } = await import('../llm/hiddenIntentions.js');
+            await runHiddenIntentionsGenerate({ trigger: 'manual_generate', expectedChatId: getChatId(), force: true });
+        } finally {
+            hiGenerateNow.disabled = false; hiGenerateNow.textContent = original;
+        }
+    });
+    const hiReconcileNow = document.getElementById('nwst-hi-reconcile-now');
+    if (hiReconcileNow) hiReconcileNow.addEventListener('click', async () => {
+        hiReconcileNow.disabled = true; const original = hiReconcileNow.textContent; hiReconcileNow.textContent = '⏳ Reconciling...';
+        try {
+            const { runHiddenIntentionsReconcile } = await import('../llm/hiddenIntentions.js');
+            await runHiddenIntentionsReconcile({ trigger: 'manual_reconcile', expectedChatId: getChatId(), force: true });
+        } finally {
+            hiReconcileNow.disabled = false; hiReconcileNow.textContent = original;
+        }
+    });
+    const hiReport = document.getElementById('nwst-hi-debug-report');
+    if (hiReport) hiReport.addEventListener('click', async () => {
+        const { getHiddenIntentionsDebugReport } = await import('../llm/hiddenIntentions.js');
+        const ctx = SillyTavern.getContext();
+        await ctx.callGenericPopup(`<pre style="white-space:pre-wrap;text-align:left">${escapeHtmlLocal(getHiddenIntentionsDebugReport(getChatId()))}</pre>`, ctx.POPUP_TYPE.TEXT, '', { okButton: 'Close', cancelButton: false, wide: true });
     });
 
     // ── Moon cycle (per-chat) ─────────────────────────────────
@@ -3018,12 +3358,16 @@ function wireSettingsEvents() {
     }
 
     // ── Severe Weather / Weather Profiles ───────────────────────
+    const refreshWeatherHome = () => {
+        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
+    };
     const weatherEnabled = document.getElementById('nwst-weather-enabled');
     if (weatherEnabled) weatherEnabled.addEventListener('change', async () => {
         const state = getWeatherProfilesState(getChatId());
         state.enabled = weatherEnabled.checked;
         await saveWeatherProfilesState(getChatId(), state);
         renderWeatherProfileUI();
+        refreshWeatherHome();
         if (weatherEnabled.checked && !state.activeProfileId) {
             nwstToast('Severe Weather is enabled, but no Weather Profile is selected. Create one manually or analyze Setting Context.', 'warning');
         }
@@ -3064,6 +3408,7 @@ function wireSettingsEvents() {
         await upsertWeatherProfile(chatId, p, { activate: true });
         await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Weather Profile created');
         renderWeatherProfileUI();
+        refreshWeatherHome();
     });
 
     const weatherAnalyze = document.getElementById('nwst-weather-analyze-setting');
@@ -3076,10 +3421,34 @@ function wireSettingsEvents() {
             await analyzeSettingContextToWeatherProfile(chatId, { activate: true });
             await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Weather Profile generated');
             renderWeatherProfileUI();
+            refreshWeatherHome();
         } catch (e) {
             console.error('[NWST WeatherProfile] Analysis failed:', e);
             nwstToast(`Weather Profile analysis failed: ${e.message}`, 'error');
         } finally { weatherAnalyze.disabled = false; }
+    });
+
+    const weatherAnalyzeHazards = document.getElementById('nwst-weather-analyze-hazards');
+    if (weatherAnalyzeHazards) weatherAnalyzeHazards.addEventListener('click', async () => {
+        const chatId = getChatId();
+        const active = getActiveWeatherProfile(chatId);
+        if (!active) { nwstToast('Create or select a Weather Profile first.', 'warning'); return; }
+        weatherAnalyzeHazards.disabled = true;
+        const original = weatherAnalyzeHazards.textContent;
+        weatherAnalyzeHazards.textContent = '⏳ Analyzing...';
+        try {
+            const beforeState = getWeatherProfilesState(chatId);
+            await analyzeRegionalHazardsForProfiles(chatId, { profileIds: [active.id], silent: true });
+            await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Regional Hazards analyzed');
+            renderWeatherProfileUI();
+            nwstToast(`Regional Hazards analyzed for ${active.name}.`, 'success');
+        } catch (err) {
+            console.error('[NWST WeatherProfile] Regional Hazards analysis failed:', err);
+            nwstToast(`Regional Hazards analysis failed: ${err.message}`, 'error');
+        } finally {
+            weatherAnalyzeHazards.textContent = original;
+            weatherAnalyzeHazards.disabled = false;
+        }
     });
 
     const weatherDuplicate = document.getElementById('nwst-weather-duplicate-profile');
@@ -3096,6 +3465,7 @@ function wireSettingsEvents() {
         await upsertWeatherProfile(chatId, copy, { activate: true });
         await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Weather Profile duplicated');
         renderWeatherProfileUI();
+        refreshWeatherHome();
     });
 
     const weatherDelete = document.getElementById('nwst-weather-delete-profile');
@@ -3123,9 +3493,11 @@ function wireSettingsEvents() {
         p.terrain = splitTagInput(document.getElementById('nwst-weather-terrain')?.value);
         p.characteristics = splitTagInput(document.getElementById('nwst-weather-characteristics')?.value);
         p.notes = document.getElementById('nwst-weather-notes')?.value?.trim() || '';
+        collectRegionalHazardsIntoProfile(p);
         await collectWeatherOverridesIntoState(state);
         await saveWeatherProfilesState(getChatId(), state);
         renderWeatherProfileUI();
+        refreshWeatherHome();
         nwstToast('Weather Profile saved.', 'success');
     });
 
@@ -3149,6 +3521,7 @@ function wireSettingsEvents() {
         });
         await saveWeatherProfilesState(getChatId(), state);
         renderWeatherProfileUI();
+        refreshWeatherHome();
     });
 
     const weatherClear = document.getElementById('nwst-weather-clear-system');
@@ -3249,7 +3622,7 @@ function wireSettingsEvents() {
     // ── Depth and role ───────────────────────────────────────────
     wireInput('nwst-setting-depth', (val) => {
         const num = parseInt(val, 10);
-        if (num >= 0 && num <= 99) setInjectionSetting('depth', num);
+        if (num >= 0 && num <= 999) setInjectionSetting('depth', num);
     });
     wireSelect('nwst-setting-depthRole', (val) => setInjectionSetting('depthRole', val));
 
@@ -3274,6 +3647,7 @@ function wireSettingsEvents() {
             const chatId = getChatId();
             if (!chatId) { nwstToast('No active chat.', 'error'); return; }
             const config = getSeasonConfig(chatId);
+            const selectedMode = document.getElementById('nwst-setting-seasonMode')?.value || config.mode;
             // Find a reasonable default start day (after the last band's end + 1)
             let defaultStart = 0;
             let defaultEnd = 30;
@@ -3460,8 +3834,9 @@ function wireSettingsEvents() {
             // elapsedStoryDays is recalculated from Starting Date -> Current Date
             // and duration markers are rebased so existing event ages stay intact.
             const cur = getCurrentDay(chatId);
-            // A default dayCount alone does not mean the chat has a canonical
-            // Current Day yet. Fresh chats must stay on the direct setup path.
+            // A fresh NWST state still carries the default dayCount of 1.
+            // That alone must not trigger the late-entry rebase path, because
+            // there is no canonical Current Day to parse yet.
             const hasCurrentDate = typeof cur?.dateDisplay === 'string' && cur.dateDisplay.trim().length > 0;
             const tracking = hasCurrentDate && Number.isInteger(cur.dayCount) && cur.dayCount > 0;
             let currentDateForRebase = null;
@@ -3508,7 +3883,8 @@ function wireSettingsEvents() {
 
             // Preserve legacy anchor metadata for backward compatibility. The
             // anchor's calendar position is also the initial seasonal day count
-            // for a fresh chat so Season Configuration is immediately aligned.
+            // for a fresh chat; previously a confirmed Starting Date could leave
+            // Season Configuration stranded at Day 0 until warmup ran.
             const anchorDayCount = dayOfYearFor(parsed, cfg);
             const anchor = { ...parsed, anchorDayCount, source: 'user', locked: true };
             await saveStartDate(chatId, anchor);
@@ -3517,13 +3893,16 @@ function wireSettingsEvents() {
                 await rebaseElapsedStoryDays(chatId, elapsedForRebase);
             }
 
-            // dayCount is the current cyclical position in the calendar year,
-            // not elapsed duration. Fresh chats start at the Starting Date;
-            // already-tracking chats keep their later canonical Current Day.
+            // dayCount represents the CURRENT cyclical position in the calendar
+            // year, not elapsed days since the Starting Date. On a fresh chat the
+            // Starting Date is the current position. On a chat already tracking a
+            // later Current Day, derive it from that date instead so entering the
+            // baseline never rewinds the season.
             const seasonalDate = tracking ? currentDateForRebase : parsed;
             const seasonalDayCount = dayOfYearFor(seasonalDate, cfg);
+            const activeSeasonConfig = getSeasonConfig(chatId);
             const { computeSeason } = await import('../llm/dayAdvancement.js');
-            const computedSeason = computeSeason(seasonalDayCount, getSeasonConfig(chatId));
+            const computedSeason = computeSeason(seasonalDayCount, activeSeasonConfig);
             const seasonalUpdate = { dayCount: seasonalDayCount, dayCountAutoSet: true };
             if (computedSeason) seasonalUpdate.season = computedSeason;
             await updateCurrentDay(chatId, seasonalUpdate);
@@ -3532,7 +3911,8 @@ function wireSettingsEvents() {
             populateSeasonConfigUI();
             if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home');
             const seasonNote = computedSeason ? ` · ${computedSeason}` : '';
-            nwstToast(`Starting date saved: ${interpreted}. Seasonal day count: ${seasonalDayCount}${seasonNote}.`, 'success');
+            const seasonClockNote = `Seasonal day count: ${seasonalDayCount}`;
+            nwstToast(`Starting date saved: ${interpreted}. ${seasonClockNote}${seasonNote}.`, 'success');
         });
     }
 
@@ -3548,11 +3928,19 @@ function wireSettingsEvents() {
                 getSetting('dateFormatDMY') === true
             );
             const config = getCalendarConfig(chatId);
-            config.calendarSystem = calendarSystemSelect.value === 'lunisolar' ? 'lunisolar' : 'standard';
+            config.calendarSystem = ['gregorian','lunisolar','custom'].includes(calendarSystemSelect.value) ? calendarSystemSelect.value : 'gregorian';
             config.lunisolar = {
                 engine: 'east_asian',
                 leapMonthLabel: document.getElementById('nwst-setting-lunisolarLeapLabel')?.value?.trim() || config.lunisolar?.leapMonthLabel || 'Intercalary {month}'
             };
+            if (config.calendarSystem === 'gregorian') {
+                config.months = 12;
+                config.monthNames = [...DEFAULT_CALENDAR_CONFIG.monthNames];
+                config.monthDays = [...DEFAULT_CALENDAR_CONFIG.monthDays];
+                config.weekDays = [...DEFAULT_CALENDAR_CONFIG.weekDays];
+                config.leapYears = true;
+                config.eraName = '';
+            }
             if (config.calendarSystem === 'lunisolar') {
                 config.months = 12;
                 while (config.monthNames.length < 12) config.monthNames.push(`Month ${config.monthNames.length + 1}`);
@@ -3663,15 +4051,25 @@ function wireSettingsEvents() {
             // Read current values from DOM
             const monthEntries = document.querySelectorAll('#nwst-calendar-months-list .nwst-month-entry');
             const config = getCalendarConfig(chatId);
-            config.calendarSystem = document.getElementById('nwst-setting-calendarSystem')?.value === 'lunisolar' ? 'lunisolar' : 'standard';
+            config.calendarSystem = ['gregorian','lunisolar','custom'].includes(document.getElementById('nwst-setting-calendarSystem')?.value) ? document.getElementById('nwst-setting-calendarSystem').value : 'gregorian';
             config.lunisolar = {
                 engine: 'east_asian',
                 leapMonthLabel: document.getElementById('nwst-setting-lunisolarLeapLabel')?.value?.trim() || config.lunisolar?.leapMonthLabel || 'Intercalary {month}'
             };
             const preservedMonthDays = Array.isArray(config.monthDays) ? [...config.monthDays] : [];
-            config.monthNames = [];
+            const gregorianMode = config.calendarSystem === 'gregorian';
+            if (gregorianMode) {
+                config.months = 12;
+                config.monthNames = [...DEFAULT_CALENDAR_CONFIG.monthNames];
+                config.monthDays = [...DEFAULT_CALENDAR_CONFIG.monthDays];
+                config.weekDays = [...DEFAULT_CALENDAR_CONFIG.weekDays];
+                config.leapYears = true;
+                config.eraName = '';
+            } else {
+                config.monthNames = [];
+            }
             if (!isLunisolarCalendar(config)) config.monthDays = [];
-            monthEntries.forEach(entry => {
+            if (!gregorianMode) monthEntries.forEach(entry => {
                 const nameInput = entry.querySelector('.nwst-month-name-input');
                 const daysInput = entry.querySelector('.nwst-month-days-input');
                 if (nameInput) {
@@ -3784,7 +4182,7 @@ function wireSettingsEvents() {
                 monthNames: [...defaults.monthNames],
                 monthDays: [...defaults.monthDays],
                 weekDays: [...defaults.weekDays],
-                calendarSystem: 'standard',
+                calendarSystem: 'gregorian',
                 lunisolar: { ...defaults.lunisolar },
                 leapYears: defaults.leapYears !== false
             });
@@ -3830,6 +4228,50 @@ function wireSettingsEvents() {
     }
 
     // ── Import / Export All ──────────────────────────────────────
+    const runPostImportMigrations = async (chatId) => {
+        // Import can restore data produced by several older NWST schemas. Run
+        // the same repair chain used on startup/chat change immediately, so the
+        // imported chat is safe to use without requiring a reload.
+        const { ensureMoonConfigMigrated } = await import('../data/moons.js');
+        await ensureMoonConfigMigrated(chatId);
+        const { migrateEventData, cleanupPromotedConcludedEvents, reconcileEventTiers } = await import('../data/events.js');
+        await migrateEventData(chatId);
+        await cleanupPromotedConcludedEvents(chatId);
+        const { migrateTemporalState } = await import('../data/timeMigration.js');
+        await migrateTemporalState(chatId);
+        await reconcileEventTiers(chatId);
+        const { repairSecretKnowledgeIntegrity } = await import('../data/notebook.js');
+        await repairSecretKnowledgeIntegrity(chatId);
+        const { purgeUserCharacterIntentions } = await import('../llm/hiddenIntentions.js');
+        await purgeUserCharacterIntentions(chatId);
+    };
+
+    const syncRuntimeAfterImport = async () => {
+        // Global settings are live runtime controls, not just serialized data.
+        // Rebind the scanner from the imported per-chat checkpoint and make the
+        // header/prompt injection reflect imported enabled/pause settings now.
+        const { stopScanner, startScanner, freezeScannerCadence, resumeScannerCadence } = await import('../llm/scanner.js');
+        stopScanner();
+        if (getSetting('enabled')) {
+            if (getSetting('scanPaused')) {
+                await freezeScannerCadence();
+            } else {
+                await resumeScannerCadence();
+                startScanner();
+            }
+        }
+        const enableToggle = document.getElementById('nwst-enable-toggle');
+        if (enableToggle) enableToggle.checked = !!getSetting('enabled');
+        updateStatusLabel();
+        updatePauseButton();
+        try {
+            const { updateInjection } = await import('../inject/promptInjector.js');
+            updateInjection();
+        } catch (e) {
+            console.warn('[NWST Settings UI] Prompt refresh after import failed (non-fatal):', e);
+        }
+    };
+
     const importAllBtn = document.getElementById('nwst-setting-importAll');
     if (importAllBtn) {
         importAllBtn.addEventListener('click', async () => {
@@ -3837,19 +4279,13 @@ function wireSettingsEvents() {
                 const chatId = getChatId();
                 const success = await importAll(chatId, text);
                 if (success) {
-                    // Imported exports may predate cyclical dayCount / elapsed
-                    // duration bookkeeping. Migrate immediately so users do not
-                    // need to reload or switch chats before the imported state is
-                    // safe to use.
-                    const { migrateEventData } = await import('../data/events.js');
-                    await migrateEventData(chatId);
-                    const { migrateTemporalState } = await import('../data/timeMigration.js');
-                    await migrateTemporalState(chatId);
+                    await runPostImportMigrations(chatId);
+                    await syncRuntimeAfterImport();
                     populateSettingsUI();
                     if (typeof window?.nwstRefreshTabs === 'function') {
                         window.nwstRefreshTabs('home', 'events', 'world', 'notebook');
                     }
-                    nwstToast('Settings and chat data imported successfully. UI refreshed.', 'success');
+                    nwstToast('Settings and chat data imported successfully. Runtime and UI refreshed.', 'success');
                 } else {
                     nwstToast('Import failed — invalid or corrupt file. Check the console for details.', 'error');
                 }
@@ -3901,8 +4337,10 @@ function wireSettingsEvents() {
             const preservedWeatherProfiles = getWeatherProfilesState(chatId);
             preservedWeatherProfiles.profiles = preservedWeatherProfiles.profiles.map(p => ({ ...p, activeSystem: null, history: [] }));
 
-            // Stop the event-driven scanner before clearing so its in-memory
-            // cadence does not continue from data that no longer exists.
+            // Stop the event-driven scanner before clearing. Its persisted
+            // cadence state is deleted below, and restarting it afterward makes
+            // the current chat re-enter warmup from a clean boundary instead of
+            // continuing an in-memory cadence from the data that was just erased.
             let scannerModule = null;
             try {
                 scannerModule = await import('../llm/scanner.js');
@@ -3923,14 +4361,15 @@ function wireSettingsEvents() {
                 await saveWeatherProfilesState(chatId, preservedWeatherProfiles);
             }
 
-            // Restart only after preserved configuration is restored so the
-            // chat re-enters warmup from a genuinely clean boundary.
+            // Reinitialize scanner state only after all preserved configuration
+            // is back in place. Clear All must behave like a genuinely fresh chat.
             if (scannerModule && getSetting('enabled') && !getSetting('scanPaused')) {
                 scannerModule.startScanner();
             }
 
             nwstToast('All generated NWST data cleared for this chat. Scanner warmup was reset; Setting Context profiles, Weather Profiles, Season Config, and Calendar Config were preserved.', 'success');
-            // Refresh every tab so stale generated content disappears at once.
+            // Refresh every tab, not only Settings, so stale Current Day/events/
+            // notebook content disappears immediately from the visible panel.
             if (typeof window.nwstRefreshAllUI === 'function') {
                 window.nwstRefreshAllUI();
             } else {
@@ -4023,6 +4462,189 @@ function wireSettingsEvents() {
 
     // ── Debug buttons ─────────────────────────────────────────────────────
 
+    const debugGenerateIntentions = document.getElementById('nwst-debug-generate-hidden-intentions');
+    if (debugGenerateIntentions) {
+        debugGenerateIntentions.addEventListener('click', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            debugGenerateIntentions.disabled = true;
+            const original = debugGenerateIntentions.textContent;
+            debugGenerateIntentions.textContent = '⏳ Backfilling intentions...';
+            try {
+                const { runHiddenIntentionsBackfill, getHiddenIntentionsDebugReport } = await import('../llm/hiddenIntentions.js');
+                await runHiddenIntentionsBackfill({ expectedChatId: chatId, force: true });
+                dlog(`[NWST HiddenIntentions Debug Backfill]
+${getHiddenIntentionsDebugReport(chatId)}`);
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook', 'settings');
+            } catch (e) {
+                console.error('[NWST Settings] Hidden Intentions debug backfill failed:', e);
+                nwstToast('Hidden Intentions backfill failed. Completed chunks were preserved; check F12.', 'error');
+            } finally {
+                debugGenerateIntentions.disabled = false;
+                debugGenerateIntentions.textContent = original;
+            }
+        });
+    }
+
+
+    const debugPauseIntentions = document.getElementById('nwst-debug-pause-hidden-intentions');
+    if (debugPauseIntentions) {
+        debugPauseIntentions.addEventListener('click', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            try {
+                const { requestHiddenIntentionsBackfillPause } = await import('../llm/hiddenIntentions.js');
+                const requested = await requestHiddenIntentionsBackfillPause(chatId);
+                if (!requested) nwstToast('No Hidden Intentions backfill is currently running.', 'info');
+            } catch (e) {
+                console.error('[NWST Settings] Hidden Intentions pause request failed:', e);
+                nwstToast('Could not request a Hidden Intentions pause. Check F12.', 'error');
+            }
+        });
+    }
+
+    const debugRepairIntentions = document.getElementById('nwst-debug-repair-hidden-intentions');
+    if (debugRepairIntentions) {
+        debugRepairIntentions.addEventListener('click', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const { getHiddenIntentionsState, repairHiddenIntentions } = await import('../data/hiddenIntentions.js');
+            const state = getHiddenIntentionsState(chatId);
+            if (state.scanInProgress || state.backfillInProgress) {
+                nwstToast('Pause or finish the active Hidden Intentions operation before repairing its stored state.', 'warning');
+                return;
+            }
+            debugRepairIntentions.disabled = true;
+            const original = debugRepairIntentions.textContent;
+            debugRepairIntentions.textContent = '⏳ Repairing locally...';
+            try {
+                const report = await repairHiddenIntentions(chatId, { createBackup: true, source: 'manual_debug' });
+                nwstToast(`Hidden Intentions repair complete: ${report.changed}/${report.inspected} records changed, ${report.closedNextActionsCleared} stale next actions cleared, ${report.reinforcementTimestampsCorrected} reinforcement timestamps corrected, ${report.cardActorRecordsReassigned || 0} character-card record(s) reassigned, ${report.priorMergedCardRecordsRecovered || 0} previously merged record(s) restored, ${report.cardActorRecordsMerged || 0} strict duplicate(s) merged. 0 LLM calls.`, report.changed ? 'success' : 'info');
+                dlog(`[NWST HiddenIntentions Local Repair]\n${report.summary}`);
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook', 'settings');
+            } catch (e) {
+                console.error('[NWST Settings] Hidden Intentions local repair failed:', e);
+                nwstToast('Hidden Intentions local repair failed. The pre-repair backup was preserved; check F12.', 'error');
+            } finally {
+                debugRepairIntentions.disabled = false;
+                debugRepairIntentions.textContent = original;
+            }
+        });
+    }
+
+    const debugUndoRepairIntentions = document.getElementById('nwst-debug-undo-repair-hidden-intentions');
+    if (debugUndoRepairIntentions) {
+        debugUndoRepairIntentions.addEventListener('click', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const { getHiddenIntentionsState, getHiddenIntentionsRepairBackup, restoreHiddenIntentionsRepairBackup } = await import('../data/hiddenIntentions.js');
+            const state = getHiddenIntentionsState(chatId);
+            if (state.scanInProgress || state.backfillInProgress) {
+                nwstToast('Pause or finish the active Hidden Intentions operation before restoring a repair backup.', 'warning');
+                return;
+            }
+            const backup = getHiddenIntentionsRepairBackup(chatId);
+            if (!backup) { nwstToast('No Hidden Intentions repair backup is available for this chat.', 'info'); return; }
+            if (!window.confirm(`Restore the Hidden Intentions state saved before the last repair?\n\nBackup contains ${backup.intentions.length} record${backup.intentions.length === 1 ? '' : 's'}.`)) return;
+            debugUndoRepairIntentions.disabled = true;
+            try {
+                const result = await restoreHiddenIntentionsRepairBackup(chatId);
+                nwstToast(`Restored ${result.restored} Hidden Intention${result.restored === 1 ? '' : 's'} from the pre-repair backup.`, 'success');
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook', 'settings');
+            } catch (e) {
+                console.error('[NWST Settings] Hidden Intentions repair undo failed:', e);
+                nwstToast('Could not restore the Hidden Intentions repair backup. Check F12.', 'error');
+            } finally {
+                debugUndoRepairIntentions.disabled = false;
+            }
+        });
+    }
+
+    const debugClearIntentions = document.getElementById('nwst-debug-clear-hidden-intentions');
+    if (debugClearIntentions) {
+        debugClearIntentions.addEventListener('click', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            const {
+                getHiddenIntentions, getHiddenIntentionsState,
+                clearHiddenIntentions
+            } = await import('../data/hiddenIntentions.js');
+            const state = getHiddenIntentionsState(chatId);
+            if (state.scanInProgress || state.backfillInProgress) {
+                nwstToast('A Hidden Intentions operation is still running. Let it finish or pause before clearing so a late result cannot restore deleted records.', 'warning');
+                return;
+            }
+            const count = getHiddenIntentions(chatId).length;
+            const confirmed = window.confirm(
+                `Clear all ${count} Hidden Intention${count === 1 ? '' : 's'} for this chat?\n\n` +
+                'This also resets Hidden Intentions backfill checkpoints, cooldowns, actor caches, counters, and diagnostics. Other NWST Notebook data is not affected.'
+            );
+            if (!confirmed) return;
+            debugClearIntentions.disabled = true;
+            const original = debugClearIntentions.textContent;
+            debugClearIntentions.textContent = '⏳ Clearing intentions...';
+            try {
+                await clearHiddenIntentions(chatId);
+                const remaining = getHiddenIntentions(chatId).length;
+                const clearedState = getHiddenIntentionsState(chatId);
+                const stateReset = !clearedState.scanInProgress
+                    && !clearedState.backfillInProgress
+                    && !(clearedState.backfillSuccessfulSegments || []).length
+                    && !clearedState.backfillCompletedChunks
+                    && !clearedState.lastScannedActorIds?.length
+                    && !clearedState.cooldownUntilMessage;
+                if (remaining !== 0 || !stateReset) {
+                    throw new Error(`Clear verification failed: remaining=${remaining}, stateReset=${stateReset}`);
+                }
+                nwstToast(`Cleared ${count} Hidden Intention${count === 1 ? '' : 's'} and reset all Hidden Intentions debug/runtime state.`, 'success');
+                dlog('[NWST HiddenIntentions] Clear All verified: ledger empty and runtime state reset.');
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook', 'settings');
+                else if (typeof window?.nwstRefreshAllUI === 'function') window.nwstRefreshAllUI();
+            } catch (e) {
+                console.error('[NWST Settings] Clear All Hidden Intentions failed:', e);
+                nwstToast('Could not fully clear Hidden Intentions. Check F12; no success message was issued.', 'error');
+            } finally {
+                debugClearIntentions.disabled = false;
+                debugClearIntentions.textContent = original;
+            }
+        });
+    }
+
+    const debugReconcileIntentions = document.getElementById('nwst-debug-reconcile-hidden-intentions');
+    if (debugReconcileIntentions) {
+        debugReconcileIntentions.addEventListener('click', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            debugReconcileIntentions.disabled = true;
+            const original = debugReconcileIntentions.textContent;
+            debugReconcileIntentions.textContent = '⏳ Reconciling intentions...';
+            try {
+                const { markHiddenIntentionsDirty, runHiddenIntentionsReconcile, getHiddenIntentionsDebugReport } = await import('../llm/hiddenIntentions.js');
+                await markHiddenIntentionsDirty(chatId, [], 'Manual Debug reconciliation requested.', { worldDirty: true });
+                const result = await runHiddenIntentionsReconcile({ trigger: 'debug_reconcile', expectedChatId: chatId, force: true, broad: true });
+                if (result?.ran) {
+                    nwstToast(`Debug reconciliation complete: ${result.updated} record${result.updated === 1 ? '' : 's'} updated across ${result.actorsScanned} NPC${result.actorsScanned === 1 ? '' : 's'}.`, result.updated ? 'success' : 'info');
+                } else {
+                    nwstToast('Nothing to reconcile. Generate Hidden Intentions first.', 'info');
+                }
+                dlog(`[NWST HiddenIntentions Debug Reconcile]
+${getHiddenIntentionsDebugReport(chatId)}`);
+                if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('notebook');
+            } catch (e) {
+                console.error('[NWST Settings] Hidden Intentions debug reconciliation failed:', e);
+                nwstToast('Hidden Intentions debug reconciliation failed. Check F12.', 'error');
+            } finally {
+                debugReconcileIntentions.disabled = false;
+                debugReconcileIntentions.textContent = original;
+            }
+        });
+    }
 
     const clearContextSnapshotsBtn = document.getElementById('nwst-debug-clear-context-snapshots');
     if (clearContextSnapshotsBtn) {
@@ -4064,6 +4686,34 @@ function wireSettingsEvents() {
             } finally {
                 debugAssignWeather.textContent = original;
                 debugAssignWeather.disabled = false;
+            }
+        });
+    }
+
+    const debugBackfillWeatherHazards = document.getElementById('nwst-debug-backfill-weather-hazards');
+    if (debugBackfillWeatherHazards) {
+        debugBackfillWeatherHazards.addEventListener('click', async () => {
+            const chatId = getChatId();
+            const state = getWeatherProfilesState(chatId);
+            if (!state.profiles.length) {
+                nwstToast('No existing Weather Profiles to backfill.', 'warning');
+                return;
+            }
+            debugBackfillWeatherHazards.disabled = true;
+            const original = debugBackfillWeatherHazards.textContent;
+            debugBackfillWeatherHazards.textContent = '⏳ Backfilling...';
+            try {
+                const beforeState = getWeatherProfilesState(chatId);
+                const updated = await analyzeRegionalHazardsForProfiles(chatId, { silent: true });
+                await recordWeatherProfileChangeSnapshot(beforeState, getWeatherProfilesState(chatId), 'Regional Hazards backfilled');
+                renderWeatherProfileUI();
+                nwstToast(`Regional Hazards backfilled for ${updated.length} Weather Profile${updated.length === 1 ? '' : 's'}.`, 'success');
+            } catch (err) {
+                console.error('[NWST Debug] Regional Hazards backfill failed:', err);
+                nwstToast(`Regional Hazards backfill failed: ${err.message}`, 'error');
+            } finally {
+                debugBackfillWeatherHazards.textContent = original;
+                debugBackfillWeatherHazards.disabled = false;
             }
         });
     }
@@ -4228,9 +4878,9 @@ function wireSettingsEvents() {
                 const result = await reviewEventParticipants(chatId);
 
                 if (result.updated > 0) {
-                    nwstToast(`Added participants to ${result.updated} event(s).`, 'success');
+                    nwstToast(`Participant review updated ${result.updated} event(s).`, 'success');
                 } else if (result.reviewed > 0) {
-                    nwstToast('All events already have participants.', 'info');
+                    nwstToast(result.invalidNPC > 0 ? `${result.invalidNPC} NPC event(s) still need a named participant.` : 'Event participant lists are already complete.', result.invalidNPC > 0 ? 'warning' : 'info');
                 } else {
                     nwstToast('No events found to review.', 'info');
                 }
@@ -4525,16 +5175,22 @@ Analyze each secret carefully. Consider:
 
             const dayOfYear = dayOfYearFor({ year, month, day }, calendarConfig);
 
+            const seasonConfig = getSeasonConfig(chatId);
+            const { computeSeason } = await import('../llm/dayAdvancement.js');
+            const computedSeason = computeSeason(dayOfYear, seasonConfig);
+
             // Save immediately
-            await updateCurrentDay(chatId, { ...currentDay, dayCount: dayOfYear, dayCountAutoSet: true });
+            await updateCurrentDay(chatId, {
+                ...currentDay,
+                dayCount: dayOfYear,
+                ...(computedSeason ? { season: computedSeason } : {}),
+                dayCountAutoSet: true
+            });
 
             // Clear input for next use
             debugInput.value = '';
 
             // Provide season feedback
-            const { computeSeason } = await import('../llm/dayAdvancement.js');
-            const seasonConfig = getSeasonConfig(chatId);
-            const computedSeason = computeSeason(dayOfYear, seasonConfig);
             if (computedSeason) {
                 nwstToast(`Day count set to ${dayOfYear} (Month ${month}, Day ${day}). Season: ${computedSeason}.`, 'success');
             } else {

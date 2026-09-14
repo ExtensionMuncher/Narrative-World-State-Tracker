@@ -22,9 +22,9 @@ const ANCHOR_SYSTEM_PROMPT = `You assign trigger anchors to a roleplay secret. T
 
 RULES:
 - Anchors must be DISTINCTIVE to this secret. Prefer the secret's subject name and specific concepts/objects/places tied uniquely to it.
-- Prefer MULTI-WORD phrases over single common words. "courier work" and "east gate contact" are good; "tattoo" and "syndicate" alone are bad because they collide with innocent uses and shared themes.
+- Prefer MULTI-WORD phrases over single common words. "courier work" and "harbor affiliate" are good; "tattoo" and "syndicate" alone are bad because they collide with innocent uses and shared themes.
 - AVOID generic words (information, situation, behavior) and AVOID broad themes likely shared with other secrets.
-- Output ONLY a JSON array of strings. No prose, no markdown fences. Example: ["mara courier", "east gate contact", "debt settlement", "informant role"]`;
+- Output ONLY a JSON array of strings. No prose, no markdown fences. Example: ["harbor affiliate", "night courier", "debt settlement", "informant role"]`;
 
 /**
  * Generate anchors for a single secret via the Planning LLM.

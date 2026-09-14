@@ -68,6 +68,16 @@ export const SPECIAL_DAY_CATEGORIES = {
     custom:        { label: 'Custom',              chip: '📌' }
 };
 
+function inferSpecialDayParticipants(specialDay) {
+    const name = String(specialDay?.name || '').trim();
+    if (!name) return [];
+    const possessive = name.match(/^(.+?)[’']s\s+(?:birthday|anniversary|memorial|appointment|wedding|performance|deadline)\b/i);
+    if (possessive?.[1]) return [possessive[1].trim()];
+    const ofForm = name.match(/^(?:birthday|anniversary|memorial|appointment|wedding|performance)\s+(?:of|for)\s+(.+)$/i);
+    if (ofForm?.[1]) return [ofForm[1].trim()];
+    return [];
+}
+
 /** Resolve a stored category value to { label, chip }. Free text → custom chip with the text as label. */
 export function resolveSpecialDayCategory(category) {
     if (typeof category === 'string' && SPECIAL_DAY_CATEGORIES[category]) {
@@ -291,7 +301,8 @@ export async function materializeSpecialDays(chatId) {
             specialDayCategory: (typeof sd.category === 'string' && sd.category.trim()) ? sd.category.trim() : 'custom',
             sourceSpecialDayId: sd.id,
             occurrenceDay: occ.startDOY,
-            occurrenceKey: occ.occurrenceKey
+            occurrenceKey: occ.occurrenceKey,
+            participants: inferSpecialDayParticipants(sd)
         });
         created++;
         dlog(`[NWST SpecialDays] Materialized "${sd.name}" (${catInfo.label}) as ${tier}: ${scheduledDate}`);

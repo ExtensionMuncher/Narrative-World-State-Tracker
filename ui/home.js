@@ -174,22 +174,6 @@ export function buildHomeTab() {
             </div>
         </div>
 
-        <!-- ── Pending Events Review ──────────────────────────────── -->
-        <!-- Only shown when detected or generated event proposals await approval -->
-        <div id="nwst-pending-events-section" style="display:none;margin-bottom:10px">
-            <div class="nwst-lbl" style="margin-bottom:6px">
-                Pending event proposals
-                <span class="nwst-badge nwst-badge-week" id="nwst-pending-events-count" style="text-transform:none;letter-spacing:0;font-weight:400;margin-left:6px"></span>
-            </div>
-            <div class="nwst-info-box" style="margin-bottom:8px">
-                NWST proposed these events from recent chat or Generate Events. Review and approve any that should be added to the event horizon, or dismiss them.
-            </div>
-            <div id="nwst-pending-events-list"></div>
-            <div class="nwst-btn-row" style="margin-top:8px">
-                <button class="menu_button nwst-btn-approve" id="nwst-approve-all-pending" style="font-size:13px;padding:7px 16px">Approve all</button>
-                <button class="menu_button nwst-btn-danger" id="nwst-dismiss-all-pending">Dismiss all</button>
-            </div>
-        </div>
     `;
 
     // Wire events and populate with current data
@@ -225,52 +209,6 @@ function wireHomeEvents() {
         _dayNavInProgress = false;
         if (prevDayBtn) prevDayBtn.disabled = false;
         if (nextDayBtn) nextDayBtn.disabled = false;
-    }
-
-    // ── Approve / Dismiss pending event proposals ─────────────
-    // Individual rows are rendered dynamically, so use one delegated listener
-    // on the stable list container instead of wiring buttons after every render.
-    const pendingList = document.getElementById('nwst-pending-events-list');
-    if (pendingList && !pendingList.dataset.nwstPendingDelegated) {
-        pendingList.dataset.nwstPendingDelegated = '1';
-        pendingList.addEventListener('click', async (event) => {
-            const target = event.target instanceof Element ? event.target : null;
-            const approveBtn = target?.closest('.nwst-approve-pending');
-            const dismissBtn = target?.closest('.nwst-dismiss-pending');
-            const button = approveBtn || dismissBtn;
-            if (!button || !pendingList.contains(button)) return;
-
-            event.preventDefault();
-            const pendingId = button.getAttribute('data-pending-id');
-            if (!pendingId) return;
-
-            if (approveBtn) await approvePendingEvent(pendingId);
-            else await dismissPendingEvent(pendingId);
-        });
-    }
-
-    // Bulk actions use stable buttons and can be wired directly.
-    const approveAllBtn = document.getElementById('nwst-approve-all-pending');
-    if (approveAllBtn) {
-        approveAllBtn.addEventListener('click', async (event) => {
-            event.preventDefault();
-            await approveAllPending();
-        });
-    }
-    const dismissAllBtn = document.getElementById('nwst-dismiss-all-pending');
-    if (dismissAllBtn) {
-        dismissAllBtn.addEventListener('click', async (event) => {
-            event.preventDefault();
-            const ctx = SillyTavern.getContext();
-            const pending = ctx.chatMetadata?.['nwst:pendingEvents'] || [];
-            if (pending.length === 0) return;
-            const confirmed = await ctx.callGenericPopup(
-                `Dismiss all ${pending.length} pending event proposal(s)? Detected or generated events may be proposed again later.`,
-                ctx.POPUP_TYPE.CONFIRM, ''
-            );
-            if (!confirmed) return;
-            await dismissAllPending();
-        });
     }
 
     // ── Previous Day ───────────────────────────────────────────
@@ -405,14 +343,22 @@ function wireHomeEvents() {
     const jumpBtn = document.getElementById('nwst-timeskip-jump');
     if (jumpBtn) {
         jumpBtn.addEventListener('click', async () => {
+            if (_dayNavInProgress) return;
             const input = document.getElementById('nwst-timeskip-input');
             const skipDesc = input ? input.value.trim() : '';
             if (!skipDesc) {
                 nwstToast('Enter a description of the time skip first.', 'warning');
                 return;
             }
-            await executeTimeSkip(skipDesc);
-            refreshHomeUI();
+            lockDayNav();
+            jumpBtn.disabled = true;
+            try {
+                await executeTimeSkip(skipDesc);
+                refreshHomeUI();
+            } finally {
+                jumpBtn.disabled = false;
+                unlockDayNav();
+            }
         });
     }
 
@@ -770,6 +716,76 @@ function _setHtmlIfChanged(id, html) {
 
 let _refreshTimer = null;
 
+let _floatingTooltip = null;
+let _floatingTooltipAnchor = null;
+let _floatingTooltipDismiss = null;
+
+function closeFloatingTooltip() {
+    if (_floatingTooltip) _floatingTooltip.remove();
+    if (_floatingTooltipDismiss) document.removeEventListener('click', _floatingTooltipDismiss);
+    _floatingTooltip = null;
+    _floatingTooltipAnchor = null;
+    _floatingTooltipDismiss = null;
+}
+
+function toggleFloatingTooltip(anchor, description) {
+    const text = String(description || '').trim();
+    if (!anchor || !text) return;
+    if (_floatingTooltip && _floatingTooltipAnchor === anchor) {
+        closeFloatingTooltip();
+        return;
+    }
+    closeFloatingTooltip();
+
+    const tip = document.createElement('div');
+    tip.className = 'nwst-phen-tooltip';
+    tip.textContent = text;
+    document.body.appendChild(tip);
+
+    const rect = anchor.getBoundingClientRect();
+    const margin = 8;
+    const gap = 4;
+    const tipRect = tip.getBoundingClientRect();
+    let left = rect.left + (rect.width - tipRect.width) / 2;
+    let top = rect.bottom + gap;
+
+    left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+    if (top + tipRect.height > window.innerHeight - margin) {
+        top = rect.top - tipRect.height - gap;
+    }
+    top = Math.max(margin, Math.min(top, window.innerHeight - tipRect.height - margin));
+
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+    _floatingTooltip = tip;
+    _floatingTooltipAnchor = anchor;
+
+    _floatingTooltipDismiss = (event) => {
+        if (event.target !== anchor && !tip.contains(event.target)) closeFloatingTooltip();
+    };
+    setTimeout(() => {
+        if (_floatingTooltip === tip) document.addEventListener('click', _floatingTooltipDismiss);
+    }, 10);
+}
+
+function wireTooltipTrigger(element, description) {
+    if (!element || !description) return;
+    element.title = description;
+    element.setAttribute('tabindex', '0');
+    element.setAttribute('role', 'button');
+    element.setAttribute('aria-label', `${element.textContent.trim()}: ${description}`);
+    element.addEventListener('click', (event) => {
+        event.stopPropagation();
+        toggleFloatingTooltip(element, description);
+    });
+    element.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        event.stopPropagation();
+        toggleFloatingTooltip(element, description);
+    });
+}
+
 /**
  * Debounced version of refreshHomeUI — coalesces rapid calls.
  * Exported as the primary refresh entry point. Direct callers still invoke
@@ -861,19 +877,35 @@ function refreshCurrentDayDisplay() {
     if (dateSub) dateSub.textContent = day.dateSub || '—';
     if (dateHoliday) {
         const holidays = getNagerHolidaysForCurrentDate(chatId);
+        if (_floatingTooltipAnchor?.classList?.contains('nwst-holiday-tag')) closeFloatingTooltip();
+        dateHoliday.replaceChildren();
         if (holidays.length > 0) {
-            dateHoliday.textContent = `🎉 ${holidays.map(h => h.name).join(' · ')}`;
+            const icon = document.createElement('span');
+            icon.textContent = '🎉 ';
+            icon.setAttribute('aria-hidden', 'true');
+            dateHoliday.appendChild(icon);
+
+            holidays.forEach((holiday, index) => {
+                if (index > 0) dateHoliday.appendChild(document.createTextNode(' · '));
+                const tag = document.createElement('span');
+                tag.className = 'nwst-holiday-tag';
+                tag.textContent = holiday.name || 'Holiday';
+                const description = String(holiday.description || '').trim()
+                    || 'Calendar observance affecting local schedules, customs, crowds, or atmosphere.';
+                wireTooltipTrigger(tag, description);
+                dateHoliday.appendChild(tag);
+            });
             dateHoliday.style.display = 'block';
         } else {
-            dateHoliday.textContent = '';
             dateHoliday.style.display = 'none';
+            if (_floatingTooltipAnchor?.classList?.contains('nwst-holiday-tag')) closeFloatingTooltip();
         }
     }
 
     if (!container) return;
 
     // Check if there's any content to display
-    const hasContent = day.season || day.weatherToday || day.flora || day.fauna || day.spiritualClimate;
+    const hasContent = displaySeason || day.weatherToday || day.flora || day.fauna || day.spiritualClimate;
 
     if (!hasContent) {
         _setHtmlIfChanged('nwst-currentday-content', '<div class="nwst-nb-empty">No Current Day data yet. Run a batch scan or advance the day to generate content.</div>');
@@ -1065,67 +1097,12 @@ function refreshMoonDisplay() {
     // Only update DOM and re-wire events if the HTML actually changed
     if (!_setHtmlIfChanged('nwst-moon-strip', html)) return;
 
-    // Wire click handlers for moon phenomena tags — shows inline tooltip bubble
+    // Wire click/keyboard handlers for moon phenomena tags. The shared
+    // floating tooltip also works on mobile, where browser title tooltips do not.
     strip.querySelectorAll('.nwst-phen-tag').forEach(tag => {
-        tag.addEventListener('click', function (e) {
-            e.stopPropagation();
-
-            // Remove any existing tooltip
-            const oldTip = document.querySelector('.nwst-phen-tooltip');
-            if (oldTip) oldTip.remove();
-
-            // If clicking the same tag that already has a tooltip, toggle off
-            if (this.dataset.nwstTooltipOpen === '1') {
-                this.dataset.nwstTooltipOpen = '0';
-                return;
-            }
-
-            const phenText = this.textContent.trim();
-            const desc = this.dataset.description || MOON_PHENOMENA_DESCRIPTIONS[phenText];
-            if (!desc) return;
-
-            // Create tooltip element
-            const tip = document.createElement('div');
-            tip.className = 'nwst-phen-tooltip';
-            tip.textContent = desc;
-
-            // Position in viewport — fixed positioning, append to body so it floats over everything
-            const rect = this.getBoundingClientRect();
-            let left = rect.left;
-            let top = rect.bottom + 4;
-
-            // Clamp to viewport edges so tooltip isn't cut off
-            const estimatedWidth = 260;
-            const estimatedHeight = 60;
-            if (left + estimatedWidth > window.innerWidth - 8) {
-                left = window.innerWidth - estimatedWidth - 8;
-            }
-            if (top + estimatedHeight > window.innerHeight - 8) {
-                // Show above instead of below
-                top = rect.top - estimatedHeight - 4;
-            }
-            if (left < 8) left = 8;
-            if (top < 8) top = rect.bottom + 4; // fallback if both directions fail
-
-            tip.style.left = left + 'px';
-            tip.style.top = top + 'px';
-
-            document.body.appendChild(tip);
-
-            // Mark this tag as having an open tooltip
-            this.dataset.nwstTooltipOpen = '1';
-
-            // Dismiss on any click outside
-            const dismiss = (dismissEvent) => {
-                if (!tip.contains(dismissEvent.target) && dismissEvent.target !== this) {
-                    tip.remove();
-                    this.dataset.nwstTooltipOpen = '0';
-                    document.removeEventListener('click', dismiss);
-                }
-            };
-            // Delay attaching so the current click doesn't immediately dismiss
-            setTimeout(() => document.addEventListener('click', dismiss), 10);
-        });
+        const phenText = tag.textContent.trim();
+        const desc = tag.dataset.description || MOON_PHENOMENA_DESCRIPTIONS[phenText];
+        wireTooltipTrigger(tag, desc);
     });
 }
 
@@ -1137,7 +1114,7 @@ function refreshEventsDigest() {
 
     const chatId = getChatId();
     const grouped = getEventsGroupedByTier(chatId);
-    const activeTiers = ['immediate', 'week', 'month', 'undetermined'];
+    const activeTiers = ['immediate', 'week', 'month', 'undetermined', 'persistent'];
 
     let html = '';
     let hasAnyEvents = false;
@@ -1153,7 +1130,8 @@ function refreshEventsDigest() {
         hasAnyEvents = true;
         const tierLabel = tier === 'immediate' ? 'Immediate' :
                           tier === 'week' ? 'This week' :
-                          tier === 'month' ? 'This month' : 'Undetermined';
+                          tier === 'month' ? 'This month' :
+                          tier === 'persistent' ? 'Persistent' : 'Narratively Timed';
 
         html += `<h3>${tierLabel}</h3><ul>`;
         for (const event of activeEvents) {
@@ -1167,192 +1145,6 @@ function refreshEventsDigest() {
     }
 
     _setHtmlIfChanged('nwst-events-digest', html);
-}
-
-// ── Pending events review ─────────────────────────────────────────────────
-
-function refreshPendingEvents() {
-    const section = document.getElementById('nwst-pending-events-section');
-    const list = document.getElementById('nwst-pending-events-list');
-    const countBadge = document.getElementById('nwst-pending-events-count');
-    if (!section || !list) return;
-
-    // Read pending events from chatMetadata
-    let pending = [];
-    try {
-        const meta = SillyTavern.getContext().chatMetadata;
-        pending = meta?.['nwst:pendingEvents'] || [];
-    } catch (e) { /* non-fatal */ }
-
-    // Determine section visibility and badge text
-    const isEmpty = pending.length === 0;
-    const sectionDisplay = isEmpty ? 'none' : 'block';
-    const badgeText = isEmpty ? '' : `${pending.length} pending`;
-
-    // Cache section visibility — only update if changed
-    if (section.style.display !== sectionDisplay) {
-        section.style.display = sectionDisplay;
-        // Invalidate list cache when visibility changes so content re-renders
-        if (typeof _prevHtml !== 'undefined') delete _prevHtml['nwst-pending-events-list'];
-    }
-
-    if (isEmpty) return;
-
-    if (countBadge) countBadge.textContent = badgeText;
-
-    let html = '';
-    for (const ev of pending) {
-        const tierLabel = ev.tier === 'immediate' ? 'Immediate' :
-                          ev.tier === 'week' ? 'This week' :
-                          ev.tier === 'month' ? 'This month' : 'Undetermined';
-        const sourceLabel = ev.origin === 'generated' ? 'Generated' : 'Detected';
-        html += `
-        <div class="nwst-char-pending" style="margin-bottom:8px;border:0.5px solid #AFA9EC;border-radius:8px;overflow:hidden" data-pending-id="${ev.id}">
-            <div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:#EEEDFE">
-                <span class="nwst-badge nwst-badge-week" style="flex-shrink:0">${escapeHTML(tierLabel)}</span>
-                <span style="font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.4px">${escapeHTML(sourceLabel)}</span>
-                <span style="font-weight:500;font-size:13px;flex:1">${escapeHTML(ev.title)}</span>
-            </div>
-            <div style="padding:8px 12px;font-size:12px;color:#555;line-height:1.5">${escapeHTML(ev.description)}</div>
-            <div class="nwst-btn-row" style="padding:6px 12px 10px">
-                <button class="menu_button nwst-btn-approve nwst-approve-pending" data-pending-id="${ev.id}" style="font-size:12px">Approve</button>
-                <button class="menu_button nwst-btn nwst-dismiss-pending" data-pending-id="${ev.id}" style="font-size:12px">Dismiss</button>
-            </div>
-        </div>`;
-    }
-    _setHtmlIfChanged('nwst-pending-events-list', html);
-}
-
-async function approvePendingEvent(pendingId) {
-    try {
-        const ctx = SillyTavern.getContext();
-        const meta = ctx.chatMetadata;
-        const pending = meta?.['nwst:pendingEvents'] || [];
-        const ev = pending.find(e => e.id === pendingId);
-        if (!ev) return;
-
-        const chatId = getChatId();
-        const { addEvent, getActiveEvents, getStructuralTierForScheduledDate } = await import('../data/events.js');
-        const { getMaxActiveEvents } = await import('../settings.js');
-
-        // Detected events are facts extracted from chat and remain cap-exempt.
-        // Generated proposals respect the configured active-event pool cap.
-        const isDetected = ev.origin === 'detected' || ev.npcOrigin === 'detected';
-        const poolCap = getMaxActiveEvents();
-        const currentActive = getActiveEvents(chatId).length;
-
-        const proposalTier = ev.scheduledDate ? getStructuralTierForScheduledDate(chatId, ev.scheduledDate).tier : null;
-        const isFutureProposal = proposalTier === 'future';
-
-        if (!isDetected && !isFutureProposal && currentActive >= poolCap) {
-            nwstToast(`Event pool is full (${poolCap} active events). Resolve or dismiss existing events first.`, 'warning');
-            return;
-        }
-
-        await addEvent(chatId, {
-            title: ev.title,
-            description: ev.description,
-            tier: ev.tier || 'undetermined',
-            status: 'pending',
-            isNPC: Boolean(ev.isNPC),
-            npcOrigin: ev.isNPC ? (ev.npcOrigin || (isDetected ? 'detected' : 'generated')) : null,
-            origin: isDetected ? 'detected' : 'generated',
-            scheduledDate: ev.scheduledDate || null
-        });
-
-        // Remove from pending
-        meta['nwst:pendingEvents'] = pending.filter(e => e.id !== pendingId);
-        await ctx.saveMetadata();
-
-        nwstToast(`Event added: "${ev.title}"`, 'success');
-        refreshPendingEvents();
-        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
-
-    } catch (err) {
-        console.error('[NWST Home] approvePendingEvent failed:', err);
-    }
-}
-
-async function dismissPendingEvent(pendingId) {
-    try {
-        const ctx = SillyTavern.getContext();
-        const meta = ctx.chatMetadata;
-        const pending = meta?.['nwst:pendingEvents'] || [];
-        meta['nwst:pendingEvents'] = pending.filter(e => e.id !== pendingId);
-        await ctx.saveMetadata();
-        refreshPendingEvents();
-    } catch (err) {
-        console.error('[NWST Home] dismissPendingEvent failed:', err);
-    }
-}
-
-async function approveAllPending() {
-    try {
-        const ctx = SillyTavern.getContext();
-        const meta = ctx.chatMetadata;
-        const pending = [...(meta?.['nwst:pendingEvents'] || [])];
-        if (pending.length === 0) return;
-
-        const chatId = getChatId();
-        const { addEvent, getActiveEvents, getStructuralTierForScheduledDate } = await import('../data/events.js');
-        const { getMaxActiveEvents } = await import('../settings.js');
-
-        const poolCap = getMaxActiveEvents();
-        let currentActive = getActiveEvents(chatId).length;
-
-        let added = 0;
-        const remaining = [];
-
-        for (const ev of pending) {
-            // Detected events always bypass pool cap — they are facts from chat.
-            const isDetected = ev.origin === 'detected' || ev.npcOrigin === 'detected';
-            const proposalTier = ev.scheduledDate ? getStructuralTierForScheduledDate(chatId, ev.scheduledDate).tier : null;
-            const isFutureProposal = proposalTier === 'future';
-            if (!isDetected && !isFutureProposal && currentActive >= poolCap) {
-                remaining.push(ev);
-                continue;
-            }
-            const addedEvent = await addEvent(chatId, {
-                title: ev.title,
-                description: ev.description,
-                tier: ev.tier || 'undetermined',
-                status: 'pending',
-                isNPC: Boolean(ev.isNPC),
-                npcOrigin: ev.isNPC ? (ev.npcOrigin || (isDetected ? 'detected' : 'generated')) : null,
-                origin: isDetected ? 'detected' : 'generated',
-                scheduledDate: ev.scheduledDate || null
-            });
-            if (!isDetected && addedEvent?.tier !== 'future') currentActive++;
-            added++;
-        }
-
-        meta['nwst:pendingEvents'] = remaining;
-        await ctx.saveMetadata();
-
-        if (remaining.length > 0) {
-            nwstToast(`${added} event(s) approved. ${remaining.length} skipped — pool cap reached.`, 'warning');
-        } else {
-            nwstToast(`${added} event(s) approved.`, 'success');
-        }
-
-        refreshPendingEvents();
-        if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
-
-    } catch (err) {
-        console.error('[NWST Home] approveAllPending failed:', err);
-    }
-}
-
-async function dismissAllPending() {
-    try {
-        const ctx = SillyTavern.getContext();
-        ctx.chatMetadata['nwst:pendingEvents'] = [];
-        await ctx.saveMetadata();
-        refreshPendingEvents();
-        nwstToast('All pending events dismissed.', 'info');
-    } catch (err) {
-        console.error('[NWST Home] dismissAllPending failed:', err);
-    }
 }
 
 // ── Utility: Escape HTML entities ─────────────────────────────────────────

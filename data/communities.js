@@ -152,6 +152,16 @@ function mergeMemberDisplayStrings(existing, incoming) {
     return merged.join(', ');
 }
 
+async function notifyHiddenIntentionsOfCommunityChange(chatId, community, reason) {
+    try {
+        const actors = String(community?.members || '').split(',').map(name => name.trim()).filter(Boolean);
+        const { markHiddenIntentionsDirty } = await import('../llm/hiddenIntentions.js');
+        await markHiddenIntentionsDirty(chatId, actors, reason, { worldDirty: true });
+    } catch (e) {
+        console.warn('[NWST Communities] Hidden Intentions community notice skipped:', e);
+    }
+}
+
 // ── CRUD ──────────────────────────────────────────────────────────────────
 
 /**
@@ -238,6 +248,7 @@ export async function addCommunity(chatId, communityData) {
 
     communities.push(newCommunity);
     await saveAllCommunities(chatId, communities);
+    await notifyHiddenIntentionsOfCommunityChange(chatId, newCommunity, 'A community or faction was added.');
     return newCommunity;
 }
 
@@ -255,6 +266,7 @@ export async function updateCommunity(chatId, communityId, updates) {
 
     communities[index] = { ...communities[index], ...updates };
     await saveAllCommunities(chatId, communities);
+    await notifyHiddenIntentionsOfCommunityChange(chatId, communities[index], 'A community or faction changed.');
     return communities[index];
 }
 
@@ -269,8 +281,10 @@ export async function deleteCommunity(chatId, communityId) {
     const index = communities.findIndex(c => c.id === communityId);
     if (index === -1) return false;
 
+    const removed = communities[index];
     communities.splice(index, 1);
     await saveAllCommunities(chatId, communities);
+    await notifyHiddenIntentionsOfCommunityChange(chatId, removed, 'A community or faction was deleted.');
     return true;
 }
 

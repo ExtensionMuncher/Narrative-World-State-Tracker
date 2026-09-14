@@ -65,7 +65,7 @@ Each secret object must follow this exact schema:
   "whoKnows": ["Character name who knows this secret"],
   "whoDoesNotKnow": ["Character name who does NOT know this secret"],
   "evidenceShown": "What evidence has been shown in the chat so far (if any)",
-  "pressureRisk": "A concrete 1-2 sentence description of the SPECIFIC consequences if revealed — who is hurt, what breaks, what escalates. Narrative, not a severity label. Bad: 'high risk'. Good: 'If Caleb makes a violent move, it could trigger Rowan's retaliation, escalating the conflict and drawing police attention through Daniel.'",
+  "pressureRisk": "A concrete 1-2 sentence description of the SPECIFIC consequences if revealed — who is hurt, what breaks, what escalates. Narrative, not a severity label. Bad: 'high risk'. Good: 'If the courier exposes the deal, the patron may retaliate, putting the witness at risk and drawing investigators into the conflict.'",
   "revealConditions": "Under what circumstances this secret might be revealed",
   "injectionPriority": "high" | "normal" | "low",
   "triggerAnchors": ["3-7 distinctive words or short phrases UNIQUE to this secret that, if they appear in the prose, signal the scene is about this secret. Include the subject's name and specific concepts/objects/places. AVOID generic words and AVOID broad themes shared with other secrets (e.g. prefer 'tattoo, courier, debt' over 'syndicate, surveillance'). e.g. for a secret about a character's hidden affiliation: their name, 'affiliate', 'courier', 'tattoo'"]
@@ -119,7 +119,7 @@ function chunkMessages(messages, approxTokensPerChunk) {
     let currentChars = 0;
 
     for (const msg of messages) {
-        const msgText = `[${msg.name || (msg.is_user ? 'User' : 'Character')}]: ${msg.mes || ''}`;
+        const msgText = `[${msg.is_user ? 'USER/PC' : 'NARRATION'}]: ${msg.mes || ''}`;
         const msgChars = msgText.length;
 
         if (currentChars + msgChars > charsPerChunk && currentChunk.length > 0) {
@@ -150,7 +150,7 @@ function formatChunkForLLM(chunk, chunkNum, totalChunks, startMsg, endMsg) {
     }
 
     for (const msg of chunk) {
-        const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+        const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
         text += `[${sender}]: ${msg.mes}\n`;
     }
 

@@ -17,16 +17,21 @@ import { getChatId, nwstToast } from '../utils.js';
 import { getSetting } from '../index.js';
 import { getSettingContext, getCurrentDay, updateCurrentDay,
          getForecast, replaceForecast, getMoonPhases, replaceMoonPhases,
-         saveSnapshot, getLatestSnapshot, getSnapshots, getWorldState,
+         saveSnapshot, deleteSnapshot, commitDayAdvanceSnapshot, getLatestSnapshot, getSnapshots, getWorldState,
          getSeasonConfig, getCalendarConfig, getEraPin,
          getExtraMoons, saveExtraMoons } from '../data/worldState.js';
-import { computeDeterministicDate, advanceCurrentCalendarDate, applyForecastLabelsFromWeekday, parseCurrentCalendarDate, weekdayIndexFromDisplay, wrapDayCount, extractYearFromText, dateFromDayCount, resolveScheduledElapsedWindow, addDaysToDate, daysBetweenCalendarDates } from '../lib/calendarMath.js';
-import { getAllEvents, saveAllEvents, rollEventHorizon, compactEventHorizon, classifyScheduledEventTier } from '../data/events.js';
+import { computeDeterministicDate, advanceCurrentCalendarDate, applyForecastLabelsFromWeekday, parseCurrentCalendarDate, weekdayIndexFromDisplay, wrapDayCount, extractYearFromText, dateFromDayCount, resolveScheduledElapsedWindow, addDaysToDate, daysBetweenCalendarDates, calendarMonthLayoutFor } from '../lib/calendarMath.js';
+import { getAllEvents, saveAllEvents, rollEventHorizon, compactEventHorizon, classifyScheduledEventTier, reconcileEventTiers } from '../data/events.js';
 import { runEventValidityReview } from './eventValidity.js';
 import { getNotebook } from '../data/notebook.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
 import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { dlog } from "../lib/debug.js";
+import { acquireStoryOperation, releaseStoryOperation, getActiveStoryOperation } from '../lib/storyOperationLock.js';
+
+// One in-memory owner per chat. The persisted snapshot marker below handles
+// interrupted/crashed operations across chat switches or page reloads.
+const dayAdvanceInFlight = new Set();
 import { getMoonConfig, getMoonPhenomenonOverrides, getOverrideDisplayLabel } from '../data/moons.js';
 import { ensureNagerHolidayCacheForCurrentWindow } from '../data/nagerDate.js';
 import { prepareSevereWeatherAdvance, commitPreparedWeather, formatSystemConstraint, getSevereWeatherConstraint, getWeatherProfileForecastContext } from '../data/severeWeather.js';
@@ -821,7 +826,7 @@ You will receive:
 Respond with a JSON object containing:
 {
   "dateDisplay": "the new date display string (advance by one day)",
-  "dateSub": "era/year only, unchanged unless a year boundary is crossed. Never include a city, country, region, or general setting label.",
+  "dateSub": "era/year only, unchanged unless a year boundary is crossed. Never include a city, country, region, or setting label.",
   "season": "the current season (update if the day advancement crosses a seasonal boundary)",
   "forecast": [
     {
@@ -858,7 +863,7 @@ You will receive:
 
 Respond with a JSON object containing:
 {
-  "dateSub": "era/calendar context only for the computed date, in whatever era system fits the SETTING — e.g. 'Reiwa 8', 'Kank\u014d 4', 'Tang Dynasty \u00b7 Kaiyuan 5', 'Reign of Augustus \u00b7 Year 12', 'Victorian Era', 'Umayyad Caliphate \u00b7 97 AH', '1st Century BC'. Keep the previous era label unless the computed date crosses an era boundary. Never include a city, country, region, or general setting label. Use an empty string if no era system applies to this setting.",
+  "dateSub": "era/calendar context only for the computed date, in whatever era system fits the SETTING — e.g. 'Regnal Year 8', 'Tang Dynasty \u00b7 Kaiyuan 5', 'Reign of Augustus \u00b7 Year 12', 'Victorian Era', 'Umayyad Caliphate \u00b7 97 AH', '1st Century BC'. Keep the previous era label unless the computed date crosses an era boundary. Never include a city, country, region, or setting label such as 'Present-day capital city'. Use an empty string if no era system applies to this setting.",
   "season": "the current season for the computed date",
   "forecast": [
     {
@@ -1095,10 +1100,23 @@ export async function advanceToNextDay() {
         nwstToast('No active chat detected.', 'error');
         return false;
     }
+    if (dayAdvanceInFlight.has(chatId)) {
+        nwstToast('A day advancement is already running for this chat.', 'warning');
+        return false;
+    }
+    const storyLock = acquireStoryOperation(chatId, 'Day Advancement');
+    if (!storyLock.ok) {
+        nwstToast(`${storyLock.active?.kind || 'Another timeline operation'} is already running for this chat.`, 'warning');
+        return false;
+    }
+    dayAdvanceInFlight.add(chatId);
 
     // Show loading indicators
     showLoading(true);
     nwstToast('Generating forecast...', 'info');
+
+    let boundarySnapshotKey = null;
+    let mutationStarted = false;
 
     try {
         // 1. Resolve the Day Advancement LLM profile
@@ -1107,15 +1125,12 @@ export async function advanceToNextDay() {
             throw new Error('No Day Advancement LLM connection profile configured. Set one in Settings.');
         }
 
-        // 2. Gather current data AND save snapshot BEFORE any mutations.
-        //    This preserves the pre-advancement state (forecast, moon phases,
-        //    events with 'pending' status) so Restore Previous Day works correctly.
+        // 2. Gather the current pre-advancement data. The rollback snapshot is
+        //    intentionally deferred until after the LLM response validates, then
+        //    saved immediately before the first mutation.
         const currentDay = getCurrentDay(chatId);
         const settingContext = getSettingContext(chatId);
         const currentForecast = getForecast(chatId);
-
-        // ★ SNAPSHOT FIRST — capture pre-mutation state before anything changes
-        await saveDayBoundarySnapshot(chatId);
 
         // Calendar position is cyclical and comes from the configured calendar.
         // elapsedStoryDays is a separate duration counter and never drives the
@@ -1184,6 +1199,13 @@ export async function advanceToNextDay() {
             // independent of the annual dayCount reset.
             result.forecast = applyForecastLabelsFromWeekday(result.forecast, detDate.weekdayIndex, calendarConfig);
         }
+
+        // The LLM response is now validated and any deterministic date rewrite
+        // is complete. Create the rollback checkpoint at the last possible
+        // moment before mutation so failed/abandoned LLM calls cannot pollute
+        // Previous Day history with a no-op snapshot.
+        boundarySnapshotKey = await saveDayBoundarySnapshot(chatId);
+        mutationStarted = true;
 
         // 6. Save the results (date + forecast from LLM)
         //    When the seasonal engine is active (mode 'auto' or 'static'), the
@@ -1371,6 +1393,22 @@ export async function advanceToNextDay() {
             dlog(`[NWST DayAdvancement] Compacted ${compactResult.compacted} stale events.`);
         }
 
+        // 10.5 Hidden Intentions reconciliation — run after the objective world
+        //      state and event lifecycle are committed, but before event top-up
+        //      consults private NPC agency for new candidate developments.
+        try {
+            const { runHiddenIntentionsDayAdvance } = await import('./hiddenIntentions.js');
+            await runHiddenIntentionsDayAdvance(chatId);
+        } catch (intentErr) {
+            console.warn('[NWST DayAdvancement] Hidden Intentions reconciliation failed (non-fatal):', intentErr);
+        }
+
+        // The full foreground advancement reached commit. Convert the pending
+        // rollback checkpoint into an ordinary Previous Day snapshot. If this
+        // write fails (including because the chat changed), the snapshot stays
+        // pending and will auto-recover when its source chat is opened again.
+        await commitDayAdvanceSnapshot(chatId, boundarySnapshotKey);
+
         // 11. World event top-up — if the active world event pool is thin after
         //     rolling forward, generate a small supplementary batch silently.
         //     This keeps world events populated without requiring manual regen.
@@ -1385,11 +1423,53 @@ export async function advanceToNextDay() {
 
     } catch (err) {
         console.error('[NWST DayAdvancement] Failed:', err);
-        nwstToast(`Day advancement failed: ${err.message}`, 'error');
+
+        let rolledBack = false;
+        if (mutationStarted && boundarySnapshotKey && getChatId() === chatId) {
+            try {
+                rolledBack = await restorePreviousDay(boundarySnapshotKey, { silent: true, allowDuringForeground: true });
+                if (rolledBack) await deleteSnapshot(chatId, boundarySnapshotKey);
+            } catch (rollbackErr) {
+                console.error('[NWST DayAdvancement] Rollback after failed advance also failed:', rollbackErr);
+            }
+        } else if (boundarySnapshotKey && getChatId() === chatId) {
+            // Snapshot creation succeeded but no mutation began. Remove the
+            // unused checkpoint so Previous Day remains semantically truthful.
+            try { await deleteSnapshot(chatId, boundarySnapshotKey); } catch (_) { /* non-fatal cleanup */ }
+        }
+
+        nwstToast(rolledBack
+            ? `Day advancement failed: ${err.message}. Pre-advance state restored.`
+            : `Day advancement failed: ${err.message}`, 'error');
         return false;
     } finally {
+        dayAdvanceInFlight.delete(chatId);
+        releaseStoryOperation(chatId, 'Day Advancement');
         showLoading(false);
     }
+}
+
+/**
+ * Recover a day advancement that began mutating but never reached its commit
+ * marker (for example, a chat switch or page reload during the foreground
+ * operation). Recovery only runs while the source chat is active, so it never
+ * bypasses SillyTavern's active-chat metadata safety boundary.
+ */
+export async function recoverInterruptedDayAdvancement(chatId = getChatId()) {
+    if (!chatId || getChatId() !== chatId || dayAdvanceInFlight.has(chatId)) return false;
+    const snapshots = getSnapshots(chatId);
+    const pending = Object.entries(snapshots || {})
+        .filter(([key, value]) => key.startsWith('day_') && value?.pendingDayAdvance === true)
+        .sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0));
+    if (pending.length === 0) return false;
+
+    const [snapshotKey] = pending[0];
+    console.warn(`[NWST DayAdvancement] Recovering interrupted day advancement from ${snapshotKey}.`);
+    const restored = await restorePreviousDay(snapshotKey, { silent: true });
+    if (!restored) return false;
+    await deleteSnapshot(chatId, snapshotKey);
+    nwstToast('Recovered the pre-advance state from an interrupted day advancement.', 'warning');
+    return true;
 }
 
 // ── Previous Day ──────────────────────────────────────────────────────────
@@ -1406,10 +1486,15 @@ export async function advanceToNextDay() {
  * @param {string} [snapshotKey] - Optional specific snapshot key to restore from
  * @returns {Promise<boolean>}
  */
-export async function restorePreviousDay(snapshotKey) {
+export async function restorePreviousDay(snapshotKey, options = {}) {
     const chatId = getChatId();
     if (!chatId) {
         nwstToast('No active chat detected.', 'error');
+        return false;
+    }
+    const activeStoryOperation = getActiveStoryOperation(chatId);
+    if (activeStoryOperation && !options.allowDuringForeground) {
+        nwstToast(`${activeStoryOperation.kind} is already running for this chat.`, 'warning');
         return false;
     }
 
@@ -1445,6 +1530,21 @@ export async function restorePreviousDay(snapshotKey) {
         if (snapshot.notebookSnapshot) {
             const nbModule = await import('../data/notebook.js');
             await nbModule.saveNotebook(chatId, snapshot.notebookSnapshot);
+        }
+
+        // Hidden Intentions themselves live inside the Notebook snapshot. Reset
+        // cadence/runtime bookkeeping from the abandoned future timeline and
+        // mark the restored world for a fresh, dirty-gated reconciliation.
+        try {
+            const { resetHiddenIntentionsState, saveHiddenIntentionsState } = await import('../data/hiddenIntentions.js');
+            await resetHiddenIntentionsState(chatId);
+            await saveHiddenIntentionsState(chatId, {
+                worldDirty: true,
+                reasons: ['Story timeline restored from a Previous Day snapshot.'],
+                lastScanTrigger: 'rewind'
+            });
+        } catch (e) {
+            console.warn('[NWST DayAdvancement] Could not reset Hidden Intentions after rewind:', e);
         }
 
         // Restore the manually selected context/weather regions when the
@@ -1486,12 +1586,12 @@ export async function restorePreviousDay(snapshotKey) {
         const { migrateTemporalState } = await import('../data/timeMigration.js');
         await migrateTemporalState(chatId);
 
-        nwstToast('Previous day restored from snapshot.', 'info');
+        if (!options.silent) nwstToast('Previous day restored from snapshot.', 'info');
         if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'events');
         return true;
     } catch (err) {
         console.error('[NWST DayAdvancement] Previous day restore failed:', err);
-        nwstToast('Failed to restore previous day.', 'error');
+        if (!options.silent) nwstToast('Failed to restore previous day.', 'error');
         return false;
     }
 }
@@ -1505,14 +1605,14 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast, compute
     prompt += `Sub-Date: ${currentDay.dateSub || '(not set)'}\n`;
     if (detDate) {
         prompt += `System-computed NEW date (authoritative): ${detDate.dateDisplay}\n`;
-        prompt += `Provide the dateSub era label for this new date, using whatever era system fits the setting (any culture or period). Previous era line: "${currentDay.dateSub || '(none)'}" — keep it unless the new date crosses an era boundary. dateSub is era/calendar context only: never append a city, country, region, or general setting label. Use an empty string if no era system applies.\n`;
+        prompt += `Provide the dateSub era label for this new date, using whatever era system fits the setting (any culture or period). Previous era line: "${currentDay.dateSub || '(none)'}" — keep it unless the new date crosses an era boundary. dateSub is era/calendar context only: never append a city, country, region, or setting label such as a city or region name. Use an empty string if no era system applies.\n`;
         if (eraPin) {
             prompt += `PLAYER-VERIFIED ERA: the player manually confirmed the era system ("${eraPin}"). The previous era line descends from that confirmation — do NOT replace it with a different era system. Maintain it: update era-relative year numbers as years roll (e.g. era-year 4 becomes era-year 5 at a new year), and change the era name only at a genuine historical boundary within the same system.\n`;
         }
     }
-    prompt += `Current Season: ${currentDay.season || '(not set)'}\n`;
+    prompt += `Stored Season: ${currentDay.season || '(not set)'}\n`;
     if (computedSeason) {
-        prompt += `System-computed season for the next day: ${computedSeason}\n`;
+        prompt += `System-computed climatic season for the next day: ${computedSeason}\n`;
     }
     prompt += '\n';
 
@@ -1526,14 +1626,22 @@ function buildDayAdvancementPrompt(currentDay, settingContext, forecast, compute
         prompt += `${weatherConstraint}\n\n`;
     }
 
-    // Inject calendar config (months + week days) if configured
+    // Inject the active generic calendar configuration. Lunisolar mode uses
+    // the year-specific dynamic layout; standard/custom calendars use their
+    // configured month lengths and display names.
     const calConfig = getCalendarConfig(getChatId());
     if (calConfig.enabled) {
-        const monthList = calConfig.monthNames.map((name, i) =>
-            `${name} (${calConfig.monthDays[i]} days)`
-        ).join(', ');
+        const currentParsed = parseCurrentCalendarDate(currentDay.dateDisplay || '', currentDay.dateSub || '', calConfig, false);
+        const targetYear = detDate?.date?.year ?? currentParsed?.year ?? 1;
+        const layout = calendarMonthLayoutFor(calConfig, targetYear);
+        const monthList = layout.map(month => `${month.name} (${month.days} days)`).join(', ');
         const dayList = calConfig.weekDays.join(', ');
-        prompt += `Calendar System:\n  Months (${calConfig.months} total): ${monthList}\n  Days of the week (${calConfig.weekDays.length} total): ${dayList}\n  Use these month and day names when generating or displaying dates.\n\n`;
+        prompt += `Calendar System:
+  Months (${layout.length} this year): ${monthList}
+  Days of the week (${calConfig.weekDays.length} total): ${dayList}
+  Use these month and day names when generating or displaying dates.
+
+`;
     }
 
     prompt += `Current 7-Day Forecast:\n`;
@@ -1563,9 +1671,9 @@ function buildForecastOnlyPrompt(currentDay, settingContext, forecast, computedS
 
     prompt += `Current Date Display: ${currentDay.dateDisplay || '(not set)'}\n`;
     prompt += `Sub-Date: ${currentDay.dateSub || '(not set)'}\n`;
-    prompt += `Current Season: ${currentDay.season || '(not set)'}\n`;
+    prompt += `Stored Season: ${currentDay.season || '(not set)'}\n`;
     if (computedSeason) {
-        prompt += `System-computed current season: ${computedSeason}\n`;
+        prompt += `System-computed climatic season: ${computedSeason}\n`;
     }
     prompt += '\n';
 
@@ -1718,6 +1826,7 @@ async function topUpWorldEvents(chatId) {
         // Count active world events (non-NPC)
         const activeWorldEvents = activeEvents.filter(e =>
             !e.isNPC &&
+            e.tier !== 'persistent' &&
             e.status !== 'missed' &&
             e.status !== 'resolved'
         );
@@ -1736,15 +1845,23 @@ async function topUpWorldEvents(chatId) {
         // ★ Always top up the immediate tier if it's empty — day advancement
         //    rolls immediate events as missed, so a fresh batch is expected.
         if (immediateWorldEvents.length < 1) {
+            if (getChatId() !== chatId) {
+                dlog('[NWST DayAdvancement] Event top-up aborted because the active chat changed.');
+                return;
+            }
             dlog('[NWST DayAdvancement] Immediate tier empty — generating fresh batch...');
-            await regenerateTierEvents('immediate');
+            await regenerateTierEvents('immediate', { expectedChatId: chatId, worldOnly: true });
         }
 
         // ★ Top up the week tier if it's empty (less aggressive — week events
         //    survive day advancement, so they only need filling when genuinely thin).
         if (weekWorldEvents.length < 1) {
+            if (getChatId() !== chatId) {
+                dlog('[NWST DayAdvancement] Event top-up aborted before week generation because the active chat changed.');
+                return;
+            }
             dlog('[NWST DayAdvancement] Week tier empty — generating fresh batch...');
-            await regenerateTierEvents('week');
+            await regenerateTierEvents('week', { expectedChatId: chatId, worldOnly: true });
         }
 
         if (typeof window?.nwstRefreshTabs === 'function') {
@@ -1769,8 +1886,10 @@ async function rollEventHorizonForward(chatId) {
     const changes = {};
 
     for (const event of events) {
-        if (event.status !== 'pending') continue;
-        if (event.validityFlag || event.promotionFlag || event.timingFlag) continue;
+        if (event.status !== 'pending' && event.status !== 'inprogress') continue;
+        // Persistent events are text-resolved narrative state. Calendar passage
+        // must never miss, re-tier, or otherwise age them.
+        if (event.tier === 'persistent') continue;
 
         const range = getScheduledElapsedRange(event, calendarConfig, currentDay);
 
@@ -1793,6 +1912,13 @@ async function rollEventHorizonForward(chatId) {
     if (Object.keys(changes).length > 0) {
         await rollEventHorizon(chatId, changes);
         dlog(`[NWST DayAdvancement] Event horizon roll applied ${Object.keys(changes).length} change(s).`);
+    }
+    // Full pass is authoritative and also sorts the ledger. This catches timer-
+    // anchored events without display dates and any legacy shapes the fallback
+    // resolver above could not safely interpret.
+    const reconciled = await reconcileEventTiers(chatId);
+    if (reconciled.changed) {
+        dlog(`[NWST DayAdvancement] Full event reconciliation: ${reconciled.retiered} re-tiered, ${reconciled.missed} missed${reconciled.reordered ? ', reordered' : ''}.`);
     }
 }
 
@@ -1825,18 +1951,17 @@ function getScheduledElapsedRange(event, calendarConfig, currentDay) {
 // ── Snapshot ──────────────────────────────────────────────────────────────
 
 async function saveDayBoundarySnapshot(chatId) {
-    try {
-        const worldState = getWorldState(chatId);
-        const events = getAllEvents(chatId);
-        const notebook = getNotebook(chatId);
+    const worldState = getWorldState(chatId);
+    const events = getAllEvents(chatId);
+    const notebook = getNotebook(chatId);
 
-        // Use a simple timestamp-based key for day boundary snapshots
-        const rangeKey = `day_${Date.now()}`;
-        await saveSnapshot(chatId, rangeKey, worldState, events, notebook);
-        dlog('[NWST DayAdvancement] Day boundary snapshot saved.');
-    } catch (e) {
-        console.warn('[NWST DayAdvancement] Failed to save snapshot:', e);
-    }
+    // Use a simple timestamp-based key for day boundary snapshots. Snapshot
+    // persistence is a prerequisite for mutating a day boundary; do not swallow
+    // a save failure and continue into an un-rewindable partial advancement.
+    const rangeKey = `day_${Date.now()}`;
+    await saveSnapshot(chatId, rangeKey, worldState, events, notebook, { pendingDayAdvance: true });
+    dlog('[NWST DayAdvancement] Day boundary snapshot saved.');
+    return rangeKey;
 }
 
 // ── Loading UI helpers ────────────────────────────────────────────────────

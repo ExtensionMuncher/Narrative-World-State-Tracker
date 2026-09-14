@@ -44,7 +44,7 @@ export function buildWorldEvidenceSources(recentMessages = [], currentDay = {}, 
     }
 
     recentMessages.forEach((msg, index) => {
-        const sender = msg?.name || (msg?.is_user ? 'User' : 'Character');
+        const sender = msg?.is_user ? 'USER/PC' : 'NARRATION';
         sources[`M${index + 1}`] = {
             label: `Recent Chat — ${sender}`,
             text: String(msg?.mes || '').trim(),
@@ -68,10 +68,9 @@ export function collectRecentCastNames(recentMessages = [], communities = []) {
     const names = new Set();
     const generic = new Set(['user', 'assistant', 'character', 'narrator', 'system']);
 
-    for (const msg of recentMessages) {
-        const name = String(msg?.name || '').trim();
-        if (name && !generic.has(name.toLowerCase())) names.add(name);
-    }
+    // Do not use SillyTavern msg.name here: for assistant turns it is the
+    // character-card title, not a reliable in-story cast member. Recent cast
+    // names come from structured community membership instead.
 
     for (const community of communities) {
         const members = String(community?.members || '')
@@ -382,7 +381,7 @@ function validateCategoryBoundaries(mode, conditionName, content, sources) {
 
 const FAMILY = {
     law: /\b(law enforcement|police|detective|tmpd|organized crime division|restraining order|court|legal process)\b/i,
-    syndicate: /\b(syndicate|yakuza|oyabun|operative|crime family|criminal organization)\b/i,
+    syndicate: /\b(syndicate|yakuza|oyabun|operative|organized crime)\b/i,
     surveillance: /\b(surveillance|observation|observe|watch|watching|tail|tracking|monitor|monitoring)\b/i,
     formalTeam: /\b(task force|special unit|police detail|law[- ]enforcement detail|observation team|surveillance team|parallel (?:observation|surveillance) teams?)\b/i,
     mutual: /\b(mutual(?:ly)?|both sides|each side|reciprocal(?:ly)?|coordination|coordinate(?:d|s|ing)?|d[eé]tente|unspoken coordination|formal acknowledgment|without formal acknowledgment)\b/i,

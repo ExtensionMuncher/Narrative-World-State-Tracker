@@ -142,7 +142,7 @@ function buildReviewPrompt(active, undated, undetermined, concluded, notebook, r
     if (recentMessages.length > 0) {
         p += `=== MOST RECENT MESSAGES (for freshness) ===\n`;
         for (const msg of recentMessages) {
-            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
             p += `[${sender}]: ${msg.mes}\n`;
         }
         p += '\n';
@@ -212,7 +212,7 @@ export async function runEventValidityReview(chatId) {
     try {
         // Only pending/inprogress events can be meaningfully invalidated.
         const active = getActiveEvents(chatId).filter(
-            ev => ev.status === 'pending' || ev.status === 'inprogress'
+            ev => (ev.status === 'pending' || ev.status === 'inprogress') && ev.tier !== 'persistent'
         );
         // Undated actives are the tier-placement candidates (unflagged only).
         // The undetermined tier is excluded by design: those events are

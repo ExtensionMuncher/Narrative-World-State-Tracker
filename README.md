@@ -1,7 +1,7 @@
 # Narrative World State Tracker
 ### A SillyTavern Extension
 
-> **Status: In Development** — This extension is currently being built. This README reflects the planned feature set and design. Not yet available for installation.
+> **Status: Beta / Active Development** — Core systems are implemented and under beta testing. Back up important chat data before testing new builds.
 
 ---
 
@@ -17,8 +17,8 @@ It runs quietly in the background on a configurable message cadence, updating as
 ## Features
 
 ### 🗓 Day & Date Tracking
-- Tracks the current in-game date with a rich display (supports real-world and fantasy calendar formats)
-- Optional **East Asian lunisolar calendar engine** for historical, fantasy, and other non-Gregorian settings — keep 12 configurable base month names while NWST automatically supplies year-specific 29/30-day month lengths and inserts an intercalary month when needed. Special Days remain attached to their base month rather than shifting when a leap month appears. This is a reusable compatibility calendar, not a claim of exact reconstruction for every historical regional calendar.
+- Tracks the current in-game date with a rich display using three general calendar modes: **Gregorian**, **Lunisolar**, and **Custom**.
+- **Gregorian** uses the normal real-world month/week structure and automatic Gregorian leap years. **Custom** unlocks editable month names, month lengths, weekday names, and optional era labels. **Lunisolar** keeps 12 configurable base month names while NWST supplies year-specific 29/30-day month layouts and inserts intercalary months when needed. Special Days remain attached to their base month rather than shifting when an intercalary month appears.
 - Optional **Nager.Date real-world holidays** for Gregorian-compatible chats — including custom calendars that only rename months/weekdays while keeping the standard 12-month day structure; choose a country, optional subdivision, and holiday types; nationwide/regional holidays stay separate from Special Days and Events, are cached locally once per country/year, can appear beneath the Home date, and can enter prompt context beginning 7 days before their scheduled date by default (the window is adjustable). Failed fetches do not block NWST and retry on the next story-day advance until a cache is obtained.
 - Prev/Next Day navigation with full state snapshots — going back to a previous day restores exactly what was there, no data loss
 - **Time Skip** — enter a natural language description ("Three weeks later, end of harvest season") and the extension performs a full narrative overhaul across all components automatically
@@ -39,13 +39,14 @@ It runs quietly in the background on a configurable message cadence, updating as
 - **Saved Setting Context profiles (per chat).** Keep multiple foundational world/arc contexts and switch them manually. A profile switch never rewrites stored state automatically: NWST offers an optional, granular refresh for the Current Day environment/7-day forecast, World Conditions, and active LLM-generated world events. Notebook, Secrets, Communities, NPC events, detected/story-grounded events, Special Days, calendar/date state, and resolved event history are preserved. The same refresh dialog can be opened later from **Refresh Setting State…**, which is useful when the Weather Profile also needs to be switched first. Legacy single-context chats migrate transparently into a Default Setting profile.
 - **Saved Weather Profiles (per chat).** Climate, terrain, local characteristics, frequency, overrides, active severe-weather state, and recent history are stored per region/profile and selected manually. Setting Context and Weather Profile remain intentionally independent; changing Setting Context only reminds you to review the Weather Profile.
 - **Context/Profile snapshot history.** Manual Setting Context and Weather Profile changes get their own labeled undo snapshots in Debug, completely separate from Previous Day/day-boundary rewind history. Profile switches save lightweight pre-change profile state; an approved Setting Context regeneration saves a richer pre-refresh snapshot containing only the environment/forecast, World Conditions, and/or generated-event state selected for regeneration. Restore, delete, and clear controls are available without affecting chronological story snapshots.
-- **Experimental Severe Weather generator.** On legitimate story-day advancement, deterministic RNG first decides whether a severe system forms, then weights eligible systems by current season + active profile climate/terrain/characteristics. The v1 pool includes Severe Thunderstorms, Torrential Rain, Prolonged Heavy Rain, Windstorms, Tropical Cyclones/Typhoons, Heavy Snow, Blizzards, Snow Squalls, Ice Storms/Freezing Rain, Cold Waves, Heat Waves, Dust/Sandstorms, and Dense/Hazardous Fog. Incompatible systems are strongly suppressed or impossible (e.g. summer blizzards and deep-winter typhoons), while transitional-season events remain possible where appropriate.
+- **Experimental Severe Weather generator.** On legitimate story-day advancement, deterministic RNG first decides whether a severe system forms, then weights eligible systems by current season + active profile climate/terrain/characteristics + **Regional Hazards**. The v1 pool includes Severe Thunderstorms, Torrential Rain, Prolonged Heavy Rain, Windstorms, Tropical Cyclones/Typhoons, Heavy Snow, Blizzards, Snow Squalls, Ice Storms/Freezing Rain, Cold Waves, Heat Waves, Dust/Sandstorms, and Dense/Hazardous Fog. Incompatible systems are strongly suppressed or impossible, while transitional-season events remain possible where appropriate.
+- **Regional Hazards** add per-event local likelihood modifiers (Very Low, Low, Neutral, Elevated, High) on top of ordinary climate weighting. They can be edited manually, analyzed for the active Weather Profile, or backfilled across existing profiles without replacing overrides/history.
 - Severe systems store **severity, start timing, active duration, recovery/aftermath, and derived hazards**. Major systems can be scheduled several days ahead so the forecast LLM foreshadows their arrival; short events can begin morning/afternoon/evening/overnight. The forecast LLM receives the result as a hard constraint — it describes the weather but does not choose or reroll it.
 - **Profile-specific Weather Overrides** can deliberately force an event and bypass season/climate restrictions, including custom supernatural weather. Recent severe weather applies a short cooldown so the RNG does not repeatedly chain disasters without reason.
 - Climate-aware generation — Setting Context plus the active Weather Profile ground ordinary weather so the forecast stays appropriate to real, historical, fantasy, or abstract worlds.
 
 ### 📋 Event Horizon
-Four visible event tiers — **Immediate**, **This Week**, **This Month**, and **Undetermined** — each with its own regeneration control. Dated events beyond the current calendar month are held in an internal **Future Scheduled** queue and automatically surface when they enter a visible horizon.
+Five visible event tiers — **Immediate**, **This Week**, **This Month**, **Narratively Timed**, and **Persistent**. Narratively Timed retains the internal `undetermined` value for backward compatibility and is reserved for events whose timing should remain story-driven. **Persistent** is a separate capped pool (up to three active events) for durable pressures/states that must not age into Missed merely because time advances. Persistent events require an explicit narrative resolution condition and scanner-detected resolutions are evidence-gated for review. Dated events beyond the current calendar month are held in an internal **Future Scheduled** queue and automatically surface when they enter a visible horizon.
 
 Events come from two sources:
 - **Detected** — the extension reads your chat and picks up explicit plans, arrangements, and scheduled happenings mentioned in text
@@ -55,7 +56,7 @@ Events are further divided into:
 - **NPC Events** — character-driven, orbit the player (meetings, hangouts, plans made between characters, birthdays)
 - **World Events** — setting-driven, exist independently of player involvement (seasonal observances, political movements, cultural happenings, environmental cycles)
 
-All proposed events require your approval before being committed. Undetermined events are **never** auto-regenerated — their timing is intentional. Pending proposals can also be approved or dismissed in bulk from Home.
+Scanner-detected and generated event proposals require your approval before being committed. Narratively Timed events are not produced by fixed-horizon regeneration, and Persistent generation is intentionally sparse. Pending proposals can also be approved or dismissed in bulk from Home.
 
 Each event has a status: **Pending**, **In Progress**, **Resolved**, or **Missed**. Resolved and missed events are automatically excluded from prompt injection.
 
@@ -73,7 +74,7 @@ The Spiritual/Supernatural condition also controls whether a **Spiritual Climate
 - Manual condition regeneration uses a restrained **ambient world** pass designed to rebuild durable background context without mining the active plot; invalid responses preserve the existing condition.
 
 ### 📓 Notebook
-The planning LLM's internal working surface. Never injected into your main prompt. Three collapsible sections:
+NWST's internal working surface. Never injected into your main prompt. Four collapsible sections. Manual edits have an explicit **Save edits** control and also autosave when you click away from an edited field:
 
 **Core**
 - Unresolved details
@@ -87,6 +88,13 @@ The planning LLM's internal working surface. Never injected into your main promp
 - Character whereabouts (offscreen)
 - Inconsistencies flagged
 - Current tone / atmosphere
+
+**Hidden Intentions** — compact, evidence-grounded private NPC agency organized as Objectives, Active Plans, Commitments, Ongoing Priorities, Contingencies, and Emerging Interests:
+- Tracks strategy, nearest intended action, triggers, constraints, confidence, commitment, evidence ranges, related events/communities, lifecycle state, and progress state.
+- Uses a five-record **current working set per actor**, not a lifetime quota. Stronger later generated intentions may park weaker eligible generated records; manual, locked, and pending-review records are protected.
+- **Generate** creates missing grounded records from recent visible narrative. **Reconcile** only maintains existing records and can run on dirty cadence, day advancement, Time Skip, or manually.
+- **Debug Backfill** migrates older chats chronologically with resumable checkpoints and pause support; local Audit & Repair has an undo backup and does not make LLM calls.
+- Hidden Intentions are never direct RP-prompt evidence and never count as proof that an NPC actually performed an action.
 
 **Secrets & Hidden Knowledge** — structured entries with:
 - Secret text
@@ -121,13 +129,13 @@ Secrets are injected **selectively**: only when a character from the "Who Knows"
 - Explicit completion-token budgets are used across NWST's structured LLM calls to reduce reasoning-heavy models exhausting their response allowance before returning valid JSON.
 
 ### ⚡ Batch Scan
-Install mid-campaign? Run the batch scan. The extension reads your full chat history and generates an initial world state across all components — current day, forecast, events, world conditions, notebook fields, and community groupings. Non-compounding: it will not overwrite data you've already entered.
+Install mid-campaign? Run the batch scan. The extension reads your full chat history and generates an initial world state across the main world-state components — current day, forecast, events, world conditions, notebook fields, and community groupings — then seeds grounded Hidden Intentions for prioritized NPCs. Non-compounding: it does not intentionally overwrite data you already entered.
 
 ---
 
 ## How It Works
 
-NWST uses **four LLM connection profiles**, each suited to a different kind of task:
+NWST supports **five LLM connection roles**, each suited to a different kind of task:
 
 | Profile | Job | Recommended Tier |
 |---|---|---|
@@ -135,6 +143,7 @@ NWST uses **four LLM connection profiles**, each suited to a different kind of t
 | **Day Advancement LLM** | Date, forecast, moon phase generation | Lighter model |
 | **Narrative Consistency LLM** | Secrets knowledge reconciliation, reveal tracking, and consistency checks | Capable mid-size or local model |
 | **Secrets Sidecar LLM** | Lightweight scene presence and pressure analysis used for secret relevance scoring | Small, fast local or hosted model |
+| **Hidden Intentions LLM** | Grounded NPC-agency generation plus separate lifecycle reconciliation | EQ-capable model; may inherit the Planning profile |
 
 All profiles use **connection profiles you have already set up in SillyTavern**. No separate API keys required.
 
@@ -149,12 +158,13 @@ The following is injected into your main prompt on every message:
 - Active world conditions (enabled conditions only)
 - Active secret blocks (selectively, when relevant characters are present)
 
-The following is **never** injected:
-- Notebook fields
+The following is **never** injected directly:
+- Ordinary Notebook fields
+- Hidden Intentions
 - Community summaries
-- Secrets (except when selectively triggered by the Narrative Consistency profile)
+- Archived/inactive secrets
 
-Injection placement is fully configurable: Before/After Main Prompt, Top/Bottom of Author's Note, or Inject at Depth with role selector (System / User / Assistant).
+Secrets can still be selectively injected when their own relevance rules trigger. Injection placement is configurable as **Before Main Prompt / Story String**, **After Main Prompt / Story String**, or **Inject at Depth** (0–999) with System / User / Assistant role selection. NWST maintains one named runtime entry rather than mutating prompt presets.
 
 ---
 
@@ -168,9 +178,9 @@ NWST keeps **calendar position** and **story duration** as separate concepts. Sa
 - **Weekdays use the configured weekday cycle.** Weekday progression continues through New Year independently of the cyclical annual day count.
 - **One-time Starting Date entry.** Enter the story's actual first canonical date. Standard Gregorian forms and configured custom month names are supported. Confirmation shows how the date was interpreted before the field locks.
 - **Late setup catches up immediately.** If NWST already has a Current Day when you enter the Starting Date, it parses the current LLM-written date using that chat's Calendar Config, calculates the configured-calendar distance from Starting Date to Current Day, and rebases duration markers by the same offset.
-- **Custom LLM-written dates are supported.** Current-date parsing matches configured month names longest-first, including punctuation/commas, and can read an absolute year from the secondary date line. Formats such as `Doyōbi, Jūgatsu 19` + `Reiwa 6 • 2024` or `Frostwane, the Eleventh Month · Seventh Day` + `Imperial Era · 1125 CE` are supported.
+- **Custom LLM-written dates are supported.** Current-date parsing matches configured month names longest-first, including punctuation/commas, and can read an absolute year from the secondary date line. Formats such as `Sixthday, Frostwane 19` + `Regnal Year 6 • 2024` or `Frostwane, the Eleventh Month · Seventh Day` + `Imperial Era · 1125 CE` are supported.
 - **Day advances are calendar-built.** The canonical date advances through configured month lengths and year rollover directly; `elapsedStoryDays` increments separately and the annual `dayCount` is recalculated from the resulting date.
-- **International format** reads ambiguous numeric dates day-first when enabled. **Leap years** apply to Gregorian-compatible 12-month calendars when enabled, including renamed Earth-calendar month sets. In **Lunisolar** mode, Gregorian leap-day handling is replaced by dynamic 29/30-day months and intercalary-month insertion for each calendar year.
+- **International format** reads ambiguous numeric dates day-first when enabled. **Leap years** apply to Gregorian-compatible 12-month calendars when enabled, including renamed Earth-calendar month sets. In **Lunisolar** mode, Gregorian leap-day handling is replaced by dynamic 29/30-day months and intercalary-month insertion for each calendar year. In **Custom** mode, configured fixed month lengths are authoritative.
 - **Eras.** Custom calendars use the **Era name** field (write `{year}` for the computed year). Real-world era labels may remain LLM-written or player-pinned while the absolute year is used for calendar arithmetic.
 
 ## Data Storage
@@ -190,7 +200,7 @@ Five tabs:
 - **Home** — current day journal view, day navigation, time skip, 7-day forecast, moon phases, upcoming events digest
 - **Events** — full event horizon management across all four tiers
 - **World State** — condition tracks with visibility toggles, community summaries
-- **Notebook** — accordion sections for core notes, mystery & continuity, secrets
+- **Notebook** — accordion sections for core notes, mystery & continuity, Hidden Intentions, and secrets
 - **Settings** — connection profiles, scan frequency, setting context, injection placement, planner prompt, batch scan, import/export
 
 All editable fields support a **⛶ popout editor** for comfortable editing in a larger modal — especially useful on mobile.
@@ -204,6 +214,7 @@ All editable fields support a **⛶ popout editor** for comfortable editing in a
 - A second connection profile recommended for Day Advancement (lighter model)
 - A third connection profile recommended for Narrative Consistency (mid-size or local model)
 - A fourth lightweight connection profile recommended for the Secrets Sidecar
+- A fifth EQ-capable profile is optional for Hidden Intentions; it can inherit Planning by default
 
 ---
 

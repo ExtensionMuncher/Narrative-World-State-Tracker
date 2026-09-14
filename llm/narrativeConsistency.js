@@ -21,6 +21,7 @@
 // =============================================================================
 
 import { getChatId, nwstToast } from '../utils.js';
+import { buildAliasRegistry } from '../data/aliasRegistry.js';
 import {
     getAllSecrets, addMysteryBullet, updateSecret,
     flagSecretForArchive, getSecretStatus
@@ -53,6 +54,8 @@ OUTPUT (JSON only, no markdown fences, no commentary):
   ]
 }`;
 
+let consistencyCheckInFlight = false;
+
 /**
  * Run the narrative consistency check via the Narrative Consistency LLM.
  * Called by the scanner on its cadence, and manually by the debug button.
@@ -71,7 +74,12 @@ export async function runConsistencyCheck(options = {}) {
     const chatId = getChatId();
     if (!chatId) return summary;
     if (options.expectedChatId && options.expectedChatId !== chatId) return summary;
+    if (consistencyCheckInFlight) {
+        if (options.manual) nwstToast('A narrative consistency scan is already running.', 'info');
+        return summary;
+    }
 
+    consistencyCheckInFlight = true;
     try {
         const profile = resolveProfile('narrativeConsistencyLLM');
         if (!profile) {
@@ -173,6 +181,8 @@ export async function runConsistencyCheck(options = {}) {
         console.error('[NWST NarrativeConsistency] Check failed:', err);
         if (options.manual) nwstToast(`Consistency scan failed: ${err.message}`, 'error');
         return summary;
+    } finally {
+        consistencyCheckInFlight = false;
     }
 }
 
@@ -219,7 +229,7 @@ function knowledgeNamesMatch(a, b) {
  * Only characters actually listed in whoDoesNotKnow (or absent from whoKnows)
  * are moved/added; unknown names are matched loosely (case-insensitive,
  * substring both ways) against the whoDoesNotKnow list so "Mira" matches
- * "Mira Rowan".
+ * "Mira Vale".
  * @returns {Promise<number>} how many characters were updated
  */
 async function applyKnowledgeChange(chatId, secret, learners) {
@@ -308,9 +318,11 @@ function getRecentSceneMessages(visibleOnly = false, deepScan = false) {
 
 function detectSceneCharactersFromMessages(messages) {
     const characters = new Set();
-    for (const msg of messages) {
-        if (msg.name && !msg.is_user) {
-            characters.add(msg.name);
+    const registry = buildAliasRegistry(getChatId());
+    for (const msg of messages || []) {
+        for (const actorId of registry.scanProse(String(msg?.mes || ''))) {
+            if (registry.isGroup(actorId) || registry.isUserPc(actorId)) continue;
+            characters.add(registry.getDisplay(actorId));
         }
     }
     return Array.from(characters);
@@ -325,7 +337,7 @@ function buildConsistencyPrompt(secrets, recentMessages, sceneCharacters) {
 
     prompt += `=== RECENT MESSAGES ===\n`;
     for (const msg of recentMessages) {
-        const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+        const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
         prompt += `[${sender}]: ${msg.mes}\n`;
     }
     prompt += '\n';

@@ -96,7 +96,8 @@ const DEFAULT_NOTEBOOK = {
         inconsistenciesFlagged: [],
         currentToneAtmosphere: []
     },
-    secrets: []
+    secrets: [],
+    hiddenIntentions: []
 };
 
 const DEFAULT_COMMUNITIES = [];
@@ -114,6 +115,7 @@ const DEFAULT_WEATHER_PROFILES = {
     activeProfileId: null,
     profiles: []
 };
+
 
 const DEFAULT_SEASON_CONFIG = {
     mode: 'auto',
@@ -146,15 +148,15 @@ const DEFAULT_CALENDAR_CONFIG = {
     // Optional era label for CUSTOM calendars (e.g. "Third Age" or "Third Age {year}").
     // Substituted into the dateSub line by the deterministic date engine.
     eraName: '',
-    // Calendar system. 'standard' uses the configured static month lengths;
-    // 'lunisolar' uses NWST's dynamic East-Asian lunisolar year layouts while
-    // retaining these configured month names as the display labels.
-    calendarSystem: 'standard',
+    // Calendar system. Gregorian uses the real-world month/week structure;
+    // Custom uses configured static month lengths/names; Lunisolar uses NWST's
+    // dynamic 29/30-day year layouts while retaining configured base month names.
+    calendarSystem: 'gregorian',
     lunisolar: {
         engine: 'east_asian',
         leapMonthLabel: 'Intercalary {month}'
     },
-    // Leap-year toggle for Gregorian-compatible standard calendars — adds Feb 29
+    // Leap-year toggle for Gregorian and Gregorian-compatible custom calendars — adds Feb 29
     // in leap years so real-world dates stay true, including renamed custom sets.
     // Ignored while the lunisolar engine is active.
     leapYears: true,
@@ -194,11 +196,78 @@ const DEFAULT_SNAPSHOTS = {};
 // Separate manual context/profile undo history. Never used by Previous Day.
 const DEFAULT_CONTEXT_SNAPSHOTS = [];
 const DEFAULT_ALIAS_REGISTRY = [];
+const DEFAULT_ALIAS_BLACKLIST = [];
 const DEFAULT_SECRETS_SIDECAR_STATE = null;
+const DEFAULT_HIDDEN_INTENTIONS_REPAIR_BACKUP = null;
+const DEFAULT_HIDDEN_INTENTIONS_BACKFILL_CHECKPOINT = null;
+const DEFAULT_HIDDEN_INTENTIONS_STATE = {
+    dirtyActors: [],
+    worldDirty: false,
+    reasons: [],
+    lastScanMessageCount: 0,
+    lastScanElapsedDay: null,
+    lastScanAt: 0,
+    cooldownUntilMessage: 0,
+    lastScannedActorIds: [],
+    lastScanTrigger: '',
+    lastJsonRecovery: '',
+    lastValidationSummary: '',
+    lastWorkingSetRotations: [],
+    lastError: '',
+    scanInProgress: false,
+    backfillInProgress: false,
+    backfillTotalChunks: 0,
+    backfillCompletedChunks: 0,
+    backfillTotalBatches: 0,
+    backfillCompletedBatches: 0,
+    backfillPlanVersion: 0,
+    backfillPlanSignature: '',
+    backfillSourceMessageCount: 0,
+    backfillNarrativeTokenBudget: 0,
+    backfillNarrativeCharTarget: 0,
+    backfillRequestCharLimit: 0,
+    backfillSuccessfulSegments: [],
+    backfillPlannedCalls: 0,
+    backfillCompletedCalls: 0,
+    backfillNextChunk: 0,
+    backfillFinalPassCompleted: false,
+    backfillMessagesScanned: 0,
+    backfillActorsScanned: 0,
+    backfillCreated: 0,
+    backfillUpdated: 0,
+    backfillParked: 0,
+    backfillReactivated: 0,
+    backfillRejected: 0,
+    backfillFailedBatches: 0,
+    backfillFailedSegments: [],
+    backfillEmptySegments: 0,
+    backfillSkippedSegments: 0,
+    backfillJsonRecoveries: 0,
+    backfillCompactRetries: 0,
+    backfillReasoningExhaustions: 0,
+    backfillActorSplits: 0,
+    backfillNarrativeSplits: 0,
+    backfillRollbacks: 0,
+    backfillProactiveActorBatches: 0,
+    backfillProactiveNarrativeBatches: 0,
+    backfillRecoveryIncidents: [],
+    backfillPauseRequested: false,
+    backfillPausedByUser: false,
+    backfillStartedAt: 0,
+    backfillFinishedAt: 0,
+    backfillSummary: '',
+    lastRepairAt: 0,
+    lastRepairSource: '',
+    lastRepairSummary: ''
+};
 const DEFAULT_SECRETS_META = {
     userCharacterName: '',
     userCharacterAliases: ''
 };
+const DEFAULT_SCANNER_STATE = null;
+const DEFAULT_PENDING_EVENTS = [];
+const DEFAULT_NOTEBOOK_HISTORY = { entries: [], cursor: 0 };
+const DEFAULT_SCANS_SINCE_RECONCILE = 0;
 
 const DEFAULTS = {
     worldState:     DEFAULT_WORLD_STATE,
@@ -217,9 +286,32 @@ const DEFAULTS = {
     snapshots:      DEFAULT_SNAPSHOTS,
     contextSnapshots: DEFAULT_CONTEXT_SNAPSHOTS,
     aliasRegistry:  DEFAULT_ALIAS_REGISTRY,
+    aliasBlacklist: DEFAULT_ALIAS_BLACKLIST,
     secretsSidecarState: DEFAULT_SECRETS_SIDECAR_STATE,
-    secretsMeta:    DEFAULT_SECRETS_META
+    hiddenIntentionsState: DEFAULT_HIDDEN_INTENTIONS_STATE,
+    hiddenIntentionsRepairBackup: DEFAULT_HIDDEN_INTENTIONS_REPAIR_BACKUP,
+    hiddenIntentionsBackfillCheckpoint: DEFAULT_HIDDEN_INTENTIONS_BACKFILL_CHECKPOINT,
+    secretsMeta:    DEFAULT_SECRETS_META,
+    scannerState:   DEFAULT_SCANNER_STATE,
+    pendingEvents:  DEFAULT_PENDING_EVENTS,
+    notebookHistory: DEFAULT_NOTEBOOK_HISTORY,
+    scansSinceReconcile: DEFAULT_SCANS_SINCE_RECONCILE
 };
+
+// Metadata is one shared mutable object per active chat. Serialize complete
+// mutation+save+rollback transactions so an earlier failed save cannot roll
+// back over a newer successful write from another NWST subsystem.
+const metaMutationQueues = new Map();
+
+function enqueueMetaMutation(chatId, task) {
+    const key = String(chatId || '');
+    const previous = metaMutationQueues.get(key) || Promise.resolve();
+    const current = previous.catch(() => undefined).then(task);
+    metaMutationQueues.set(key, current);
+    return current.finally(() => {
+        if (metaMutationQueues.get(key) === current) metaMutationQueues.delete(key);
+    });
+}
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -253,7 +345,7 @@ function getChatMeta(expectedChatId = null, operation = 'read') {
         // Long-running LLM/scanner operations capture a chatId before awaiting.
         // If the user switches chats while that work is in flight, never let the
         // stale operation read from or write into the newly active chat.
-        if (expectedChatId && currentChatId && String(expectedChatId) !== String(currentChatId)) {
+        if (!currentChatId || (expectedChatId != null && String(expectedChatId) !== String(currentChatId))) {
             console.warn(`[NWST Storage] Blocked stale ${operation}: expected chat "${expectedChatId}", active chat is "${currentChatId}".`);
             return null;
         }
@@ -272,16 +364,21 @@ function getChatMeta(expectedChatId = null, operation = 'read') {
  * @returns {Promise<void>}
  */
 async function persistMeta(expectedChatId = null) {
+    const ctx = SillyTavern.getContext();
+    const currentChatId = ctx?.chatId || null;
+    if (!currentChatId || (expectedChatId != null && String(expectedChatId) !== String(currentChatId))) {
+        const error = new Error(`Refused stale metadata save: expected chat "${expectedChatId}", active chat is "${currentChatId}".`);
+        console.warn('[NWST Storage]', error.message);
+        throw error;
+    }
+    if (typeof ctx?.saveMetadata !== 'function') {
+        throw new Error('SillyTavern metadata persistence is unavailable.');
+    }
     try {
-        const ctx = SillyTavern.getContext();
-        const currentChatId = ctx?.chatId || null;
-        if (expectedChatId && currentChatId && String(expectedChatId) !== String(currentChatId)) {
-            console.warn(`[NWST Storage] Skipped stale metadata save: expected chat "${expectedChatId}", active chat is "${currentChatId}".`);
-            return;
-        }
         await ctx.saveMetadata();
     } catch (e) {
         console.error('[NWST Storage] saveMetadata() failed:', e);
+        throw e;
     }
 }
 
@@ -323,15 +420,28 @@ function getChatData(chatId, dataType) {
  * @param {*} value - JSON-serializable value to store
  * @returns {Promise<void>}
  */
-async function setChatData(chatId, dataType, value) {
+async function setChatDataNow(chatId, dataType, value) {
     const meta = getChatMeta(chatId, `write ${dataType}`);
     if (!meta) {
-        console.error(`[NWST Storage] setChatData("${dataType}"): chatMetadata unavailable or chat changed`);
-        return;
+        throw new Error(`Cannot save "${dataType}": chat metadata is unavailable or the active chat changed.`);
     }
 
-    meta[metaKey(dataType)] = deepClone(value);
-    await persistMeta(chatId);
+    const key = metaKey(dataType);
+    const hadPrevious = Object.prototype.hasOwnProperty.call(meta, key);
+    const previous = meta[key];
+    meta[key] = deepClone(value);
+    try {
+        await persistMeta(chatId);
+    } catch (error) {
+        if (hadPrevious) meta[key] = previous;
+        else delete meta[key];
+        throw error;
+    }
+}
+
+function setChatData(chatId, dataType, value) {
+    const snapshot = deepClone(value);
+    return enqueueMetaMutation(chatId, () => setChatDataNow(chatId, dataType, snapshot));
 }
 
 /**
@@ -342,12 +452,24 @@ async function setChatData(chatId, dataType, value) {
  * @param {string} dataType
  * @returns {Promise<void>}
  */
-async function deleteChatData(chatId, dataType) {
+async function deleteChatDataNow(chatId, dataType) {
     const meta = getChatMeta(chatId, `delete ${dataType}`);
-    if (!meta) return;
+    if (!meta) throw new Error(`Cannot delete "${dataType}": chat metadata is unavailable or the active chat changed.`);
 
-    delete meta[metaKey(dataType)];
-    await persistMeta(chatId);
+    const key = metaKey(dataType);
+    const hadPrevious = Object.prototype.hasOwnProperty.call(meta, key);
+    const previous = meta[key];
+    delete meta[key];
+    try {
+        await persistMeta(chatId);
+    } catch (error) {
+        if (hadPrevious) meta[key] = previous;
+        throw error;
+    }
+}
+
+function deleteChatData(chatId, dataType) {
+    return enqueueMetaMutation(chatId, () => deleteChatDataNow(chatId, dataType));
 }
 
 /**
@@ -387,22 +509,62 @@ function getAllChatData(chatId) {
  * @param {object} dataBundle - Object with data types as keys
  * @returns {Promise<void>}
  */
-async function setAllChatData(chatId, dataBundle) {
+async function setAllChatDataNow(chatId, dataBundle, expectedData = null) {
     if (!dataBundle) return;
 
     const meta = getChatMeta(chatId, 'bulk write');
     if (!meta) {
-        console.error('[NWST Storage] setAllChatData: chatMetadata unavailable');
-        return;
+        throw new Error('Cannot import NWST data: chat metadata is unavailable or the active chat changed.');
     }
 
-    for (const [dataType, value] of Object.entries(dataBundle)) {
-        if (DEFAULTS[dataType] !== undefined) {
-            meta[metaKey(dataType)] = deepClone(value);
+    // Compare inside the serialized transaction, not before waiting in the queue.
+    if (expectedData) {
+        for (const [type, expected] of Object.entries(expectedData)) {
+            if (JSON.stringify(getChatData(chatId, type)) !== JSON.stringify(expected)) {
+                throw new Error('NWST data changed while this review was open. Refresh and review again.');
+            }
         }
     }
+    const rollback = new Map();
 
-    await persistMeta(chatId);
+    for (const [dataType, value] of Object.entries(dataBundle)) {
+        if (!Object.prototype.hasOwnProperty.call(DEFAULTS, dataType)) continue;
+        let normalizedValue = deepClone(value);
+        if (dataType === 'notebook' && normalizedValue && typeof normalizedValue === 'object') {
+            // Older exports predate the Hidden Intentions Notebook ledger.
+            // Materialize the empty section during import so the next export is
+            // already canonical even before the first intention scan runs.
+            if (!Array.isArray(normalizedValue.hiddenIntentions)) normalizedValue.hiddenIntentions = [];
+        }
+        if (dataType === 'hiddenIntentionsState' && normalizedValue && typeof normalizedValue === 'object') {
+            // Never import an in-flight lock from a different browser/session.
+            normalizedValue.scanInProgress = false;
+            normalizedValue.backfillInProgress = false;
+        }
+        const key = metaKey(dataType);
+        rollback.set(key, {
+            existed: Object.prototype.hasOwnProperty.call(meta, key),
+            value: meta[key]
+        });
+        meta[key] = normalizedValue;
+    }
+
+    try {
+        await persistMeta(chatId);
+    } catch (error) {
+        for (const [key, previous] of rollback) {
+            if (previous.existed) meta[key] = previous.value;
+            else delete meta[key];
+        }
+        throw error;
+    }
+}
+
+function setAllChatData(chatId, dataBundle, expectedData = null) {
+    // Validate and freeze the entire payload before the first metadata mutation.
+    const snapshot = deepClone(dataBundle);
+    const expected = expectedData == null ? null : deepClone(expectedData);
+    return enqueueMetaMutation(chatId, () => setAllChatDataNow(chatId, snapshot, expected));
 }
 
 /**
@@ -412,12 +574,19 @@ async function setAllChatData(chatId, dataBundle) {
  * @param {string} chatId - Accepted for API compatibility
  * @returns {Promise<void>}
  */
-async function deleteAllChatData(chatId) {
+async function deleteAllChatDataNow(chatId) {
     const meta = getChatMeta(chatId, 'delete all');
-    if (!meta) return;
+    if (!meta) throw new Error('Cannot clear NWST data: chat metadata is unavailable or the active chat changed.');
+
+    const rollback = new Map();
 
     for (const dataType of Object.keys(DEFAULTS)) {
-        delete meta[metaKey(dataType)];
+        const key = metaKey(dataType);
+        rollback.set(key, {
+            existed: Object.prototype.hasOwnProperty.call(meta, key),
+            value: meta[key]
+        });
+        delete meta[key];
     }
 
     // Also clear standalone NWST metadata keys that aren't part of DEFAULTS.
@@ -431,10 +600,26 @@ async function deleteAllChatData(chatId) {
         'nwst:scansSinceReconcile'
     ];
     for (const key of STANDALONE_KEYS) {
+        if (!rollback.has(key)) rollback.set(key, {
+            existed: Object.prototype.hasOwnProperty.call(meta, key),
+            value: meta[key]
+        });
         delete meta[key];
     }
 
-    await persistMeta(chatId);
+    try {
+        await persistMeta(chatId);
+    } catch (error) {
+        for (const [key, previous] of rollback) {
+            if (previous.existed) meta[key] = previous.value;
+            else delete meta[key];
+        }
+        throw error;
+    }
+}
+
+function deleteAllChatData(chatId) {
+    return enqueueMetaMutation(chatId, () => deleteAllChatDataNow(chatId));
 }
 
 /**
@@ -476,7 +661,8 @@ function chatHasData(chatId) {
     const hasNotebook = Boolean(notebook && [notebook.core, notebook.mystery]
         .filter(section => section && typeof section === 'object')
         .some(section => Object.values(section).some(list => Array.isArray(list) && list.length > 0)))
-        || (Array.isArray(notebook?.secrets) && notebook.secrets.length > 0);
+        || (Array.isArray(notebook?.secrets) && notebook.secrets.length > 0)
+        || (Array.isArray(notebook?.hiddenIntentions) && notebook.hiddenIntentions.length > 0);
 
     const communities = meta[metaKey('communities')];
     const hasCommunities = Array.isArray(communities) && communities.length > 0;
@@ -599,7 +785,9 @@ export {
     DEFAULT_SNAPSHOTS,
     DEFAULT_CONTEXT_SNAPSHOTS,
     DEFAULT_ALIAS_REGISTRY,
+    DEFAULT_ALIAS_BLACKLIST,
     DEFAULT_SECRETS_SIDECAR_STATE,
+    DEFAULT_HIDDEN_INTENTIONS_REPAIR_BACKUP,
     DEFAULT_SECRETS_META,
     DEFAULTS
 };

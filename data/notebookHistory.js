@@ -19,27 +19,22 @@
 // =============================================================================
 
 import { getNotebook, saveNotebook } from './notebook.js';
+import { getChatData, setChatData } from './storage.js';
+import { getChatId } from '../utils.js';
 
-const HISTORY_KEY = 'nwst:notebookHistory';
 const MAX_HISTORY = 15;  // last N scanner mutations are undoable
 
-function getCtx() {
-    try { return SillyTavern.getContext(); } catch (e) { return null; }
-}
-
 function loadHistory() {
-    const ctx = getCtx();
-    if (!ctx || !ctx.chatMetadata) return { entries: [], cursor: 0 };
-    const h = ctx.chatMetadata[HISTORY_KEY];
+    const chatId = getChatId();
+    const h = chatId ? getChatData(chatId, 'notebookHistory') : null;
     if (!h || !Array.isArray(h.entries)) return { entries: [], cursor: 0 };
     return { entries: h.entries, cursor: typeof h.cursor === 'number' ? h.cursor : h.entries.length };
 }
 
 async function saveHistory(history) {
-    const ctx = getCtx();
-    if (!ctx || !ctx.chatMetadata) return;
-    ctx.chatMetadata[HISTORY_KEY] = history;
-    if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
+    const chatId = getChatId();
+    if (!chatId) return;
+    await setChatData(chatId, 'notebookHistory', history);
 }
 
 // ── Mutation collection ─────────────────────────────────────────────────────

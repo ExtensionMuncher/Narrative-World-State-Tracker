@@ -101,7 +101,7 @@ GOOD bullet (community-level): "The servants operate as an informal intelligence
 BAD bullet (event-level): "Yumi's willingness to offer intelligence on Rin Hino's dawn shrine visits reveals a servant who understands that information is the only currency" — this is about Yumi's individual actions, not the community's dynamic.
 
 GOOD bullet (community-level): "Internally, the household staff is split between those who see their invisibility as protection and those who see it as erasure — a fracture that any outsider with enough perception could exploit."
-BAD bullet (event-level): "Captain Vale's direct approach to Mira signals a fracture in the household staff's usual information channels" — this analyzes a single character's action, not the community.
+BAD bullet (event-level): "A senior aide’s direct approach to the newcomer signals a fracture in the household network’s usual information channels" — this analyzes a single character's action, not the community.
 
 Each bullet must answer: what does this reveal about the COMMUNITY as a collective? Not what does it reveal about a specific character or event.
 
@@ -493,7 +493,7 @@ function refreshCommunitiesUI() {
                     <div style="margin-bottom:8px">
                         <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Members (comma-separated character names)</label>
                         <input type="text" class="text_pole nwst-community-members-input" style="width:100%" value="${escapeHTML(com.members)}"
-                            placeholder="e.g. Mira, Rowan, Elias">
+                            placeholder="e.g. Mira Vale, Alden Reed, Captain Rowan">
                     </div>
                     <div style="margin-bottom:8px">
                         <label style="display:block;font-size:11px;color:#aaa;margin-bottom:2px">Summary</label>
@@ -639,7 +639,7 @@ async function regenCommunitySummary(communityId) {
     if (recentMessages.length > 0) {
         userPrompt += `=== RECENT CHAT — EVIDENCE ONLY ===\n`;
         for (const msg of recentMessages) {
-            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
             userPrompt += `[${sender}]: ${msg.mes}\n`;
         }
         userPrompt += '\n';

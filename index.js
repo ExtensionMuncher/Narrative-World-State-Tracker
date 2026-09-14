@@ -19,7 +19,7 @@
 //
 //   GLOBAL (extensionSettings — stored once, shared across all chats):
 //     • enabled, scanPaused, debugMode
-//     • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM, secretsSidecarLLM)
+//     • connections (planningLLM, dayAdvancementLLM, narrativeConsistencyLLM, secretsSidecarLLM, hiddenIntentionsLLM)
 //     • scanFrequency
 //     • injection settings
 //     • plannerPrompt
@@ -38,6 +38,10 @@
 
 /** Unique namespace for this extension. Used for all settings and data keys. */
 const MODULE_NAME = 'nwst';
+
+/** Runtime revision used to distinguish a genuinely current initialization
+ * from a completed promise left behind by an older hot-loaded build. */
+const RUNTIME_REVISION = '1.3.54';
 
 /** Human-readable name shown in toasts and logs. */
 const MODULE_NAME_FANCY = 'Narrative World State Tracker';
@@ -119,6 +123,8 @@ const defaultSettings = {
         dayAdvancementLLM: '',
         narrativeConsistencyLLM: '',
         secretsSidecarLLM: '',
+        // Use the Planning profile by default; a dedicated profile can be selected.
+        hiddenIntentionsLLM: '__planning__',
     },
 
     // No-think soft switch: append "/no_think" to each LLM call to disable
@@ -177,7 +183,7 @@ const defaultSettings = {
         injectWorldConditions: true,
         densityMode: 'combined',   // 'token-budget' | 'combined' | 'atmospheric'
         maxActiveEvents: 12,       // Maximum total active events in the pool at any time
-        placement: 'before_main',   // 'before_main' | 'after_main' | 'top_an' | 'bottom_an' | 'at_depth'
+        placement: 'before_main',   // 'before_main' | 'after_main' | 'at_depth'
         depth: 2,
         depthRole: 'system',        // 'system' | 'user' | 'assistant'
         secretBudgetTokens: 600,    // Max tokens of secret text to inject per generation (relevance budget)
@@ -219,6 +225,24 @@ const defaultSettings = {
         },
     },
 
+    // Hidden Intentions — compact private NPC objectives/plans/priorities stored in the Notebook.
+    // Cadence is dirty-gated: the threshold only permits a scan when relevant
+    // actors or structured world state changed.
+    hiddenIntentions: {
+        enabled: true,
+        cadence: 30,
+        minimumMessages: 20,
+        cooldownMessages: 15,
+        scanRange: 40,
+        dayAdvancement: true,
+        maxActorsPerScan: 4,
+        maxActivePerActor: 5,
+        recordCapVersion: 2,
+        maxContingenciesPerActor: 1,
+        reviewNewIntentions: false,
+        autoAddConfidence: 'medium'
+    },
+
     // Internal planner instruction. Not exposed for user editing because it coordinates
     // too many subsystems for arbitrary prompt changes to be safe.
     plannerPrompt: `You are maintaining a living narrative world state for an ongoing roleplay. On each scan, review the recent messages and update: the current day block (season, weather, spiritual climate if applicable), upcoming events, and active world conditions. Write with atmospheric detail — this is a living document, not a spreadsheet. Do not invent events that contradict established facts. Flag any contradictions you detect in the inconsistencies field.`,
@@ -238,12 +262,34 @@ function initSettings() {
         extensionSettings[MODULE_NAME] = structuredClone(defaultSettings);
     } else {
         log('Settings found. Merging defaults for any new keys...');
+        const existingHiddenIntentions = extensionSettings[MODULE_NAME]?.hiddenIntentions || {};
+        const needsRecordCapMigration = Number(existingHiddenIntentions.recordCapVersion || 0) < 2;
         // Use lodash merge for deep merge — available via SillyTavern.libs
         const { lodash } = SillyTavern.libs;
         extensionSettings[MODULE_NAME] = lodash.merge(
             structuredClone(defaultSettings),
             extensionSettings[MODULE_NAME]
         );
+        // v1.3.3 introduced the five-record limit; v1.3.4 treats it as a rotating
+        // current working set rather than a first-come lifetime quota. Old installs inherited the former
+        // default of 2, so migrate them to the new five-record psychology budget.
+        if (needsRecordCapMigration) {
+            extensionSettings[MODULE_NAME].hiddenIntentions.maxActivePerActor = 5;
+            extensionSettings[MODULE_NAME].hiddenIntentions.recordCapVersion = 2;
+        }
+
+        // v1.3.48: the old Author's-Note labels were implemented as IN_CHAT
+        // depth injections (0/999), so they could disappear into Chat History
+        // instead of appearing as a named extension in Prompt Inspector.
+        // Migrate those legacy values to SillyTavern's actual static extension
+        // prompt positions. Explicit at-depth injection remains available.
+        const injection = extensionSettings[MODULE_NAME].injection ||= {};
+        if (injection.placement === 'top_an') injection.placement = 'before_main';
+        if (injection.placement === 'bottom_an') injection.placement = 'after_main';
+        const rawDepth = Number(injection.depth);
+        injection.depth = Number.isFinite(rawDepth)
+            ? Math.max(0, Math.min(999, Math.trunc(rawDepth)))
+            : 2;
     }
 
     saveSettingsDebounced();
@@ -526,12 +572,14 @@ function wireEnableToggle() {
         updateStatusLabel();
 
         if (getSetting('scanPaused')) {
-            debug('Scanning paused — stopping scanner.');
-            const { stopScanner } = await import('./llm/scanner.js');
+            debug('Scanning paused — freezing cadence and stopping scanner.');
+            const { freezeScannerCadence, stopScanner } = await import('./llm/scanner.js');
+            await freezeScannerCadence();
             stopScanner();
         } else {
-            debug('Scanning resumed — starting scanner.');
-            const { startScanner } = await import('./llm/scanner.js');
+            debug('Scanning resumed — restoring frozen cadence and starting scanner.');
+            const { resumeScannerCadence, startScanner } = await import('./llm/scanner.js');
+            await resumeScannerCadence();
             startScanner();
         }
 
@@ -612,6 +660,23 @@ async function onChatChanged() {
         resetProfileWarnings();
     } catch (e) { /* non-fatal */ }
 
+    // Recover any foreground day advancement that was interrupted after its
+    // rollback checkpoint began mutating but before commit.
+    if (chatId) {
+        try {
+            const { recoverInterruptedTimeSkip } = await import('./llm/timeskip.js');
+            await recoverInterruptedTimeSkip(chatId);
+        } catch (e) {
+            console.warn('[NWST] Interrupted Time Skip recovery failed (non-fatal):', e);
+        }
+        try {
+            const { recoverInterruptedDayAdvancement } = await import('./llm/dayAdvancement.js');
+            await recoverInterruptedDayAdvancement(chatId);
+        } catch (e) {
+            console.warn('[NWST] Interrupted day-advance recovery failed (non-fatal):', e);
+        }
+    }
+
     // Run one-time migrations for this chat
     if (chatId) {
         try {
@@ -625,7 +690,7 @@ async function onChatChanged() {
             if (moonMigrated) log(`Moon configuration migrated to per-chat storage for ${chatId}.`);
 
             // Migrate event data to ensure all events have latest fields
-            const { migrateEventData, cleanupPromotedConcludedEvents } = await import('./data/events.js');
+            const { migrateEventData, cleanupPromotedConcludedEvents, reconcileEventTiers } = await import('./data/events.js');
             const eventsMigrated = await migrateEventData(chatId);
             if (eventsMigrated > 0) {
                 log(`Event data migration: ${eventsMigrated} events updated for chat ${chatId}`);
@@ -640,11 +705,19 @@ async function onChatChanged() {
             if (temporal.changed) {
                 log(`Temporal state migration: dayCount ${temporal.dayCount}, elapsed story days ${temporal.elapsedStoryDays}.`);
             }
+            const eventReconciliation = await reconcileEventTiers(chatId);
+            if (eventReconciliation.changed) log(`Event tiers reconciled on chat load: ${eventReconciliation.retiered} moved, ${eventReconciliation.missed} missed.`);
 
             const { repairSecretKnowledgeIntegrity } = await import('./data/notebook.js');
             const repairedSecrets = await repairSecretKnowledgeIntegrity(chatId);
             if (repairedSecrets > 0) {
                 log(`Secret knowledge integrity repair: ${repairedSecrets} secret(s) normalized.`);
+            }
+
+            const { purgeUserCharacterIntentions } = await import('./llm/hiddenIntentions.js');
+            const purgedPcIntentions = await purgeUserCharacterIntentions(chatId);
+            if (purgedPcIntentions > 0) {
+                log(`Hidden Intentions integrity repair: removed ${purgedPcIntentions} user-character record(s).`);
             }
         } catch (e) {
             console.warn('[NWST] Migration check failed (non-fatal):', e);
@@ -657,11 +730,31 @@ async function onChatChanged() {
         window.nwstRefreshAllUI();
     }
 
-    // Restart scanner for the new chat (if extension is enabled and not paused)
+    // CHAT_CHANGED fires before the async migration/reconciliation work above
+    // necessarily finishes. Refresh the native extension prompt once more now
+    // so Prompt Inspector and the next generation see the settled state for the
+    // new chat rather than an early/empty registration.
+    try {
+        const { updateInjection } = await import('./inject/promptInjector.js');
+        updateInjection();
+    } catch (e) {
+        console.warn('[NWST] Prompt refresh after chat migration failed (non-fatal):', e);
+    }
+
+    // Restart scanner for the new chat. If Pause is global, snapshot this
+    // chat's cadence on entry so messages written here while paused cannot
+    // consume its main/sidecar/warmup/Hidden Intentions countdowns.
     if (getSetting('enabled') && !getSetting('scanPaused')) {
         import('./llm/scanner.js').then(({ restartScanner }) => {
             restartScanner();
         });
+    } else if (getSetting('enabled') && getSetting('scanPaused')) {
+        try {
+            const { freezeScannerCadence } = await import('./llm/scanner.js');
+            await freezeScannerCadence();
+        } catch (e) {
+            console.warn('[NWST] Could not freeze cadence for paused chat (non-fatal):', e);
+        }
     }
 
     debug('Chat metadata available:', !!chatMetadata);
@@ -679,7 +772,9 @@ export { onChatChanged };
  *   APP_READY = app is fully loaded and ready to use. Auto-fires for any new
  *               listener attached after the app is ready, so no race condition.
  */
-async function init() {
+let initializationPromise = null;
+
+async function initOnce() {
     log('═══════════════════════════════════════════');
     log('Narrative World State Tracker initializing...');
     log('═══════════════════════════════════════════');
@@ -692,6 +787,10 @@ async function init() {
     try {
         const { chatId } = SillyTavern.getContext();
         if (chatId) {
+            const { recoverInterruptedTimeSkip } = await import('./llm/timeskip.js');
+            await recoverInterruptedTimeSkip(chatId);
+            const { recoverInterruptedDayAdvancement } = await import('./llm/dayAdvancement.js');
+            await recoverInterruptedDayAdvancement(chatId);
             const { migrateLegacyData } = await import('./data/storage.js');
             const legacyMigrated = await migrateLegacyData(chatId);
             if (legacyMigrated) log(`Legacy data migrated for current chat: ${chatId}`);
@@ -701,7 +800,7 @@ async function init() {
 
             // Migrate event data to ensure all events have the latest fields
             // (participants, promotion metadata, and temporal bookkeeping fields)
-            const { migrateEventData, cleanupPromotedConcludedEvents } = await import('./data/events.js');
+            const { migrateEventData, cleanupPromotedConcludedEvents, reconcileEventTiers } = await import('./data/events.js');
             const eventsMigrated = await migrateEventData(chatId);
             if (eventsMigrated > 0) log(`Event data migration: ${eventsMigrated} events updated for chat ${chatId}`);
             const promotedEventsCleaned = await cleanupPromotedConcludedEvents(chatId);
@@ -711,11 +810,18 @@ async function init() {
             const { migrateTemporalState } = await import('./data/timeMigration.js');
             const temporal = await migrateTemporalState(chatId);
             if (temporal.changed) log(`Temporal state migration: dayCount ${temporal.dayCount}, elapsed story days ${temporal.elapsedStoryDays}.`);
+            const eventReconciliation = await reconcileEventTiers(chatId);
+            if (eventReconciliation.changed) log(`Event tiers reconciled on startup: ${eventReconciliation.retiered} moved, ${eventReconciliation.missed} missed.`);
 
 
             const { repairSecretKnowledgeIntegrity } = await import('./data/notebook.js');
             const repairedSecrets = await repairSecretKnowledgeIntegrity(chatId);
             if (repairedSecrets > 0) log(`Secret knowledge integrity repair: ${repairedSecrets} secret(s) normalized.`);
+
+
+            const { purgeUserCharacterIntentions } = await import('./llm/hiddenIntentions.js');
+            const purgedPcIntentions = await purgeUserCharacterIntentions(chatId);
+            if (purgedPcIntentions > 0) log(`Hidden Intentions integrity repair: removed ${purgedPcIntentions} user-character record(s).`);
         }
     } catch (e) {
         console.warn('[NWST] Init migration check failed (non-fatal):', e);
@@ -761,8 +867,16 @@ async function init() {
         } catch (err) {
             console.warn('[NWST] Failed to start scanner:', err);
         }
+    } else if (getSetting('enabled') && getSetting('scanPaused')) {
+        try {
+            const { freezeScannerCadence } = await import('./llm/scanner.js');
+            await freezeScannerCadence();
+            log('Scanner paused; cadence checkpoint frozen for this chat.');
+        } catch (err) {
+            console.warn('[NWST] Failed to freeze paused scanner cadence:', err);
+        }
     } else {
-        log('Scanner not started (disabled or paused).');
+        log('Scanner not started (disabled).');
     }
 
     // Register slash commands
@@ -771,6 +885,45 @@ async function init() {
 
     log('NWST initialization complete. ✅');
     log('───────────────────────────────────────────');
+}
+
+// APP_READY may be replayed by SillyTavern and extension modules may be hot
+// re-evaluated. Keep one initialization owner so listeners, commands and paid
+// background work cannot be registered twice.
+function init() {
+    // Persist the guard on window as well as module scope. A hot module reload
+    // creates a new module instance, but must not create a second extension.
+    if (typeof window !== 'undefined' && window.__nwstInitializationPromise) {
+        if (window.__nwstRuntimeRevision === RUNTIME_REVISION) {
+            initializationPromise = window.__nwstInitializationPromise;
+            return initializationPromise;
+        }
+
+        // A newer build was evaluated over an already-running NWST instance.
+        // Do not rerun the entire initializer (which would duplicate scanners,
+        // UI handlers and commands). Replace only the version-sensitive prompt
+        // handler; registerPromptInjection() detaches the prior module's handler.
+        initializationPromise = Promise.resolve(window.__nwstInitializationPromise)
+            .then(async () => {
+                const { registerPromptInjection } = await import('./inject/promptInjector.js');
+                registerPromptInjection();
+                window.__nwstRuntimeRevision = RUNTIME_REVISION;
+            });
+        window.__nwstInitializationPromise = initializationPromise;
+        return initializationPromise;
+    }
+    if (!initializationPromise) {
+        initializationPromise = initOnce().catch(error => {
+            initializationPromise = null;
+            if (typeof window !== 'undefined') window.__nwstInitializationPromise = null;
+            throw error;
+        });
+        if (typeof window !== 'undefined') {
+            window.__nwstInitializationPromise = initializationPromise;
+            window.__nwstRuntimeRevision = RUNTIME_REVISION;
+        }
+    }
+    return initializationPromise;
 }
 
 // ── Slash commands ───────────────────────────────────────────────────────────

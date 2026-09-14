@@ -1,3 +1,4 @@
+import { hasExplicitNarrativeEvidence } from './persistentEvidence.js';
 /* eslint-disable */
 // =============================================================================
 // NWST Message Scanner — llm/scanner.js
@@ -31,10 +32,15 @@ import { runConsistencyCheck } from './narrativeConsistency.js';
 import { runNotebookReconcile } from './notebookReconcile.js';
 import { getReconcileCadence } from '../settings.js';
 import { runSecretsSidecar } from './secretsSidecar.js';
-import { getSidecarCadence, getSecretDecayThreshold } from '../settings.js';
+import { getSidecarCadence, getSecretDecayThreshold, getHiddenIntentionsConfig } from '../settings.js';
 import { dlog } from "../lib/debug.js";
+import { completeEventParticipants } from './eventParticipants.js';
 import { buildAliasRegistry, toCanonicalId } from '../data/aliasRegistry.js';
 import { buildWorldEvidenceSources, formatWorldEvidenceSources, collectRecentCastNames, validateWorldConditionPayload, isLikelySceneContaminatedCondition } from './worldConditionEvidence.js';
+import { markLatestMessageForHiddenIntentions, queueHiddenIntentionsCadenceCheck, markHiddenIntentionsFromScan } from './hiddenIntentions.js';
+import { getChatData, setChatData } from '../data/storage.js';
+import { getHiddenIntentions, getHiddenIntentionsState, saveHiddenIntentionsState } from '../data/hiddenIntentions.js';
+import { isForwardDetectedEvent, isNarrativeChatMessage } from './detectedEventValidation.js';
 
 // ── Scanner state ─────────────────────────────────────────────────────────
 //
@@ -69,13 +75,14 @@ let _lastScanSuccessAt = 0;
 let _lastScanSuccessCount = 0;
 let _lastScanRangeStart = null;
 let _lastScanRangeEnd = null;
+let _pauseCadenceSnapshot = null; // Frozen per-chat cadence coordinates while Pause is active
+let _scannerStateChatId = null;
 
 // ── Scanner state persistence (survives page reload) ──────────────────────
 // Saves the scanner's cadence position to chatMetadata so reloading the page
 // doesn't reset the countdown. Without this, every reload restarts the
 // 20-message countdown from scratch even if the scanner was at message 18.
 
-const SCANNER_STATE_KEY = 'nwst:scannerState';
 const SCAN_ABORTED_CHAT_CHANGE = 'chat-changed';
 
 function isExpectedChat(chatId) {
@@ -83,12 +90,15 @@ function isExpectedChat(chatId) {
 }
 
 function saveScannerState() {
+    const expectedChatId = getChatId();
+    if (!expectedChatId) return;
     try {
-        const { chatMetadata, saveMetadata } = SillyTavern.getContext();
-        if (!chatMetadata) return;
-        chatMetadata[SCANNER_STATE_KEY] = {
+        const snapshot = {
             messageCountAtLastScan,
+            messageCountAtLastSidecar,
+            warmupMessageCount,
             scanPhase,
+            pauseCadenceSnapshot: _pauseCadenceSnapshot ? { ..._pauseCadenceSnapshot } : null,
             lastScanFailureCount: _lastScanFailureCount,
             lastScanFailureReason: _lastScanFailureReason,
             lastScanFailureAt: _lastScanFailureAt,
@@ -97,16 +107,177 @@ function saveScannerState() {
             lastScanRangeStart: _lastScanRangeStart,
             lastScanRangeEnd: _lastScanRangeEnd
         };
-        saveMetadata(); // fire-and-forget — non-critical
+        // Keep callers non-blocking, but route the write through the guarded
+        // storage layer so a chat switch cannot persist this state elsewhere.
+        setChatData(expectedChatId, 'scannerState', snapshot).catch(e => {
+            dlog('[NWST Scanner] Cadence state save failed:', e);
+        });
     } catch (e) { /* non-fatal */ }
 }
 
 function loadScannerState() {
     try {
-        const { chatMetadata } = SillyTavern.getContext();
-        if (!chatMetadata) return null;
-        return chatMetadata[SCANNER_STATE_KEY] || null;
+        const chatId = getChatId();
+        return chatId ? getChatData(chatId, 'scannerState') : null;
     } catch (e) { return null; }
+}
+
+function normalizeScannerStateForPause(savedState = null, currentCount = getCurrentMessageCount()) {
+    const chatId = getChatId();
+    const hasCurrentModuleState = Boolean(chatId && _scannerStateChatId === chatId);
+    const stored = savedState && typeof savedState === 'object' ? { ...savedState } : {};
+
+    // When this chat owns the live module state, prefer it over persisted
+    // metadata because setChatData() is queued/async and may still be flushing
+    // the immediately preceding successful scan.
+    const phase = hasCurrentModuleState
+        ? scanPhase
+        : (stored.scanPhase === 'cadence' || stored.scanPhase === 'warmup'
+            ? stored.scanPhase
+            : (chatHasData(chatId) ? 'cadence' : 'warmup'));
+
+    const lastScan = hasCurrentModuleState
+        ? Math.max(0, Number(messageCountAtLastScan) || 0)
+        : (Number.isFinite(Number(stored.messageCountAtLastScan))
+            ? Math.max(0, Number(stored.messageCountAtLastScan))
+            : 0);
+    const lastSidecar = hasCurrentModuleState
+        ? Math.max(0, Number(messageCountAtLastSidecar) || 0)
+        : (Number.isFinite(Number(stored.messageCountAtLastSidecar))
+            ? Math.max(0, Number(stored.messageCountAtLastSidecar))
+            : currentCount);
+    let warmupBase = hasCurrentModuleState
+        ? Math.max(0, Number(warmupMessageCount) || 0)
+        : (Number.isFinite(Number(stored.warmupMessageCount))
+            ? Math.max(0, Number(stored.warmupMessageCount))
+            : currentCount);
+    const failureBase = hasCurrentModuleState
+        ? Math.max(0, Number(_lastScanFailureCount) || 0)
+        : (Number.isFinite(Number(stored.lastScanFailureCount))
+            ? Math.max(0, Number(stored.lastScanFailureCount))
+            : 0);
+
+    // Older builds did not persist the warmup baseline. Do not charge old chat
+    // history toward warmup when a pre-patch state is encountered.
+    if (phase === 'warmup' && !Number.isFinite(Number(stored.warmupMessageCount)) && !hasCurrentModuleState) {
+        warmupBase = currentCount;
+    }
+
+    return {
+        ...stored,
+        messageCountAtLastScan: lastScan,
+        messageCountAtLastSidecar: lastSidecar,
+        warmupMessageCount: warmupBase,
+        scanPhase: phase,
+        lastScanFailureCount: failureBase
+    };
+}
+
+/**
+ * Freeze every message-based NWST cadence at its exact current progress.
+ * Messages created while paused must not consume main-scan, sidecar, warmup,
+ * retry-backoff, or Hidden Intentions cadence.
+ */
+export async function freezeScannerCadence() {
+    const chatId = getChatId();
+    if (!chatId) return null;
+    const currentCount = getCurrentMessageCount();
+    const stored = normalizeScannerStateForPause(loadScannerState(), currentCount);
+    const existing = stored.pauseCadenceSnapshot && typeof stored.pauseCadenceSnapshot === 'object'
+        ? stored.pauseCadenceSnapshot
+        : null;
+    if (existing) {
+        _pauseCadenceSnapshot = { ...existing };
+        return { ...existing };
+    }
+
+    const snapshot = {
+        liveCount: currentCount,
+        messageCountAtLastScan: stored.messageCountAtLastScan,
+        messageCountAtLastSidecar: stored.messageCountAtLastSidecar,
+        warmupMessageCount: stored.warmupMessageCount,
+        scanPhase: stored.scanPhase,
+        lastScanFailureCount: stored.lastScanFailureCount
+    };
+    stored.pauseCadenceSnapshot = snapshot;
+    _pauseCadenceSnapshot = { ...snapshot };
+
+    if (_scannerStateChatId === chatId) {
+        messageCountAtLastScan = stored.messageCountAtLastScan;
+        messageCountAtLastSidecar = stored.messageCountAtLastSidecar;
+        warmupMessageCount = stored.warmupMessageCount;
+        scanPhase = stored.scanPhase;
+        _lastScanFailureCount = stored.lastScanFailureCount;
+    }
+
+    await setChatData(chatId, 'scannerState', stored);
+    emitScannerHealth();
+    return { ...snapshot };
+}
+
+/**
+ * Restore the exact pre-pause progress against the current live message count.
+ * Baselines move forward only by the paused gap, so paused prose is ignored
+ * instead of making any cadence immediately due.
+ */
+export async function resumeScannerCadence() {
+    const chatId = getChatId();
+    if (!chatId) return null;
+    const currentCount = getCurrentMessageCount();
+    const stored = normalizeScannerStateForPause(loadScannerState(), currentCount);
+    const snapshot = stored.pauseCadenceSnapshot && typeof stored.pauseCadenceSnapshot === 'object'
+        ? stored.pauseCadenceSnapshot
+        : null;
+    if (!snapshot) {
+        _pauseCadenceSnapshot = null;
+        return stored;
+    }
+
+    const pauseLiveCount = Math.max(0, Number(snapshot.liveCount) || 0);
+    const pausedDelta = Math.max(0, currentCount - pauseLiveCount);
+    const shift = value => Math.max(0, (Number(value) || 0) + pausedDelta);
+
+    stored.messageCountAtLastScan = shift(snapshot.messageCountAtLastScan);
+    stored.messageCountAtLastSidecar = shift(snapshot.messageCountAtLastSidecar);
+    stored.warmupMessageCount = shift(snapshot.warmupMessageCount);
+    stored.scanPhase = snapshot.scanPhase === 'cadence' ? 'cadence' : 'warmup';
+    stored.lastScanFailureCount = Number(snapshot.lastScanFailureCount) > 0
+        ? shift(snapshot.lastScanFailureCount)
+        : 0;
+    stored.pauseCadenceSnapshot = null;
+
+    // Hidden Intentions owns a separate message-count cadence and cooldown.
+    // Shift both coordinates by the same paused gap.
+    try {
+        const hiState = getHiddenIntentionsState(chatId);
+        hiState.lastScanMessageCount = shift(hiState.lastScanMessageCount);
+        if (Number(hiState.cooldownUntilMessage) > 0) {
+            hiState.cooldownUntilMessage = shift(hiState.cooldownUntilMessage);
+        }
+        await saveHiddenIntentionsState(chatId, hiState);
+    } catch (e) {
+        console.warn('[NWST Scanner] Hidden Intentions pause-cadence restore failed (non-fatal):', e);
+    }
+
+    await setChatData(chatId, 'scannerState', stored);
+
+    _scannerStateChatId = chatId;
+    messageCountAtLastScan = stored.messageCountAtLastScan;
+    messageCountAtLastSidecar = stored.messageCountAtLastSidecar;
+    warmupMessageCount = stored.warmupMessageCount;
+    scanPhase = stored.scanPhase;
+    _lastScanFailureCount = stored.lastScanFailureCount;
+    _pauseCadenceSnapshot = null;
+    emitScannerHealth();
+
+    return {
+        pausedDelta,
+        messageCountAtLastScan,
+        messageCountAtLastSidecar,
+        warmupMessageCount,
+        scanPhase,
+        lastScanFailureCount: _lastScanFailureCount
+    };
 }
 
 function emitScannerHealth() {
@@ -137,10 +308,25 @@ function markScanSuccess(rangeStart, rangeEnd) {
 }
 
 export function getScannerHealth() {
-    const currentCount = getCurrentMessageCount();
+    const liveCount = getCurrentMessageCount();
+    const persisted = isPaused() ? normalizeScannerStateForPause(loadScannerState(), liveCount) : null;
+    const pauseSnapshot = isPaused()
+        ? (_pauseCadenceSnapshot || persisted?.pauseCadenceSnapshot || null)
+        : null;
+    const currentCount = pauseSnapshot ? Math.max(0, Number(pauseSnapshot.liveCount) || 0) : liveCount;
+    const healthLastScan = pauseSnapshot
+        ? Math.max(0, Number(pauseSnapshot.messageCountAtLastScan) || 0)
+        : (persisted ? persisted.messageCountAtLastScan : messageCountAtLastScan);
+    const healthWarmupBase = pauseSnapshot
+        ? Math.max(0, Number(pauseSnapshot.warmupMessageCount) || 0)
+        : (persisted ? persisted.warmupMessageCount : warmupMessageCount);
+    const healthPhase = pauseSnapshot?.scanPhase || persisted?.scanPhase || scanPhase;
+    const healthFailureBase = pauseSnapshot
+        ? Math.max(0, Number(pauseSnapshot.lastScanFailureCount) || 0)
+        : (persisted ? persisted.lastScanFailureCount : _lastScanFailureCount);
     const frequency = Math.max(1, getScanFrequency());
-    const backlog = Math.max(0, currentCount - messageCountAtLastScan);
-    const messagesSinceWarmup = Math.max(0, currentCount - warmupMessageCount);
+    const backlog = Math.max(0, currentCount - healthLastScan);
+    const messagesSinceWarmup = Math.max(0, currentCount - healthWarmupBase);
     const floor = Math.max(1, getScanMinimumMessages());
     let status = 'healthy';
     let nextIn = Math.max(0, frequency - backlog);
@@ -148,12 +334,12 @@ export function getScannerHealth() {
     if (!isEnabled()) status = 'disabled';
     else if (isPaused()) status = 'paused';
     else if (isScanning) status = 'scanning';
-    else if (scanPhase === 'warmup') {
+    else if (healthPhase === 'warmup') {
         status = 'warmup';
         nextIn = Math.max(0, floor - messagesSinceWarmup);
     } else if (_lastScanFailureReason) {
         status = 'failed';
-        nextIn = _lastScanFailureCount > 0 ? Math.max(0, 3 - (currentCount - _lastScanFailureCount)) : 0;
+        nextIn = healthFailureBase > 0 ? Math.max(0, 3 - (currentCount - healthFailureBase)) : 0;
     } else if (backlog >= frequency) {
         status = 'backlog';
         nextIn = 0;
@@ -161,14 +347,15 @@ export function getScannerHealth() {
 
     return {
         status,
-        phase: scanPhase,
+        phase: healthPhase,
         isScanning,
         currentMessageCount: currentCount,
-        messageCountAtLastScan,
+        liveMessageCount: liveCount,
+        messageCountAtLastScan: healthLastScan,
         backlog,
         nextIn,
         scanFrequency: frequency,
-        warmupProgress: scanPhase === 'warmup' ? messagesSinceWarmup : null,
+        warmupProgress: healthPhase === 'warmup' ? messagesSinceWarmup : null,
         warmupFloor: floor,
         lastSuccessAt: _lastScanSuccessAt,
         lastSuccessMessageCount: _lastScanSuccessCount,
@@ -214,9 +401,19 @@ WHAT YOU DO:
    - Do NOT make a character "more badass," competent, composed, malicious, romantic, or strategic than the text supports.
    - Distinguish observed fact from interpretation. If the text supports only suspicion, record it as uncertainty rather than certainty.
 
-2. NPC EVENT DETECTION — identify EXPLICIT future plans made by characters.
-   Only flag events where a character explicitly states or clearly implies something will happen.
+2. NPC EVENT DETECTION — identify EXPLICIT, STILL-UNFULFILLED future plans made by characters.
+   Only flag an event when the supplied recent messages contain evidence that, at the END of those messages, a specific action/meeting/deadline is still expected to happen later.
    Do NOT infer or extrapolate a future plan from ordinary actions.
+   Do NOT turn a completed action, current scene activity, status report, arrival, surveillance/reconnaissance already performed, confrontation already underway, or recap into an Event.
+   A sentence may contain future-looking intent and still be ineligible if later text in the same scan window shows the action occurring, being cancelled, or becoming moot. Read the window chronologically and use the latest state.
+   Internal thoughts count only when they contain a concrete future commitment or decision that remains live. A wish, fear, possibility, prediction, assessment, or description of what someone is currently doing is not a plan.
+   For every candidate, quote the shortest exact clause that proves the action is both future-facing and still unfulfilled in futureEvidence. If no such clause exists, DO NOT return the candidate.
+
+2B. PERSISTENT EVENT DETECTION — propose only genuinely durable ongoing pressures/states that should remain tracked until an explicit textual condition ends them.
+   - Persistent is NOT a vague unresolved-thread bucket. Do not propose ordinary appointments, one-time plans, current scene activity, moods, or questions.
+   - A Persistent event must describe something already ongoing or repeatedly expected to continue (for example escalating repeated attacks, an active manhunt/blockade, or a recurring institutional pressure).
+   - Every proposal MUST include one concrete resolutionCondition describing an observable narrative occurrence that would end the state. No dates/countdowns; passage of time alone never resolves it.
+   - Keep this sparse. Return at most 2 proposals; [] is expected when no durable pressure qualifies.
 
 3. SECRET DETECTION & KNOWLEDGE TRACKING — two responsibilities:
 
@@ -252,12 +449,19 @@ WHAT YOU DO:
       - Never put the literal label "User" in knowledge lists; the named {{user}} character is a valid narrative participant.
       - When a Secret involves the {{user}} character, use type "user_pc".
 
+DETECTED NPC EVENT PARTICIPANTS — MANDATORY:
+   - Every detectedNPCEvents item MUST include a non-empty participants array.
+   - Include every named character who directly plans, attends, performs, receives, contests, or is targeted by the projected event, including the named user character when involved.
+   - Carry the list all the way out: do not stop after finding the planner. Include the other party to a call/meeting, the target of surveillance or confrontation, and every explicitly named expected attendee.
+   - Use exact character names from the chat. Exhaust the supplied cast context. If no named NPC can be responsibly identified, preserve the event with participants: [] so NWST can flag it for review; never invent a name and never omit the event solely for this field.
+
 4. EVENT MAINTENANCE — keep tracked Events truthful.
    - RESOLVED: projected moment clearly happened on-screen.
    - MISSED: its window clearly passed or premise visibly failed.
-   - TIER CORRECTIONS: only for active UNDated Events when urgency becomes clear. immediate = today/tomorrow; week = later in current weekday cycle; month = later in current calendar month.
+   - PERSISTENT EVENTS are special: NEVER place them in eventUpdates.resolved, eventUpdates.missed, or tierChanges. They do not age out. If the stored resolution condition is explicitly shown in the supplied recent messages, report it only under persistentResolutions with a shortest exact evidence quote. If the evidence is inferential, speculative, offscreen, or merely makes resolution likely, do not report it.
+   - TIER CORRECTIONS: only for active UNDated Events when urgency becomes clear. immediate = today/tomorrow; week = within the rolling seven-day horizon; month = later in the current calendar month.
    - Dated Events are placed structurally by the calendar. Do not tier-correct them.
-   - "undetermined" is deliberately timeless; never move Events in or out of it, though you may resolve/miss them.
+   - "undetermined" is the internal value for NARRATIVELY TIMED events: they have no fixed schedule and the roleplaying model may introduce them whenever narratively appropriate. Never move Events in or out of this tier, though you may resolve/miss them.
    - Reference Events by their E# labels. Be conservative; most scans should leave Events untouched.
 
 RESPONSE FORMAT — valid JSON only:
@@ -280,7 +484,25 @@ RESPONSE FORMAT — valid JSON only:
       "description": "What was explicitly stated or clearly implied",
       "tier": "immediate" | "week" | "month" | "undetermined",
       "scheduledDate": "Concrete date/day when stated or clearly implied; null otherwise",
+      "participants": ["Every named NPC directly involved; REQUIRED and non-empty"],
+      "futureEvidence": "Exact short quote proving this remains an unfulfilled future commitment at the end of the scan window",
       "detectedFrom": "brief grounding reference"
+    }
+  ],
+  "persistentEvents": [
+    {
+      "title": "Brief durable pressure label",
+      "description": "What ongoing state/pressure persists",
+      "resolutionCondition": "One explicit observable narrative occurrence that ends this state",
+      "isNPC": true | false,
+      "participants": ["Named participants when applicable"],
+      "detectedFrom": "brief grounding reference"
+    }
+  ],
+  "persistentResolutions": [
+    {
+      "eventRef": "E4",
+      "evidence": "shortest exact quote from RECENT CHAT proving the stored resolution condition occurred"
     }
   ],
   "newSecrets": [
@@ -444,9 +666,9 @@ Your summaries always include the overview paragraph. Analytical bullets are opt
 PART 1 — OVERVIEW PARAGRAPH (2-4 sentences):
 Write with narrative voice and atmosphere. Capture the emotional texture, underlying pressure, and defining dynamic of this group. Name the key players and their roles. Be specific about what makes this group distinctive — not just that tension exists, but what KIND of tension, what SHAPE the dynamic takes, what is at stake. This should read like a perceptive narrator sizing up a room, not a journalist listing facts.
 
-GOOD overview: "A family where the cracks are widening. Lena is too observant for her age and suspects Adrian is hiding serious injuries. Marcus, the usually boisterous father, has become eerily quiet — he knows more than he lets on. The household is a pressure cooker of unspoken worry, and Adrian's evasions are beginning to strain a family that loves him."
+GOOD overview: "A family where the cracks are widening. The youngest sibling is too observant to miss the unexplained injuries, while the normally boisterous parent has become eerily quiet — clearly aware of more than they admit. The household is a pressure cooker of unspoken worry, and the protagonist’s lies will soon collide with a family determined to protect its own."
 
-BAD overview: "The Vale family consists of Adrian, his siblings, and their father. There is tension because Adrian is keeping secrets." (roster and vague summary — not analysis)
+BAD overview: "The family consists of the protagonist, two siblings, and a parent. There is tension because someone is keeping secrets." (roster and vague summary — not analysis)
 
 PART 2 — ANALYTICAL OBSERVATIONS (variable count — determined by the community):
 Each bullet must be a specific, concrete observation tied to an actual moment, detail, pattern, or choice from the chat. These are interpretations — what does a specific thing REVEAL about the dynamic? What is being avoided, performed, or withheld? What does a small choice signal about a larger truth?
@@ -455,9 +677,9 @@ BULLET COUNT IS A TEST OF ANALYTICAL RIGOR. Do not aim for any specific number. 
 
 Self-critique (perform silently before finalizing): read each bullet — is it revealing something non-obvious? Is it tied to a specific detail rather than generic? If any bullet fails, delete it. If pruning leaves 0-2 bullets, that is correct. Do not add filler to reach a count.
 
-GOOD bullet (2 sentences max): "Nadia's shift from cold tactical assessment to visible concern — bringing food, giving space instead of orders — marks a structural change in how she processes Mira's role in the network. The operational detachment she uses as a shield is failing against something she cannot categorize as a variable."
+GOOD bullet (2 sentences max): "The coordinator’s shift from cold tactical assessment to visible concern — bringing food, giving space instead of orders — marks a structural change in how she processes the newcomer’s role in the network. The operational detachment she uses as a shield is failing against someone she can no longer categorize as a mere variable."
 BAD bullet (too long): same content sprawling across 4 sentences with explanation appended
-BAD bullet (summary): "Nadia brought food to Mira" — states what happened, not what it reveals
+BAD bullet (summary): "The coordinator brought food to the newcomer" — states what happened, not what it reveals
 BAD bullet (generic): "There is tension between characters" — reveals nothing
 
 BULLET LENGTH LIMIT — STRICTLY ENFORCED:
@@ -486,6 +708,8 @@ export function startScanner() {
     if (scanTimer) return;
 
     const chatId = getChatId();
+    _scannerStateChatId = chatId || null;
+
     // Module state survives chat switches, so clear the previous chat's health
     // before loading the active chat's persisted scanner state.
     messageCountAtLastScan = 0;
@@ -499,17 +723,24 @@ export function startScanner() {
     _lastScanSuccessCount = 0;
     _lastScanRangeStart = null;
     _lastScanRangeEnd = null;
+    _pauseCadenceSnapshot = null;
 
-    // Determine starting phase:
-    // If batch scan has already been run (chatHasData returns true),
-    // skip warmup and go straight to normal cadence.
-    // Otherwise start in warmup phase.
-    if (chatHasData(chatId)) {
-        // Try to restore persisted cadence position from before the reload
-        const savedState = loadScannerState();
+    const savedState = loadScannerState();
+    const hasData = chatHasData(chatId);
+
+    if (hasData) {
         if (savedState && savedState.scanPhase === 'cadence') {
             scanPhase = 'cadence';
-            messageCountAtLastScan = savedState.messageCountAtLastScan;
+            messageCountAtLastScan = Math.max(0, Number(savedState.messageCountAtLastScan) || 0);
+            messageCountAtLastSidecar = Number.isFinite(Number(savedState.messageCountAtLastSidecar))
+                ? Math.max(0, Number(savedState.messageCountAtLastSidecar))
+                : getCurrentMessageCount();
+            warmupMessageCount = Number.isFinite(Number(savedState.warmupMessageCount))
+                ? Math.max(0, Number(savedState.warmupMessageCount))
+                : 0;
+            _pauseCadenceSnapshot = savedState.pauseCadenceSnapshot && typeof savedState.pauseCadenceSnapshot === 'object'
+                ? { ...savedState.pauseCadenceSnapshot }
+                : null;
             _lastScanFailureCount = savedState.lastScanFailureCount || 0;
             _lastScanFailureReason = savedState.lastScanFailureReason || '';
             _lastScanFailureAt = savedState.lastScanFailureAt || 0;
@@ -519,27 +750,53 @@ export function startScanner() {
             _lastScanRangeEnd = Number.isInteger(savedState.lastScanRangeEnd) ? savedState.lastScanRangeEnd : null;
             dlog(`[NWST Scanner] Restored cadence position from before reload (last scan at msg ${messageCountAtLastScan}).`);
         } else {
-            // No persisted state — first load after the patch was installed,
-            // or state was cleared. Position the cadence counter at the most
-            // recent scan boundary so the next scan fires at the correct interval
-            // rather than immediately. No catch-up scan — the next message after
-            // the next boundary will trigger naturally.
             scanPhase = 'cadence';
             const currentCount = getCurrentMessageCount();
             const frequency = getScanFrequency();
             const estimatedLastScan = currentCount - (currentCount % frequency);
             messageCountAtLastScan = estimatedLastScan;
+            messageCountAtLastSidecar = currentCount;
             dlog(`[NWST Scanner] No persisted state — positioning cadence at msg ${estimatedLastScan}, next scan at msg ${estimatedLastScan + frequency}.`);
         }
+    } else if (savedState && savedState.scanPhase === 'warmup' && Number.isFinite(Number(savedState.warmupMessageCount))) {
+        // v1.3.49+: warmup cadence survives reloads and pause/resume instead of
+        // restarting from the current chat length.
+        scanPhase = 'warmup';
+        warmupMessageCount = Math.max(0, Number(savedState.warmupMessageCount));
+        messageCountAtLastSidecar = Number.isFinite(Number(savedState.messageCountAtLastSidecar))
+            ? Math.max(0, Number(savedState.messageCountAtLastSidecar))
+            : 0;
+        _pauseCadenceSnapshot = savedState.pauseCadenceSnapshot && typeof savedState.pauseCadenceSnapshot === 'object'
+            ? { ...savedState.pauseCadenceSnapshot }
+            : null;
+        dlog(`[NWST Scanner] Restored warmup position from msg ${warmupMessageCount}.`);
     } else {
         scanPhase = 'warmup';
         warmupMessageCount = getCurrentMessageCount();
         dlog(`[NWST Scanner] No batch scan data — starting in warmup phase (floor: ${getScanMinimumMessages()} messages).`);
     }
 
+    // Normal resume uses resumeScannerCadence() before startScanner(). This
+    // fallback prevents a stale persisted pause snapshot from charging paused
+    // messages if another caller starts the scanner directly.
+    if (_pauseCadenceSnapshot && !isPaused()) {
+        const currentCount = getCurrentMessageCount();
+        const pausedDelta = Math.max(0, currentCount - Math.max(0, Number(_pauseCadenceSnapshot.liveCount) || 0));
+        const shift = value => Math.max(0, (Number(value) || 0) + pausedDelta);
+        messageCountAtLastScan = shift(_pauseCadenceSnapshot.messageCountAtLastScan);
+        messageCountAtLastSidecar = shift(_pauseCadenceSnapshot.messageCountAtLastSidecar);
+        warmupMessageCount = shift(_pauseCadenceSnapshot.warmupMessageCount);
+        scanPhase = _pauseCadenceSnapshot.scanPhase === 'cadence' ? 'cadence' : 'warmup';
+        _lastScanFailureCount = Number(_pauseCadenceSnapshot.lastScanFailureCount) > 0
+            ? shift(_pauseCadenceSnapshot.lastScanFailureCount)
+            : 0;
+        _pauseCadenceSnapshot = null;
+    }
+
     const { eventSource, event_types } = SillyTavern.getContext();
     eventSource.on(event_types.MESSAGE_RECEIVED, checkAndScan);
     scanTimer = 'event-driven';
+    saveScannerState(); // also persists warmup baseline for reload/pause safety
     dlog(`[NWST Scanner] Started (cadence: every ${getScanFrequency()} messages).`);
     emitScannerHealth();
 }
@@ -587,6 +844,14 @@ async function checkAndScan() {
     const currentCount = getCurrentMessageCount();
     emitScannerHealth();
 
+    // Hidden Intentions uses the same message event without adding a decision-
+    // detector call. Cheap alias scanning marks relevant actors dirty; the
+    // actual LLM reconciliation remains cadence/cooldown gated.
+    markLatestMessageForHiddenIntentions(invocationChatId).catch(e =>
+        dlog('[NWST Scanner] Hidden Intentions activity marker failed (non-fatal):', e)
+    );
+    queueHiddenIntentionsCadenceCheck({ currentCount, isScannerBusy: () => isScanning });
+
     // ── SECRETS SIDECAR — independent cadence ────────────────────────────
     // The sidecar runs on its own interval (default 10 msgs), separate from
     // the main scanner cadence. It only fires if there are secrets to analyze
@@ -595,6 +860,7 @@ async function checkAndScan() {
     const sidecarCadence = getSidecarCadence();
     if (currentCount - messageCountAtLastSidecar >= sidecarCadence) {
         messageCountAtLastSidecar = currentCount;
+        saveScannerState();
         // Fire-and-forget — do not block the main scan path on the sidecar
         runSecretsSidecar().catch(e =>
             dlog('[NWST Scanner] Secrets sidecar error (non-fatal):', e)
@@ -756,9 +1022,11 @@ export async function runScan(windowSize = 0, startIndex = null) {
             return false;
         }
 
-        // Parse BOTH calls before applying either one. This keeps the cadence
-        // window transactional: a malformed second response cannot leave the
-        // detailed ledger half-applied and then force the same window to retry.
+        // Parse BOTH calls before applying either one. This parse-gates the
+        // cadence window: a malformed second response cannot leave the detailed
+        // ledger half-applied merely because its companion response was invalid.
+        // The later cross-domain storage writes are serialized/guarded, but are
+        // not claimed to be one global metadata transaction.
         const parsedScan = parseJsonObjectResponse(response, 'detailed continuity');
         const parsedWorldCommunity = parseJsonObjectResponse(worldCommunityResponse, 'World/Community');
         if (parsedScan === null || parsedWorldCommunity === null) {
@@ -766,9 +1034,11 @@ export async function runScan(windowSize = 0, startIndex = null) {
             return false;
         }
 
-        const detailedUpdates = await applyScanResults(chatId, parsedScan);
+        const detailedUpdates = await applyScanResults(chatId, parsedScan, recentMessages);
         if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
         const worldCommunityUpdates = await applyWorldCommunityResults(chatId, parsedWorldCommunity, worldEvidenceSources, recentMessages, communities);
+        if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
+        await markHiddenIntentionsFromScan(chatId, recentMessages, parsedScan, parsedWorldCommunity);
         if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
         const hadUpdates = detailedUpdates || worldCommunityUpdates;
 
@@ -789,20 +1059,16 @@ export async function runScan(windowSize = 0, startIndex = null) {
         try {
             const reconcileCadence = getReconcileCadence();
             if (reconcileCadence > 0 && isExpectedChat(chatId)) {
-                const ctx = SillyTavern.getContext();
-                const meta = ctx?.chatMetadata;
-                if (meta) {
-                    const count = (meta['nwst:scansSinceReconcile'] || 0) + 1;
+                {
+                    const count = (getChatData(chatId, 'scansSinceReconcile') || 0) + 1;
                     if (count >= reconcileCadence) {
-                        meta['nwst:scansSinceReconcile'] = 0;
-                        if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
+                        await setChatData(chatId, 'scansSinceReconcile', 0);
                         await runNotebookReconcile(chatId);
                         if (typeof window?.nwstRefreshTabs === 'function') {
                             window.nwstRefreshTabs('notebook');
                         }
                     } else {
-                        meta['nwst:scansSinceReconcile'] = count;
-                        if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
+                        await setChatData(chatId, 'scansSinceReconcile', count);
                     }
                 }
             }
@@ -826,8 +1092,23 @@ export async function runScan(windowSize = 0, startIndex = null) {
         markScanFailure(err?.message || 'Unexpected cadence scan error.', Number.isInteger(startIndex) ? startIndex : null, Number.isInteger(startIndex) ? startIndex + (windowSize || 0) : null);
         return false;
     } finally {
+        // If detailed Notebook application threw after one or more destructive
+        // mutations, preserve the accumulated Undo record even though the
+        // cadence window itself remains uncommitted and will be retried. A
+        // normal successful apply already commits and leaves this as a no-op.
+        try { await commitMutationBatch(); } catch (e) {
+            console.warn('[NWST Scanner] Could not finalize partial Notebook mutation history:', e);
+        }
         isScanning = false;
         emitScannerHealth();
+        // The message-level cadence check may have deferred itself while the
+        // main scanner was busy. Re-check after the transactional scan closes
+        // so newly dirtied actors can reconcile without waiting for another
+        // RP message solely to wake the Hidden Intentions sidecar.
+        queueHiddenIntentionsCadenceCheck({
+            currentCount: getCurrentMessageCount(),
+            isScannerBusy: () => isScanning
+        });
     }
 }
 
@@ -835,35 +1116,25 @@ export async function runScan(windowSize = 0, startIndex = null) {
 
 function getCurrentMessageCount() {
     try {
-        return SillyTavern.getContext().chat?.length || 0;
+        return (SillyTavern.getContext().chat || []).filter(isNarrativeChatMessage).length;
     } catch (e) { return 0; }
 }
 
 function getRecentMessages(count) {
     try {
         const ctx = SillyTavern.getContext();
-        const chat = ctx.chat || [];
+        const chat = (ctx.chat || []).filter(isNarrativeChatMessage);
         const start = Math.max(0, chat.length - count);
-        return chat.slice(start).filter(msg => {
-            // Respect ST's message visibility flags
-            // Hidden: is_system + extra.hidden, or extra.display === 'none'
-            if (msg.is_system && msg.extra?.hidden) return false;
-            if (msg.extra?.display === 'none') return false;
-            return true;
-        });
+        return chat.slice(start);
     } catch (e) { return []; }
 }
 
 function getMessagesFromRange(startIndex, count) {
     try {
         const ctx = SillyTavern.getContext();
-        const chat = ctx.chat || [];
+        const chat = (ctx.chat || []).filter(isNarrativeChatMessage);
         const start = Math.max(0, startIndex || 0);
-        return chat.slice(start, start + count).filter(msg => {
-            if (msg.is_system && msg.extra?.hidden) return false;
-            if (msg.extra?.display === 'none') return false;
-            return true;
-        });
+        return chat.slice(start, start + count);
     } catch (e) { return []; }
 }
 
@@ -878,7 +1149,7 @@ function buildScannerPrompt(recentMessages, worldState, notebook, activeEvents, 
     // Recent messages — the primary input
     prompt += `=== RECENT CHAT MESSAGES ===\n`;
     for (const msg of recentMessages) {
-        const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+        const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
         prompt += `[${sender}]: ${msg.mes}\n`;
     }
     prompt += '\n';
@@ -962,6 +1233,21 @@ function buildWorldCommunityPrompt(worldState, communities, evidenceSources) {
         prompt += `[${key.toUpperCase()}]: ${cond.content || '(empty)'}\n`;
     }
     prompt += `These saved conditions may already be overly scene-focused. Preserve their valid WORLD-LEVEL facts, but do not imitate scene-level granularity.\n\n`;
+
+    const hiCfg = getHiddenIntentionsConfig();
+    const activeIntentions = hiCfg.enabled
+        ? getHiddenIntentions(getChatId()).filter(item => !['parked', 'resolved', 'abandoned', 'stale', 'pending_review'].includes(item.status) && item.type !== 'emerging_interest').slice(0, 12)
+        : [];
+    if (activeIntentions.length > 0) {
+        prompt += `=== PRIVATE ACTOR PRESSURES — HIDDEN INTENTIONS (NOT ACCOMPLISHED FACTS) ===\n`;
+        prompt += `Use these only to understand possible collective pressure or emerging fractures. Never claim a private plan succeeded, became public, or changed a community unless the labeled world evidence or recent narrative independently supports that outcome.\n`;
+        for (const item of activeIntentions) {
+            prompt += `- ${item.actor} [${item.type}/${item.domain}]: ${item.objective || item.nextAction || '(unspecified objective)'}`;
+            if (item.nextAction) prompt += ` | Next pressure: ${item.nextAction}`;
+            prompt += ` | status=${item.status} | confidence=${item.confidence}\n`;
+        }
+        prompt += `\n`;
+    }
 
     prompt += `=== CURRENT COMMUNITIES — DURABLE GROUP STATE ===\n`;
     if (communities.length === 0) {
@@ -1095,7 +1381,7 @@ async function upsertAliasAwareMysteryBullet(chatId, field, bullet) {
 }
 
 /** Apply the detailed continuity result after both cadence calls parsed. */
-async function applyScanResults(chatId, result) {
+async function applyScanResults(chatId, result, recentMessages = []) {
     if (!result || result.noChanges === true) {
         dlog('[NWST Scanner] Detailed continuity call indicated no changes needed.');
         return false;
@@ -1152,12 +1438,15 @@ async function applyScanResults(chatId, result) {
             for (const bullet of bullets) {
                 if (bullet && typeof bullet === 'string' && bullet.trim()) {
                     if (field === 'offscreenPressure') {
-                        // Source-keyed and alias-aware: "Daniel" and "Daniel Rowan"
+                        // Source-keyed and alias-aware: "Alden" and "Alden Vale"
                         // cannot accumulate two concurrent pressure entries.
                         const diff = await upsertAliasAwareCoreBullet(chatId, field, bullet.trim());
                         if (diff && (diff.removed.length || diff.added.length)) recordMutation('core', field, diff.removed, diff.added);
                     } else {
-                        await addCoreBullet(chatId, field, bullet.trim());
+                        const trimmed = bullet.trim();
+                        const current = getCoreField(chatId, field) || [];
+                        if (current.includes(trimmed)) continue; // retry-safe after a partial cadence failure
+                        await addCoreBullet(chatId, field, trimmed);
                     }
                     hadUpdates = true;
                 }
@@ -1181,7 +1470,10 @@ async function applyScanResults(chatId, result) {
                         const diff = await replaceMysteryFieldDiff(chatId, field, [bullet.trim()]);
                         if (diff && (diff.removed.length || diff.added.length)) recordMutation('mystery', field, diff.removed, diff.added);
                     } else {
-                        await addMysteryBullet(chatId, field, bullet.trim());
+                        const trimmed = bullet.trim();
+                        const current = getMysteryField(chatId, field) || [];
+                        if (current.includes(trimmed)) continue; // retry-safe after a partial cadence failure
+                        await addMysteryBullet(chatId, field, trimmed);
                     }
                     hadUpdates = true;
                 }
@@ -1222,20 +1514,43 @@ async function applyScanResults(chatId, result) {
             const byRef = new Map();
             activeList.forEach((ev, i) => byRef.set(`e${i + 1}`, ev));
             const refToEvent = (ref) => byRef.get(String(ref).trim().toLowerCase()) || null;
+
+            // Persistent resolution is evidence-gated and player-approved. The
+            // ordinary automatic resolved/missed arrays are never allowed to
+            // conclude Persistent state.
+            for (const proposal of (Array.isArray(result.persistentResolutions) ? result.persistentResolutions : [])) {
+                const ev = refToEvent(proposal?.eventRef);
+                const evidence = String(proposal?.evidence || '').trim();
+                if (!ev || ev.tier !== 'persistent' || ev.persistentResolutionFlag) continue;
+                if (!ev.resolutionCondition || !hasExplicitNarrativeEvidence(evidence, recentMessages)) {
+                    dlog(`[NWST Scanner] Rejected weak/unverifiable Persistent resolution for "${ev?.title || '(unknown)'}".`);
+                    continue;
+                }
+                await updateEvt(chatId, ev.id, {
+                    persistentResolutionFlag: {
+                        evidence: evidence.slice(0, 500),
+                        condition: String(ev.resolutionCondition).slice(0, 600),
+                        ts: Date.now()
+                    }
+                });
+                dlog(`[NWST Scanner] Persistent resolution evidence queued for review: "${ev.title}"`);
+                hadUpdates = true;
+            }
+
             // Undetermined is protected: neither a valid source nor target
             // for automated tier changes (status changes remain allowed).
             const VALID_TIERS = ['immediate', 'week', 'month'];
 
             for (const ref of (Array.isArray(evUpdates.resolved) ? evUpdates.resolved : [])) {
                 const ev = refToEvent(ref);
-                if (!ev || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
+                if (!ev || ev.tier === 'persistent' || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
                 await setEvtStatus(chatId, ev.id, 'resolved');
                 dlog(`[NWST Scanner] Event resolved by scan: "${ev.title}"`);
                 hadUpdates = true;
             }
             for (const ref of (Array.isArray(evUpdates.missed) ? evUpdates.missed : [])) {
                 const ev = refToEvent(ref);
-                if (!ev || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
+                if (!ev || ev.tier === 'persistent' || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
                 await setEvtStatus(chatId, ev.id, 'missed');
                 dlog(`[NWST Scanner] Event marked missed by scan: "${ev.title}"`);
                 hadUpdates = true;
@@ -1244,7 +1559,7 @@ async function applyScanResults(chatId, result) {
             for (const [ref, tier] of Object.entries(tierChanges)) {
                 const ev = refToEvent(ref);
                 if (!ev || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
-                if (ev.tier === 'undetermined') continue;
+                if (ev.tier === 'undetermined' || ev.tier === 'persistent') continue;
                 if (ev.scheduledDate || typeof ev.scheduledElapsedStart === 'number') continue;
                 if (!VALID_TIERS.includes(tier) || ev.tier === tier) continue;
                 await updateEvt(chatId, ev.id, { tier });
@@ -1256,17 +1571,89 @@ async function applyScanResults(chatId, result) {
         }
     }
 
+    // ── Store Persistent additions for user review ───────────────────────
+    // Additions are proposals only. Persistent has a separate hard cap of 3
+    // active records and requires a resolution condition before approval.
+    const persistentProposals = (Array.isArray(result.persistentEvents) ? result.persistentEvents : [])
+        .map(event => ({
+            ...event,
+            title: String(event?.title || '').trim(),
+            description: String(event?.description || '').trim(),
+            tier: 'persistent',
+            scheduledDate: null,
+            resolutionCondition: String(event?.resolutionCondition || '').replace(/\s+/g, ' ').trim().slice(0, 600),
+            participants: Array.isArray(event?.participants) ? event.participants.map(x => String(x || '').trim()).filter(Boolean).slice(0, 12) : [],
+            isNPC: Boolean(event?.isNPC),
+            npcOrigin: event?.isNPC ? 'detected' : null,
+            origin: 'detected',
+            status: 'pending'
+        }))
+        .filter(event => event.title && event.description && event.resolutionCondition)
+        .slice(0, 2);
+    if (persistentProposals.length > 0) {
+        try {
+            const { getActivePersistentEvents, MAX_ACTIVE_PERSISTENT_EVENTS } = await import('../data/events.js');
+            const existing = getChatData(chatId, 'pendingEvents') || [];
+            const activePersistent = getActivePersistentEvents(chatId).length;
+            const pendingPersistent = existing.filter(event => event?.tier === 'persistent').length;
+            let slots = Math.max(0, MAX_ACTIVE_PERSISTENT_EVENTS - activePersistent - pendingPersistent);
+            const trackedTitles = new Set(getTrackedEvents(chatId).map(event => String(event.title || '').toLowerCase().trim()).filter(Boolean));
+            const pendingTitles = new Set(existing.map(event => String(event.title || '').toLowerCase().trim()).filter(Boolean));
+            for (const ev of persistentProposals) {
+                if (slots <= 0) break;
+                const titleKey = ev.title.toLowerCase();
+                if (trackedTitles.has(titleKey) || pendingTitles.has(titleKey)) continue;
+                existing.push({
+                    ...ev,
+                    id: `pending_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                    proposedAt: Date.now()
+                });
+                pendingTitles.add(titleKey);
+                slots--;
+                hadUpdates = true;
+            }
+            await setChatData(chatId, 'pendingEvents', existing.slice(-100));
+        } catch (e) {
+            console.warn('[NWST Scanner] Failed to stage Persistent event proposals:', e);
+        }
+    }
+
     // ── Store detected NPC events for user review ─────────────────────────
     // These are proposed, NOT auto-committed — stored as pendingEvents for UI review
-    const detectedEvents = result.detectedNPCEvents || [];
+    let detectedEvents = (Array.isArray(result.detectedNPCEvents) ? result.detectedNPCEvents : [])
+        .filter(event => {
+            // Detection is intentionally fail-closed. A proposal without source
+            // evidence is cheaper to miss than a completed scene recap is to
+            // misfile as a future Event. The scanner prompt requires a short
+            // verbatim clause for every live plan.
+            const evidence = String(event?.futureEvidence || '').trim();
+            if (!evidence) {
+                dlog(`[NWST Scanner] Rejected detected event without future evidence: "${event?.title || '(untitled)'}"`);
+                return false;
+            }
+            if (!isForwardDetectedEvent(event)) {
+                dlog(`[NWST Scanner] Rejected detected event whose evidence does not establish a future action: "${event?.title || '(untitled)'}"`);
+                return false;
+            }
+            return true;
+        });
     if (detectedEvents.length > 0) {
+        const participantResult = await completeEventParticipants(chatId, detectedEvents.map(event => ({
+            ...event,
+            isNPC: true,
+            npcOrigin: 'detected'
+        })), { communities: getAllCommunities(chatId) || [], notebook: getNotebook(chatId) });
+        detectedEvents = participantResult.events;
+        if (participantResult.invalidNPC.length) {
+            console.warn('[NWST Scanner] Preserving detected NPC event(s) that still need participant review:', participantResult.invalidNPC);
+        }
         // Store proposed events in a staging area for UI review
         // The UI will display these with approve/dismiss options
         try {
             if (!isExpectedChat(chatId)) return hadUpdates;
-            const { chatMetadata, saveMetadata } = SillyTavern.getContext();
-            const existing = chatMetadata['nwst:pendingEvents'] || [];
+            const existing = getChatData(chatId, 'pendingEvents') || [];
             const existingTitles = new Set(existing.map(e => e.title?.toLowerCase().trim()));
+            let unresolvedStored = 0;
             for (const ev of detectedEvents) {
                 if (ev.title && ev.description && !existingTitles.has(ev.title.toLowerCase().trim())) {
                     existing.push({
@@ -1279,12 +1666,18 @@ async function applyScanResults(chatId, result) {
                         proposedAt: Date.now()
                     });
                     existingTitles.add(ev.title.toLowerCase().trim());
+                    if (ev.isNPC && (!Array.isArray(ev.participants) || ev.participants.length === 0)) unresolvedStored++;
                 }
             }
-            chatMetadata['nwst:pendingEvents'] = existing;
-            await saveMetadata();
+            // An unattended cadence scanner must not grow chat metadata without
+            // limit if proposals are left unreviewed for a long roleplay.
+            const bounded = existing.slice(-100);
+            await setChatData(chatId, 'pendingEvents', bounded);
             hadUpdates = true;
             dlog(`[NWST Scanner] ${detectedEvents.length} NPC event(s) proposed for review.`);
+            if (unresolvedStored > 0) {
+                nwstToast(`${unresolvedStored} NPC event(s) failed to generate with a named participant. They were preserved for review in Events.`, 'warning');
+            }
         } catch (e) {
             console.error('[NWST Scanner] Failed to store pending events:', e);
         }
@@ -1481,13 +1874,29 @@ export async function synthesizeCommunities(chatId, messages) {
         // Provide full message history for community analysis
         userPrompt += `=== CHAT MESSAGES ===\n`;
         for (const msg of messages) {
-            const sender = msg.name || (msg.is_user ? 'User' : 'Character');
+            const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
             userPrompt += `[${sender}]: ${msg.mes}\n`;
         }
         userPrompt += '\n';
 
         if (settingContext) {
             userPrompt += `=== SETTING CONTEXT ===\n${settingContext}\n\n`;
+        }
+
+        const hiCfg = getHiddenIntentionsConfig();
+        const activeIntentions = hiCfg.enabled
+            ? getHiddenIntentions(chatId).filter(item => !['parked', 'resolved', 'abandoned', 'stale', 'pending_review'].includes(item.status) && item.type !== 'emerging_interest').slice(0, 16)
+            : [];
+        if (activeIntentions.length > 0) {
+            userPrompt += `=== PRIVATE ACTOR PRESSURES — HIDDEN INTENTIONS (NOT ACCOMPLISHED FACTS) ===\n`;
+            userPrompt += `These records may explain possible faction pressure, internal disagreement, or future movement. Do not present an intention as a completed action or durable community change unless the chat messages independently show that consequence.\n`;
+            for (const item of activeIntentions) {
+                userPrompt += `- ${item.actor} [${item.type}/${item.domain}]: ${item.objective || item.nextAction || '(unspecified objective)'}`;
+                if (item.strategy) userPrompt += ` | Strategy: ${item.strategy}`;
+                if (item.nextAction) userPrompt += ` | Next action: ${item.nextAction}`;
+                userPrompt += ` | status=${item.status} | confidence=${item.confidence}\n`;
+            }
+            userPrompt += `\n`;
         }
 
         if (existingCommunities.length > 0) {

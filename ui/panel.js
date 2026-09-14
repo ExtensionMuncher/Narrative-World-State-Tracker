@@ -13,7 +13,7 @@ import { buildHomeTab, refreshHomeUI } from './home.js';
 import { buildSettingsTab, refreshSettingsUI } from './settings.js';
 import { buildEventsTab, refreshEventsUI } from './events.js';
 import { buildWorldStateTab, refreshWorldStateUI } from './worldState.js';
-import { buildNotebookTab, refreshNotebookUI } from './notebook.js';
+import { buildNotebookTab, refreshNotebookUI, collapseHiddenIntentionsForNotebookExit } from './notebook.js';
 import { dlog } from "../lib/debug.js";
 
 // ── Module state ──────────────────────────────────────────────────────────
@@ -35,8 +35,15 @@ const builtTabs = {
  *
  * @param {string} tabName - 'home' | 'events' | 'world' | 'notebook' | 'settings'
  */
+let activeTabName = null;
+
 function onTabSwitched(tabName) {
     dlog(`[NWST Panel] Tab switched to: ${tabName}`);
+
+    if (activeTabName === 'notebook' && tabName !== 'notebook') {
+        collapseHiddenIntentionsForNotebookExit();
+    }
+    activeTabName = tabName;
 
     // Lazy-build on first access
     if (!builtTabs[tabName]) {
@@ -211,7 +218,10 @@ if (typeof window !== 'undefined') {
  * the target element's current value. On save, writes back.
  */
 function wirePopoutHandler() {
-    $(document).on('click', '.nwst-expand-btn', async function () {
+    // Delegated handlers survive panel rebuilds, so namespace and replace the
+    // old registration instead of accumulating one per initialization.
+    $(document).off('click.nwst_expand', '.nwst-expand-btn');
+    $(document).on('click.nwst_expand', '.nwst-expand-btn', async function () {
         // Skip if ST's native editor_maximize handler will handle this button
         if ($(this).hasClass('editor_maximize')) return;
 
@@ -273,4 +283,3 @@ export function initializeTabs() {
     // buildTab('settings');
     // builtTabs.settings = true;
 }
-

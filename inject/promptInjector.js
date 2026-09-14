@@ -39,21 +39,25 @@
 //
 // =============================================================================
 
-import { extension_prompt_roles } from '../../../../../script.js';
+// setExtensionPrompt is exported by SillyTavern's root module; it is not
+// reliably exposed by SillyTavern.getContext(). Import both prompt APIs from
+// their authoritative source so a refresh cannot fail before registration.
+import { extension_prompt_roles, setExtensionPrompt } from '../../../../../script.js';
 import { getCurrentDay, getForecast, getMoonPhases,
-         getEnabledConditions, getSeasonConfig } from '../data/worldState.js';
+         getEnabledConditions, getSeasonConfig, getCalendarConfig } from '../data/worldState.js';
 import { getActiveEvents } from '../data/events.js';
 import {
     isInjectCurrentDay, isInjectEvents, isInjectWorldConditions,
     getInjectionPlacement, getInjectionDepth, getInjectionDepthRole,
     isEnabled, isPaused, getDensityMode
 } from '../settings.js';
-import { getChatId } from '../index.js';
+import { getChatId } from '../utils.js';
 import { buildSecretsInjection } from '../llm/secretsInjection.js';
 import { computeSeason, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
 import { getMoonConfig } from '../data/moons.js';
 import { buildNagerHolidayPromptBlock } from '../data/nagerDate.js';
 import { dlog } from "../lib/debug.js";
+import { parseCurrentCalendarDate } from '../lib/calendarMath.js';
 
 // ── Role string → numeric mapper ──────────────────────────────────────────
 
@@ -165,13 +169,15 @@ function buildCurrentDayBlock(day, chatId, mode) {
     if (!day || (!day.dateDisplay && !day.season && !day.weatherToday)) return '';
 
     const seasonConfig  = getSeasonConfig(chatId);
+    const calendarConfig = getCalendarConfig(chatId);
+    const parsedDate = parseCurrentCalendarDate(day.dateDisplay || '', day.dateSub || '', calendarConfig, false);
     const computedSeason = computeSeason(day.dayCount || 0, seasonConfig);
     const displaySeason  = (computedSeason !== null && computedSeason !== undefined)
         ? computedSeason : day.season;
 
     const spiritualEnabled = (() => {
         const conditions = getEnabledConditions(chatId);
-        return conditions.spiritual?.enabled !== false;
+        return Object.prototype.hasOwnProperty.call(conditions, 'spiritual');
     })();
 
     if (mode === 'token-budget') {
@@ -290,13 +296,18 @@ function buildEventsBlock(events, mode) {
         immediate:    events.filter(e => e.tier === 'immediate'),
         week:         events.filter(e => e.tier === 'week'),
         month:        events.filter(e => e.tier === 'month'),
-        undetermined: events.filter(e => e.tier === 'undetermined')
+        undetermined: events.filter(e => e.tier === 'undetermined'),
+        persistent:   events.filter(e => e.tier === 'persistent')
     };
 
     const tierLabels = {
         immediate: 'Immediate', week: 'This Week',
-        month: 'This Month',   undetermined: 'Undetermined'
+        month: 'This Month',   undetermined: 'Narratively Timed — Introduce When Appropriate',
+        persistent: 'Persistent — Remains Active Until Explicitly Resolved'
     };
+
+    const narrativeTimingInstruction = 'Events under "Narratively Timed" have no fixed schedule. You may introduce or advance them whenever doing so is narratively appropriate, guided by pacing, character agency, and current circumstances.';
+    const persistentInstruction = 'Persistent events represent ongoing pressures or states. Keep them active until the listed resolution condition is explicitly shown in the narrative; the passage of time alone does not resolve them.';
 
     if (mode === 'token-budget') {
         // Title only — no descriptions, but markdown headers preserved
@@ -304,8 +315,12 @@ function buildEventsBlock(events, mode) {
         for (const [tier, tierEvents] of Object.entries(grouped)) {
             if (tierEvents.length === 0) continue;
             block += `### ${tierLabels[tier]}:\n`;
-            block += tierEvents.map(e => `    - ${e.title}`).join('\n') + '\n';
+            block += tierEvents.map(e => tier === 'persistent'
+                ? `    - ${e.title}${e.resolutionCondition ? ` [Resolves when: ${trimToWords(e.resolutionCondition, 24)}]` : ''}`
+                : `    - ${e.title}`).join('\n') + '\n';
         }
+        if (grouped.undetermined.length > 0) block += `${narrativeTimingInstruction}\n`;
+        if (grouped.persistent.length > 0) block += `${persistentInstruction}\n`;
         return block.trim();
 
     } else if (mode === 'combined') {
@@ -318,9 +333,14 @@ function buildEventsBlock(events, mode) {
                 const desc = event.description
                     ? ` — ${trimToSentences(event.description, 1)}`
                     : '';
-                block += `    - ${event.title}${desc}\n`;
+                const resolution = tier === 'persistent' && event.resolutionCondition
+                    ? ` [Resolves when: ${trimToSentences(event.resolutionCondition, 1)}]`
+                    : '';
+                block += `    - ${event.title}${desc}${resolution}\n`;
             }
         }
+        if (grouped.undetermined.length > 0) block += `${narrativeTimingInstruction}\n`;
+        if (grouped.persistent.length > 0) block += `${persistentInstruction}\n`;
         return block.trim();
 
     } else {
@@ -330,9 +350,14 @@ function buildEventsBlock(events, mode) {
             if (tierEvents.length === 0) continue;
             block += `### ${tierLabels[tier]}:\n`;
             for (const event of tierEvents) {
-                block += `    - ${event.title}: ${event.description}\n`;
+                const resolution = tier === 'persistent' && event.resolutionCondition
+                    ? ` [Resolves when: ${event.resolutionCondition}]`
+                    : '';
+                block += `    - ${event.title}: ${event.description}${resolution}\n`;
             }
         }
+        if (grouped.undetermined.length > 0) block += `${narrativeTimingInstruction}\n`;
+        if (grouped.persistent.length > 0) block += `${persistentInstruction}\n`;
         return block.trim();
     }
 }
@@ -383,8 +408,22 @@ function buildConditionsBlock(conditions, mode) {
 
 // ── ST Integration ────────────────────────────────────────────────────────
 
-const INJECTION_KEY = 'nwst_world_state';
-const PREVIEW_KEY   = 'nwst_world_state_preview';
+// Use a fresh native extension-prompt key. v1.3.42 accidentally persisted
+// `nwst_world_state` into Prompt Manager, so reusing that identifier can leave
+// the host with a stale saved-prompt/runtime collision that Prompt Inspector
+// does not reliably represent. Legacy identifiers are actively cleared below.
+const INJECTION_KEY = 'nwst_world_state_runtime';
+const LEGACY_PROMPT_KEYS = Object.freeze([
+    'nwst_world_state',
+    'nwst_world_state_preview',
+    'nwst-world-state-preview',
+]);
+
+function clearLegacyRuntimePrompts() {
+    for (const key of LEGACY_PROMPT_KEYS) {
+        setExtensionPrompt(key, '', 0, 0, false, extension_prompt_roles.SYSTEM);
+    }
+}
 
 function buildInjectionBlockWithState(chatId) {
     if (!isEnabled()) return '';
@@ -420,14 +459,22 @@ function buildInjectionBlockWithState(chatId) {
 
 export function updateInjection() {
     const chatId = getChatId();
-    if (!chatId) return;
+
+    // Always clear every identifier used by the broken/preview implementations.
+    // A live legacy extension prompt is a second paid prompt entry and may also
+    // mask the current entry in Prompt Inspector depending on host state.
+    clearLegacyRuntimePrompts();
+
+    // A chat can briefly be absent while SillyTavern is loading or switching.
+    // Do not leave the previous chat's world state registered during that gap.
+    if (!chatId) {
+        setExtensionPrompt(INJECTION_KEY, '', 0, 0, false, extension_prompt_roles.SYSTEM);
+        return;
+    }
 
     const config = getInjectionConfig();
-    const { setExtensionPrompt } = SillyTavern.getContext();
-
     if (!config) {
         setExtensionPrompt(INJECTION_KEY, '', 0, 0, false, extension_prompt_roles.SYSTEM);
-        setExtensionPrompt(PREVIEW_KEY,   '', 0, 0, false, extension_prompt_roles.SYSTEM);
         return;
     }
 
@@ -435,24 +482,23 @@ export function updateInjection() {
         INJECTION_KEY, config.content, config.position,
         config.depth || 0, false, config.role ?? extension_prompt_roles.SYSTEM
     );
-    // The preview key carries the SAME content at position 0 (IN_PROMPT) so the
-    // world-state block is visible in ST's Prompt List / Inspect view (the same
-    // pattern other extensions use, e.g. rst_stat_block_preview). When the main
-    // injection is placed at-depth, the preview key is what surfaces it in the
-    // prompt manager UI. This is intentional visibility, not duplicate content
-    // in the sense of two independent blocks — they share one logical injection.
-    setExtensionPrompt(
-        PREVIEW_KEY, config.content, 0, 0, false, extension_prompt_roles.SYSTEM
-    );
 }
 
 export function registerPromptInjection() {
     const { eventSource, event_types } = SillyTavern.getContext();
-    eventSource.on(event_types.MESSAGE_SENT,    () => updateInjection());
-    eventSource.on(event_types.MESSAGE_RECEIVED, () => updateInjection());
-    eventSource.on(event_types.CHAT_CHANGED,    () => updateInjection());
+    // Keep the prior module instance's handler reference on window so a true
+    // hot reload can detach it; a new import has a different function identity.
+    const prior = typeof window !== 'undefined' ? window.__nwstPromptInjectionHandler : null;
+    const events = [event_types.MESSAGE_SENT, event_types.MESSAGE_RECEIVED,
+        event_types.CHAT_CHANGED, event_types.GENERATION_STARTED,
+        event_types.OAI_PRESET_CHANGED_AFTER, event_types.CHATCOMPLETION_SOURCE_CHANGED,
+        event_types.APP_READY].filter(Boolean);
+    for (const event of new Set(events)) {
+        if (prior) eventSource.removeListener?.(event, prior);
+        eventSource.on(event, updateInjection);
+    }
+    if (typeof window !== 'undefined') window.__nwstPromptInjectionHandler = updateInjection;
     updateInjection();
-    cleanupStalePromptManagerEntry();
 
     dlog('[NWST PromptInjector] Prompt injection registered.');
     dlog(`  - Density mode: ${getDensityMode()}`);
@@ -462,29 +508,6 @@ export function registerPromptInjection() {
     dlog(`  - Placement: ${getInjectionPlacement()}`);
 }
 
-function cleanupStalePromptManagerEntry() {
-    try {
-        const { chatCompletionSettings, saveSettingsDebounced } = SillyTavern.getContext();
-        if (!chatCompletionSettings || !Array.isArray(chatCompletionSettings.prompts)) return;
-        let changed = false;
-        // Remove stale prompt manager entries for BOTH the injection key and the
-        // preview key.
-        for (const key of [INJECTION_KEY, PREVIEW_KEY]) {
-            const promptIdx = chatCompletionSettings.prompts.findIndex(p => p?.identifier === key);
-            if (promptIdx !== -1) { chatCompletionSettings.prompts.splice(promptIdx, 1); changed = true; }
-            if (Array.isArray(chatCompletionSettings.prompt_order)) {
-                for (const charOrder of chatCompletionSettings.prompt_order) {
-                    if (Array.isArray(charOrder?.order)) {
-                        const orderIdx = charOrder.order.findIndex(e => e?.identifier === key);
-                        if (orderIdx !== -1) { charOrder.order.splice(orderIdx, 1); changed = true; }
-                    }
-                }
-            }
-        }
-        if (changed) saveSettingsDebounced();
-    } catch (e) { /* non-fatal */ }
-}
-
 export function getInjectionConfig() {
     if (!isEnabled()) return null;
     const placement = getInjectionPlacement();
@@ -492,18 +515,32 @@ export function getInjectionConfig() {
     const content   = buildInjectionBlockWithState(chatId);
     if (!content) return null;
 
-    const config = { content };
+    const config = { content, depth: 0 };
     switch (placement) {
-        case 'before_main': config.position = 2; config.role = extension_prompt_roles.SYSTEM; break;
-        case 'after_main':  config.position = 0; config.role = extension_prompt_roles.SYSTEM; break;
-        case 'top_an':      config.position = 1; config.depth = 0;   config.role = extension_prompt_roles.SYSTEM; break;
-        case 'bottom_an':   config.position = 1; config.depth = 999; config.role = extension_prompt_roles.SYSTEM; break;
-        case 'at_depth':
-            config.position = 1;
-            config.depth    = getInjectionDepth();
-            config.role     = ROLE_MAP[getInjectionDepthRole()] ?? extension_prompt_roles.SYSTEM;
+        // Static extension-prompt positions become named Prompt Inspector entries
+        // in Chat Completion, matching RST/Memory Loom's main injections.
+        case 'before_main':
+        case 'top_an': // legacy value; settings migration rewrites this to before_main
+            config.position = 2;
+            config.role = extension_prompt_roles.SYSTEM;
             break;
-        default: config.position = 0; config.role = extension_prompt_roles.SYSTEM;
+        case 'after_main':
+        case 'bottom_an': // legacy value; settings migration rewrites this to after_main
+            config.position = 0;
+            config.role = extension_prompt_roles.SYSTEM;
+            break;
+        case 'at_depth': {
+            config.position = 1;
+            const requestedDepth = Number(getInjectionDepth());
+            config.depth = Number.isFinite(requestedDepth)
+                ? Math.max(0, Math.min(999, Math.trunc(requestedDepth)))
+                : 2;
+            config.role = ROLE_MAP[getInjectionDepthRole()] ?? extension_prompt_roles.SYSTEM;
+            break;
+        }
+        default:
+            config.position = 2;
+            config.role = extension_prompt_roles.SYSTEM;
     }
     return config;
 }

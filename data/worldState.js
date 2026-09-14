@@ -417,6 +417,26 @@ export function getCalendarConfig(chatId) {
             ? storedNager.holidayTypes.filter(type => allowedHolidayTypes.includes(type))
             : ['Public'];
         const upcomingDaysRaw = Number(storedNager.upcomingDays);
+        const legacyStandardLooksCustom = (() => {
+            const months = Number(stored.months || 12);
+            const names = Array.isArray(stored.monthNames) ? stored.monthNames : DEFAULT_CALENDAR_CONFIG.monthNames;
+            const days = Array.isArray(stored.monthDays) ? stored.monthDays : DEFAULT_CALENDAR_CONFIG.monthDays;
+            const weekdays = Array.isArray(stored.weekDays) ? stored.weekDays : DEFAULT_CALENDAR_CONFIG.weekDays;
+            const same = (a, b) => a.length === b.length && a.every((value, index) => String(value) === String(b[index]));
+            return months !== 12
+                || !same(names, DEFAULT_CALENDAR_CONFIG.monthNames)
+                || !same(days, DEFAULT_CALENDAR_CONFIG.monthDays)
+                || !same(weekdays, DEFAULT_CALENDAR_CONFIG.weekDays)
+                || Boolean(String(stored.eraName || '').trim());
+        })();
+        const rawCalendarSystem = String(stored.calendarSystem || '').toLowerCase();
+        const calendarSystem = rawCalendarSystem === 'lunisolar'
+            ? 'lunisolar'
+            : rawCalendarSystem === 'custom'
+                ? 'custom'
+                : rawCalendarSystem === 'gregorian'
+                    ? 'gregorian'
+                    : (rawCalendarSystem === 'standard' && legacyStandardLooksCustom ? 'custom' : 'gregorian');
         return {
             enabled: stored.enabled || false,
             months: stored.months || 12,
@@ -438,10 +458,10 @@ export function getCalendarConfig(chatId) {
             specialDays: Array.isArray(stored.specialDays) ? stored.specialDays : [],
             // Optional era label for custom calendars ("Third Age {year}").
             eraName: typeof stored.eraName === 'string' ? stored.eraName : '',
-            // Calendar engine. Existing chats default to standard/static month
-            // lengths; lunisolar mode dynamically supplies 29/30-day months and
-            // intercalary months while preserving the configured display names.
-            calendarSystem: stored.calendarSystem === 'lunisolar' ? 'lunisolar' : 'standard',
+            // Public calendar modes: Gregorian, Lunisolar, or Custom. Legacy
+            // 'standard' exports are interpreted as Custom only when their saved
+            // month/week structure actually differs from Gregorian defaults.
+            calendarSystem,
             lunisolar: {
                 engine: 'east_asian',
                 leapMonthLabel: (typeof stored.lunisolar?.leapMonthLabel === 'string' && stored.lunisolar.leapMonthLabel.trim())
@@ -471,7 +491,7 @@ export function getCalendarConfig(chatId) {
         startWeekday: 1,
         specialDays: [],
         eraName: '',
-        calendarSystem: 'standard',
+        calendarSystem: 'gregorian',
         lunisolar: {
             ...DEFAULT_CALENDAR_CONFIG.lunisolar
         },
@@ -568,6 +588,39 @@ export function getSnapshots(chatId) {
 }
 
 /**
+ * Delete one snapshot by key. Used to remove an internal rollback checkpoint
+ * after a failed day advancement has been restored, so Previous Day does not
+ * later offer a no-op checkpoint from an operation that never completed.
+ */
+export async function deleteSnapshot(chatId, rangeKey) {
+    if (!rangeKey) return false;
+    const snapshots = getSnapshots(chatId);
+    if (!Object.prototype.hasOwnProperty.call(snapshots, rangeKey)) return false;
+    delete snapshots[rangeKey];
+    await setChatData(chatId, 'snapshots', snapshots);
+    return true;
+}
+
+export async function commitDayAdvanceSnapshot(chatId, rangeKey) {
+    if (!rangeKey) return false;
+    const snapshots = getSnapshots(chatId);
+    if (!Object.prototype.hasOwnProperty.call(snapshots, rangeKey)) return false;
+    snapshots[rangeKey] = { ...snapshots[rangeKey], pendingDayAdvance: false };
+    await setChatData(chatId, 'snapshots', snapshots);
+    return true;
+}
+
+export async function commitTimeSkipSnapshot(chatId, rangeKey) {
+    if (!rangeKey) return false;
+    const snapshots = getSnapshots(chatId);
+    if (!Object.prototype.hasOwnProperty.call(snapshots, rangeKey)) return false;
+    snapshots[rangeKey] = { ...snapshots[rangeKey], pendingTimeSkip: false };
+    await setChatData(chatId, 'snapshots', snapshots);
+    return true;
+}
+
+
+/**
  * Save a snapshot at a specific message range boundary.
  * Each snapshot contains a full copy of world state, events, and notebook at that point.
  * @param {string} chatId
@@ -576,7 +629,7 @@ export function getSnapshots(chatId) {
  * @param {object[]} eventsSnapshot - Full events array at this boundary
  * @param {object} notebookSnapshot - Full notebook at this boundary
  */
-export async function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsSnapshot, notebookSnapshot) {
+export async function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsSnapshot, notebookSnapshot, snapshotMeta = {}) {
     const snapshots = getSnapshots(chatId);
 
     // Handle both range keys ("123-456") and non-range keys ("day_1234567890", "batch_scan")
@@ -604,19 +657,36 @@ export async function saveSnapshot(chatId, rangeKey, worldStateSnapshot, eventsS
                 })) : []
             };
         })(),
-        savedAt: Date.now()
+        savedAt: Date.now(),
+        // Internal transaction marker. Undefined/false means the snapshot is a
+        // normal user-visible rewind point. A true marker means a day advance
+        // began mutating after this checkpoint but never reached commit.
+        pendingDayAdvance: snapshotMeta?.pendingDayAdvance === true,
+        // Time Skip uses the same persisted snapshot store for crash/reload
+        // recovery. The marker is cleared only after the skip commits or an
+        // in-process rollback completes successfully.
+        pendingTimeSkip: snapshotMeta?.pendingTimeSkip === true
     };
 
     // ── Prune oldest snapshots if over the cap ────────────────────────────
-    // Keeps regular snapshot history bounded. Oldest pruneable snapshots are removed
-    // first. batch_scan and pre_skip snapshots are protected landmarks and are never
-    // pruned; if protected landmarks alone exceed the configured target, the stored
-    // total can exceed that target.
+    // Keep landmark snapshots useful but bounded. Older builds treated every
+    // pre_skip snapshot as permanently protected, allowing metadata to grow
+    // forever in long-running chats.
     const maxCount = getMaxSnapshotCount();
-    const allKeys = Object.keys(snapshots);
+    let allKeys = Object.keys(snapshots);
+
+    const newestFirst = keys => keys.sort((a, b) =>
+        Number(snapshots[b]?.savedAt || snapshots[b]?.messageRangeEnd || 0)
+        - Number(snapshots[a]?.savedAt || snapshots[a]?.messageRangeEnd || 0));
+    const excessLandmarks = [
+        ...newestFirst(allKeys.filter(k => k.startsWith('batch_scan'))).slice(1),
+        ...newestFirst(allKeys.filter(k => k.startsWith('pre_skip'))).slice(5)
+    ];
+    for (const key of excessLandmarks) delete snapshots[key];
+    allKeys = Object.keys(snapshots);
 
     if (allKeys.length > maxCount) {
-        // Separate protected snapshots from pruneable ones
+        // Retain only the bounded landmark set above.
         const protected_keys = allKeys.filter(k =>
             k.startsWith('batch_scan') || k.startsWith('pre_skip')
         );

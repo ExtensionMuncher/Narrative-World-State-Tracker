@@ -21,10 +21,10 @@
 //
 // WHAT IT RETURNS (cached in chatMetadata, consumed by the scoring engine):
 //   {
-//     charactersPresent: ["rowan", "elias"],   // canonical IDs, pronouns resolved
+//     charactersPresent: ["alden", "mira"],   // canonical IDs, pronouns resolved
 //     sceneType: "npc_cutaway",                   // player_present|npc_cutaway|surveillance|faction|mixed
-//     activePressures: ["elias_surveillance"],   // free-text pressure tags
-//     sceneSummary: "Elias and Noah observe...", // one-line Qvink-style
+//     activePressures: ["alden_surveillance"],   // free-text pressure tags
+//     sceneSummary: "Alden and Mira observe...", // one-line Qvink-style
 //     analyzedAtMessageIndex: 142                  // for staleness tracking
 //   }
 //
@@ -40,6 +40,8 @@ import { buildAliasRegistry } from '../data/aliasRegistry.js';
 import { getUserCharacterIdentity } from '../data/secretsMeta.js';
 import { dlog } from '../lib/debug.js';
 import { getChatData, setChatData } from '../data/storage.js';
+
+let sidecarInFlight = false;
 
 // ── Sidecar system prompt ─────────────────────────────────────────────────
 
@@ -63,7 +65,7 @@ RULES FOR charactersPresent (read carefully — this is the most error-prone fie
 - Use canonical IDs from the roster exactly. If someone acts but isn't in the roster, omit them.
 - Resolve pronouns: if "he"/"she"/"they" clearly refers to a rostered character acting across several lines, include that character.
 - DO NOT include a character who is only:
-  * mentioned in passing ("she thought about Rowan") — that is a thought, not presence
+  * mentioned in passing ("she thought about Alden") — that is a thought, not presence
   * named inside an in-world document the characters are reading (a surveillance report, an order record, a text message, a file, an email, a database result, a printout) — being NAMED IN DATA is not being PRESENT
   * referenced as absent, remembered, or discussed but not there
 - Organizations, teams, and groups (e.g. a syndicate, a "surveillance team", a "staff") are NOT characters — do not put them in charactersPresent. They belong in sceneType reasoning only.
@@ -205,6 +207,10 @@ async function saveSidecarState(chatId, state) {
  */
 export async function runSecretsSidecar() {
     if (!isEnabled() || isPaused()) return null;
+    if (sidecarInFlight) {
+        dlog('[NWST SecretsSidecar] A scene analysis is already running; duplicate call skipped.');
+        return null;
+    }
 
     const chatId = getChatId();
     if (!chatId) return null;
@@ -222,6 +228,7 @@ export async function runSecretsSidecar() {
         return null;
     }
 
+    sidecarInFlight = true;
     try {
         const registry = buildAliasRegistry(chatId);
         const scanRange = Math.max(1, parseInt(getSidecarScanRange(), 10) || 5);
@@ -260,6 +267,8 @@ export async function runSecretsSidecar() {
     } catch (err) {
         console.error('[NWST SecretsSidecar] Sidecar failed:', err);
         return null;
+    } finally {
+        sidecarInFlight = false;
     }
 }
 

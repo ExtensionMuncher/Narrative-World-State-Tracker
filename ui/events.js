@@ -24,6 +24,7 @@ import { getAllSecrets } from '../data/notebook.js';
 import { getCurrentDay } from '../data/worldState.js';
 import { resolveSpecialDayCategory } from '../data/specialDays.js';
 import { regenerateAllEvents, regenerateTierEvents } from '../llm/eventGen.js';
+import { buildPendingEventsSectionHTML, refreshPendingEvents, wirePendingEvents } from './pendingEvents.js';
 
 // ── Build the Events tab HTML ─────────────────────────────────────────────
 
@@ -41,18 +42,22 @@ export function buildEventsTab() {
             <span style="color:#8a5a00">NPC</span> events are detected automatically from character plans, meetings, and interactions.
         </div>
 
+        ${buildPendingEventsSectionHTML()}
+
         <!-- Tier groups are generated dynamically -->
         <div id="nwst-events-container">
             <div class="nwst-nb-empty">Loading events...</div>
         </div>
     `;
 
+    wirePendingEvents();
     refreshEventsUI();
 }
 
 // ── Refresh the Events tab ────────────────────────────────────────────────
 
 export function refreshEventsUI() {
+    refreshPendingEvents();
     const container = document.getElementById('nwst-events-container');
     if (!container) return;
 
@@ -80,6 +85,33 @@ export function refreshEventsUI() {
         validityHtml += `</div>`;
     }
 
+    // ── Persistent resolution review queue ───────────────────────
+    // Persistent events never conclude from calendar aging or silent LLM
+    // maintenance. The scanner may only queue explicit textual evidence for
+    // the player's Resolve / Keep decision.
+    const persistentResolutionQueue = getAllEvents(chatId).filter(ev =>
+        ev.tier === 'persistent'
+        && ev.persistentResolutionFlag
+        && (ev.status === 'pending' || ev.status === 'inprogress'));
+    if (persistentResolutionQueue.length > 0) {
+        validityHtml += `<div class="nwst-event-group" style="border:1px solid #9a72c7;border-radius:8px;padding:8px;margin-bottom:10px">`;
+        validityHtml += `<div class="nwst-lbl" style="margin-bottom:6px">♾ Persistent resolution evidence — explicit narrative matches awaiting your decision</div>`;
+        for (const ev of persistentResolutionQueue) {
+            const f = ev.persistentResolutionFlag || {};
+            const condition = String(ev.resolutionCondition || '').replace(/</g, '&lt;');
+            const evidence = String(f.evidence || '').replace(/</g, '&lt;');
+            validityHtml += `<div style="margin-bottom:8px;padding:6px;background:rgba(154,114,199,0.08);border-radius:6px">`;
+            validityHtml += `<div style="font-weight:600;font-size:13px">${(ev.title || '').replace(/</g, '&lt;')}</div>`;
+            validityHtml += `<div style="font-size:11px;color:#999;margin-top:3px"><b>Resolves when:</b> ${condition || '(missing condition)'}</div>`;
+            validityHtml += `<div style="font-size:12px;color:#bbb;margin:4px 0"><b>Evidence:</b> ${evidence || '(no evidence text supplied)'}</div>`;
+            validityHtml += `<div style="display:flex;gap:6px;margin-top:4px">`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-persistent-resolve" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">✓ Resolve event</button>`;
+            validityHtml += `<button class="menu_button nwst-btn nwst-persistent-keep" data-event-id="${ev.id}" style="font-size:11px;padding:3px 10px">Keep persistent</button>`;
+            validityHtml += `</div></div>`;
+        }
+        validityHtml += `</div>`;
+    }
+
     // ── Timing proposal queue — undetermined events whose timing the ──────
     // story has fixed, per the day-advance review. Accept moves the event
     // out of undetermined (the only automated-adjacent door out of that
@@ -90,7 +122,7 @@ export function refreshEventsUI() {
         && (ev.status === 'pending' || ev.status === 'inprogress'));
     if (timingQueue.length > 0) {
         validityHtml += `<div class="nwst-event-group" style="border:1px solid #b5a76a;border-radius:8px;padding:8px;margin-bottom:10px">`;
-        validityHtml += `<div class="nwst-lbl" style="margin-bottom:6px">⏰ Timing proposals — undetermined events whose timing the story has fixed</div>`;
+        validityHtml += `<div class="nwst-lbl" style="margin-bottom:6px">⏰ Timing proposals — narratively timed events whose timing the story has fixed</div>`;
         for (const ev of timingQueue) {
             const f = ev.timingFlag;
             const reason = (f.reason || '').replace(/</g, '&lt;');
@@ -135,7 +167,8 @@ export function refreshEventsUI() {
         { key: 'immediate', label: 'Immediate' },
         { key: 'week', label: 'This week' },
         { key: 'month', label: 'This month' },
-        { key: 'undetermined', label: 'Undetermined', noRegen: true }
+        { key: 'undetermined', label: 'Narratively Timed', noRegen: true },
+        { key: 'persistent', label: 'Persistent' }
     ];
 
     let html = validityHtml;
@@ -149,7 +182,10 @@ export function refreshEventsUI() {
         if (!tier.noRegen) {
             html += `<button class="menu_button nwst-btn-regen nwst-events-tier-regen" style="font-size:11px;padding:3px 9px" data-tier="${tier.key}">✦ Generate</button>`;
         } else {
-            html += `<div style="font-size:11px;color:#999">Not generated — timing is intentional</div>`;
+            html += `<div style="font-size:11px;color:#999">The roleplaying model may introduce these whenever narratively appropriate</div>`;
+        }
+        if (tier.key === 'persistent') {
+            html += `<div style="font-size:11px;color:#999;margin-left:auto">Persists until its explicit resolution condition is shown in the narrative · max 3 active</div>`;
         }
         html += `</div>`;
 
@@ -162,7 +198,7 @@ export function refreshEventsUI() {
         }
 
         html += `</div>`;
-        if (tier.key !== 'undetermined') {
+        if (tier.key !== 'persistent') {
             html += `<div class="nwst-div"></div>`;
         }
     }
@@ -183,6 +219,10 @@ function buildEventItemHTML(event) {
     const promotedBadge = event.promotedSecretId
         ? '<span class="nwst-badge nwst-badge-promoted" title="Promoted to secret">🔒 Secret</span>'
         : '';
+    const participantWarningBadge = event.isNPC && (!Array.isArray(event.participants) || event.participants.length === 0)
+        ? '<span class="nwst-badge" style="background:rgba(212,154,61,.18);border:1px solid rgba(212,154,61,.65)" title="This NPC event was preserved but still needs a named participant">⚠ Participant</span>'
+        : '';
+    const tierDisplayLabel = event.tier === 'undetermined' ? 'Narratively Timed' : event.tier === 'persistent' ? 'Persistent' : capitalize(event.tier);
 
     // Show promote button only for resolved/missed events that haven't been promoted yet
     const canPromote = (event.status === 'resolved' || event.status === 'missed') && !event.promotedSecretId;
@@ -196,8 +236,9 @@ function buildEventItemHTML(event) {
             <div class="nwst-event-dot nwst-${event.tier}"></div>
             <div class="nwst-event-title">${escapeHTML(event.title)}</div>
             ${event.scheduledDate ? `<span class="nwst-event-time" title="Click to edit scheduled time">${escapeHTML(event.scheduledDate)}</span>` : ''}
-            <span class="nwst-badge nwst-badge-${event.tier}">${capitalize(event.tier)}</span>
+            <span class="nwst-badge nwst-badge-${event.tier}">${tierDisplayLabel}</span>
             ${event.isNPC ? '<span class="nwst-badge nwst-badge-npc">NPC</span>' : ''}
+            ${participantWarningBadge}
             ${event.origin === 'special_day' ? `<span class="nwst-badge" style="background:rgba(181,167,106,0.25);border:1px solid #b5a76a" title="Player-defined calendar day">${(() => { const c = resolveSpecialDayCategory(event.specialDayCategory); return `${c.chip} ${escapeHTML(c.label)}`; })()}</span>` : ''}
             <span class="nwst-badge nwst-badge-${event.status}">${statusLabel(event.status)}</span>
             ${promotedBadge}
@@ -214,10 +255,15 @@ function buildEventItemHTML(event) {
                         <option value="immediate"${event.tier === 'immediate' ? ' selected' : ''}>Immediate</option>
                         <option value="week"${event.tier === 'week' ? ' selected' : ''}>This week</option>
                         <option value="month"${event.tier === 'month' ? ' selected' : ''}>This month</option>
-                        <option value="undetermined"${event.tier === 'undetermined' ? ' selected' : ''}>Undetermined</option>
+                        <option value="undetermined"${event.tier === 'undetermined' ? ' selected' : ''}>Narratively Timed</option>
+                        <option value="persistent"${event.tier === 'persistent' ? ' selected' : ''}>Persistent</option>
                     </select>
-                    <input type="text" class="nwst-events-scheduled" value="${event.scheduledDate ? escapeHTML(event.scheduledDate) : ''}" style="flex:1;font-size:13px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;" placeholder="e.g. Day 3, March 15...">
+                    <input type="text" class="nwst-events-scheduled" value="${event.scheduledDate ? escapeHTML(event.scheduledDate) : ''}" style="flex:1;font-size:13px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;${event.tier === 'persistent' ? 'opacity:.45' : ''}" placeholder="e.g. Day 3, March 15..." ${event.tier === 'persistent' ? 'disabled' : ''}>
                 </div>
+            </div>
+            <div class="nwst-events-resolution-wrap" style="margin-bottom:8px;${event.tier === 'persistent' ? '' : 'display:none'}">
+                <div style="font-size:11px;color:#999;margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Resolution condition <span style="color:#ccc;font-weight:normal;text-transform:none">(Persistent only)</span></div>
+                <textarea class="nwst-events-resolution" rows="2" style="width:100%;font-size:12px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px" placeholder="Explicit narrative condition that must be shown before this event can resolve">${escapeHTML(event.resolutionCondition || '')}</textarea>
             </div>
             <div style="margin-bottom:8px">
                 <div style="display:flex;align-items:center;gap:8px">
@@ -285,17 +331,29 @@ function wireEventItemEvents() {
                             <option value="immediate">Immediate</option>
                             <option value="week">This week</option>
                             <option value="month">This month</option>
-                            <option value="undetermined" selected>Undetermined</option>
+                            <option value="undetermined" selected>Narratively Timed</option>
+                            <option value="persistent">Persistent</option>
                         </select>
                     </div>
                     <div style="margin-bottom:14px">
-                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Scheduled date / time <span style="color:#ccc;font-style:italic">(optional)</span></label>
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Resolution condition <span style="color:#ccc;font-style:italic">(required for Persistent)</span></label>
+                        <textarea class="text_pole" rows="2" style="width:100%" placeholder="e.g. Resolve only after the next Hollow attack is explicitly shown on-screen"
+                            oninput="window._nwstAddEventResolution=this.value"></textarea>
+                    </div>
+                    <div style="margin-bottom:14px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Scheduled date / time <span style="color:#ccc;font-style:italic">(ignored for Persistent)</span></label>
                         <input type="text" class="text_pole" style="width:100%" placeholder="e.g. Day 3, March 15, Evening of the festival..."
                             oninput="window._nwstAddEventScheduled=this.value">
                     </div>
+                    <div style="margin-bottom:14px">
+                        <label style="display:block;font-size:12px;margin-bottom:4px;color:#999">Participants <span style="color:#ccc;font-style:italic">(required for NPC events)</span></label>
+                        <input type="text" class="text_pole" style="width:100%" placeholder="e.g. Mira Vale, Alden Reed"
+                            oninput="window._nwstAddEventParticipants=this.value">
+                        <div style="font-size:11px;color:#888;margin-top:4px;line-height:1.4">List direct attendees, organizers, responsible actors, or subjects. World events may remain empty only when no named character is directly involved.</div>
+                    </div>
                     <div style="padding:6px 0">
                         <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none">
-                            <input type="checkbox" id="nwst-add-event-isnpc" class="checkbox_input"
+                            <input type="checkbox" id="nwst-add-event-isnpc" class="checkbox_input" onchange="window._nwstAddEventIsNPC=this.checked"
                                 style="width:16px;height:16px;flex-shrink:0;cursor:pointer">
                             <div>
                                 <div style="font-size:13px;font-weight:500">NPC event</div>
@@ -311,6 +369,9 @@ function wireEventItemEvents() {
             window._nwstAddEventDesc = '';
             window._nwstAddEventTier = 'undetermined';
             window._nwstAddEventScheduled = '';
+            window._nwstAddEventResolution = '';
+            window._nwstAddEventParticipants = '';
+            window._nwstAddEventIsNPC = false;
 
             const result = await callGenericPopup(formHtml, POPUP_TYPE.TEXT, '', {
                 okButton: 'Add event',
@@ -322,10 +383,21 @@ function wireEventItemEvents() {
                 const description = window._nwstAddEventDesc?.trim() || 'No description provided.';
                 const tier = window._nwstAddEventTier || 'undetermined';
 
-                // Read directly from DOM — onchange globals don't fire reliably inside ST's popup
+                // The popup may already have removed its DOM after confirmation.
                 const npcCheckbox = document.getElementById('nwst-add-event-isnpc');
-                const isNPC = npcCheckbox ? npcCheckbox.checked : false;
-                const scheduledDate = window._nwstAddEventScheduled?.trim() || null;
+                const isNPC = npcCheckbox ? npcCheckbox.checked : Boolean(window._nwstAddEventIsNPC);
+                const scheduledDate = tier === 'persistent' ? null : (window._nwstAddEventScheduled?.trim() || null);
+                const resolutionCondition = window._nwstAddEventResolution?.trim() || null;
+                if (tier === 'persistent' && !resolutionCondition) {
+                    nwstToast('Persistent events require an explicit resolution condition.', 'error');
+                    return;
+                }
+                const participants = (window._nwstAddEventParticipants || '')
+                    .split(',').map(name => name.trim()).filter(Boolean);
+                if (isNPC && participants.length === 0) {
+                    nwstToast('NPC events require at least one named participant.', 'error');
+                    return;
+                }
                 await addEvent(chatId, {
                     title: title,
                     description: description,
@@ -334,7 +406,9 @@ function wireEventItemEvents() {
                     isNPC: isNPC,
                     npcOrigin: isNPC ? 'detected' : null,
                     origin: 'detected',
-                    scheduledDate: scheduledDate
+                    scheduledDate: scheduledDate,
+                    resolutionCondition,
+                    participants
                 });
                 refreshEventsUI();
                 nwstToast(`Event "${title}" added (${tier}).`, 'success');
@@ -346,8 +420,17 @@ function wireEventItemEvents() {
     const regenAllBtn = document.getElementById('nwst-events-regenAll');
     if (regenAllBtn) {
         regenAllBtn.onclick = async () => {
-            await regenerateAllEvents();
-            refreshEventsUI();
+            if (regenAllBtn.disabled) return;
+            regenAllBtn.disabled = true;
+            const originalText = regenAllBtn.textContent;
+            regenAllBtn.textContent = 'Generating…';
+            try {
+                await regenerateAllEvents();
+                refreshEventsUI();
+            } finally {
+                regenAllBtn.disabled = false;
+                regenAllBtn.textContent = originalText;
+            }
         };
     }
 
@@ -382,6 +465,28 @@ function wireEventItemEvents() {
             await updateEvent(chatId, eventId, { validityFlag: null });
             await setEventStatus(chatId, eventId, 'missed');
             nwstToast('Event marked missed — it will compact into the notebook after the usual delay.', 'info');
+            refreshEventsUI();
+        };
+    });
+
+    // ── Persistent resolution evidence handlers ───────────────
+    container.querySelectorAll('.nwst-persistent-keep').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            await updateEvent(getChatId(), btn.dataset.eventId, { persistentResolutionFlag: null });
+            nwstToast('Persistent event kept — resolution evidence cleared.', 'info');
+            refreshEventsUI();
+        };
+    });
+
+    container.querySelectorAll('.nwst-persistent-resolve').forEach(btn => {
+        btn.onclick = async function (e) {
+            e.stopPropagation();
+            const chatId = getChatId();
+            const eventId = btn.dataset.eventId;
+            await updateEvent(chatId, eventId, { persistentResolutionFlag: null });
+            await setEventStatus(chatId, eventId, 'resolved');
+            nwstToast('Persistent event resolved from reviewed narrative evidence.', 'success');
             refreshEventsUI();
         };
     });
@@ -503,6 +608,21 @@ function wireEventItemEvents() {
         };
     });
 
+    container.querySelectorAll('.nwst-events-tier').forEach(select => {
+        select.onchange = function () {
+            const item = this.closest('.nwst-event-item');
+            const persistent = this.value === 'persistent';
+            const wrap = item?.querySelector('.nwst-events-resolution-wrap');
+            const scheduled = item?.querySelector('.nwst-events-scheduled');
+            if (wrap) wrap.style.display = persistent ? '' : 'none';
+            if (scheduled) {
+                scheduled.disabled = persistent;
+                scheduled.style.opacity = persistent ? '.45' : '';
+                if (persistent) scheduled.value = '';
+            }
+        };
+    });
+
     // ── Status buttons ────────────────────────────────────────
     container.querySelectorAll('.nwst-events-status').forEach(btn => {
         btn.onclick = async function (e) {
@@ -530,33 +650,108 @@ function wireEventItemEvents() {
             const scheduledInput = item.querySelector('.nwst-events-scheduled');
             const npcCheckbox = item.querySelector('.nwst-events-isnpc');
             const participantsInput = item.querySelector('.nwst-events-participants');
+            const resolutionInput = item.querySelector('.nwst-events-resolution');
+            const current = getAllEvents(chatId).find(ev => ev.id === eventId);
+            if (!current) {
+                nwstToast('Could not save event: the event no longer exists.', 'error');
+                refreshEventsUI();
+                return;
+            }
 
+            // Only submit fields the player actually changed. The previous
+            // editor re-sent tier + scheduledDate on every save, which let the
+            // data layer silently reclassify a manual tier edit from the old
+            // date and then still show a success toast.
             const updates = {};
-            if (descTextarea) updates.description = descTextarea.value;
-            if (titleInput)   updates.title = titleInput.value.trim() || 'Untitled event';
-            if (tierSelect)   updates.tier  = tierSelect.value;
-            if (scheduledInput) updates.scheduledDate = scheduledInput.value.trim() || null;
-            if (npcCheckbox) {
-                const isNPC = npcCheckbox.checked;
-                updates.isNPC = isNPC;
-                updates.npcOrigin = isNPC ? 'generated' : null;
+            const nextDescription = descTextarea ? descTextarea.value : current.description;
+            const nextTitle = titleInput ? (titleInput.value.trim() || 'Untitled event') : current.title;
+            const nextTier = tierSelect ? tierSelect.value : current.tier;
+            const nextScheduledDate = nextTier === 'persistent' ? null : (scheduledInput ? (scheduledInput.value.trim() || null) : (current.scheduledDate || null));
+            const nextResolutionCondition = resolutionInput ? (resolutionInput.value.trim() || null) : (current.resolutionCondition || null);
+            if (nextTier === 'persistent' && !nextResolutionCondition) {
+                nwstToast('Persistent events require an explicit resolution condition.', 'error');
+                return;
             }
-            // Parse participants from comma-separated string
-            if (participantsInput) {
-                const raw = participantsInput.value.trim();
-                updates.participants = raw
-                    ? raw.split(',').map(s => s.trim()).filter(Boolean)
-                    : [];
+            const nextIsNPC = npcCheckbox ? npcCheckbox.checked : !!current.isNPC;
+            const normalizeEditorParticipants = values => {
+                const out = [];
+                const seen = new Set();
+                for (const raw of (Array.isArray(values) ? values : [])) {
+                    const name = String(raw || '').trim();
+                    const key = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+                    if (!name || !key || seen.has(key)) continue;
+                    seen.add(key);
+                    out.push(name);
+                }
+                return out;
+            };
+            const rawParticipants = participantsInput ? participantsInput.value.trim() : '';
+            const nextParticipants = participantsInput
+                ? normalizeEditorParticipants(rawParticipants ? rawParticipants.split(',') : [])
+                : normalizeEditorParticipants(current.participants || []);
+
+            if (nextIsNPC && nextParticipants.length === 0) {
+                nwstToast('NPC events require at least one named participant.', 'error');
+                return;
             }
 
-            if (Object.keys(updates).length > 0) {
-                await updateEvent(chatId, eventId, updates);
-                // If tier changed, re-render so event moves to correct group
-                if (tierSelect) {
-                    refreshEventsUI();
-                }
-                nwstToast('Event saved.', 'success');
+            if (nextDescription !== (current.description || '')) updates.description = nextDescription;
+            if (nextTitle !== (current.title || '')) updates.title = nextTitle;
+            if (nextTier !== current.tier) updates.tier = nextTier;
+            if (nextScheduledDate !== (current.scheduledDate || null)) updates.scheduledDate = nextScheduledDate;
+            if (nextTier === 'persistent') {
+                if (nextResolutionCondition !== (current.resolutionCondition || null)) updates.resolutionCondition = nextResolutionCondition;
+            } else if (current.resolutionCondition) {
+                updates.resolutionCondition = null;
+                updates.persistentResolutionFlag = null;
             }
+            if (nextIsNPC !== !!current.isNPC) {
+                updates.isNPC = nextIsNPC;
+                updates.npcOrigin = nextIsNPC ? (current.npcOrigin || 'generated') : null;
+            }
+
+            const currentParticipants = normalizeEditorParticipants(current.participants || []);
+            const participantKey = arr => normalizeEditorParticipants(arr).join('\u0000');
+            if (participantKey(nextParticipants) !== participantKey(currentParticipants)) {
+                updates.participants = nextParticipants;
+            }
+
+            if (Object.keys(updates).length === 0) {
+                nwstToast('No event changes to save.', 'info');
+                return;
+            }
+
+            const saved = await updateEvent(chatId, eventId, updates);
+            if (!saved) {
+                nwstToast('Event save failed: the event could not be updated.', 'error');
+                refreshEventsUI();
+                return;
+            }
+
+            // Re-read persisted state before claiming success. This prevents a
+            // false green toast if storage rejected the write or another rule
+            // rewrote a player-edited value.
+            const persisted = getAllEvents(chatId).find(ev => ev.id === eventId);
+            const mismatches = [];
+            if (!persisted) mismatches.push('event missing after save');
+            else {
+                if (updates.title !== undefined && persisted.title !== updates.title) mismatches.push('title');
+                if (updates.description !== undefined && persisted.description !== updates.description) mismatches.push('description');
+                if (updates.tier !== undefined && persisted.tier !== updates.tier) mismatches.push('tier');
+                if (updates.scheduledDate !== undefined && (persisted.scheduledDate || null) !== updates.scheduledDate) mismatches.push('scheduled date');
+                if (updates.resolutionCondition !== undefined && (persisted.resolutionCondition || null) !== updates.resolutionCondition) mismatches.push('resolution condition');
+                if (updates.isNPC !== undefined && !!persisted.isNPC !== !!updates.isNPC) mismatches.push('NPC flag');
+                if (updates.participants !== undefined && participantKey(persisted.participants || []) !== participantKey(updates.participants)) mismatches.push('participants');
+            }
+
+            refreshEventsUI();
+            if (mismatches.length > 0) {
+                console.warn('[NWST Events] Event save verification failed:', { eventId, mismatches, requested: updates, persisted });
+                nwstToast(`Event save did not persist: ${mismatches.join(', ')}.`, 'error');
+                return;
+            }
+
+            nwstToast('Event saved.', 'success');
         };
     });
 
