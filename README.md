@@ -1,7 +1,7 @@
 # Narrative World State Tracker
 ### A SillyTavern Extension
 
-> **Status: Beta / Active Development** — Core systems are implemented and under beta testing. Back up important chat data before testing new builds.
+> **Status: Alpha / Active Development** — Core systems are implemented and under alpha testing. Back up important chat data before testing new builds.
 
 ---
 
