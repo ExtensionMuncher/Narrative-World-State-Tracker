@@ -733,6 +733,11 @@ const DEFAULT_RUNTIME_STATE = Object.freeze({
     lastScanMessageCount: 0,
     lastScanElapsedDay: null,
     lastScanAt: 0,
+    lastReconcileMessageCount: 0,
+    lastReconcileElapsedDay: null,
+    lastReconcileAt: 0,
+    lastReconcileTrigger: '',
+    lastReconcileSummary: '',
     cooldownUntilMessage: 0,
     lastScannedActorIds: [],
     lastScanTrigger: '',
@@ -800,7 +805,7 @@ function normalizeDirtyActor(item = {}) {
 
 export function getHiddenIntentionsState(chatId) {
     const raw = getChatData(chatId, 'hiddenIntentionsState') || {};
-    return {
+    const state = {
         ...clone(DEFAULT_RUNTIME_STATE),
         ...raw,
         dirtyActors: Array.isArray(raw.dirtyActors) ? raw.dirtyActors.map(normalizeDirtyActor).filter(x => x.actorId || x.actor) : [],
@@ -820,6 +825,18 @@ export function getHiddenIntentionsState(chatId) {
         scanInProgress: raw.scanInProgress === true,
         backfillInProgress: raw.backfillInProgress === true
     };
+    // v1.3.55 compatibility: older states only remembered the most recent HI
+    // operation. If that operation was a reconciliation, promote it into the
+    // dedicated reconciliation fields so the Notebook status display is useful
+    // immediately after upgrade without forcing another LLM call.
+    if (!Number.isInteger(raw.lastReconcileMessageCount) && String(raw.lastScanTrigger || '').startsWith('reconcile:')) {
+        state.lastReconcileMessageCount = Number.isInteger(raw.lastScanMessageCount) ? raw.lastScanMessageCount : 0;
+        state.lastReconcileElapsedDay = Number.isInteger(raw.lastScanElapsedDay) ? raw.lastScanElapsedDay : null;
+        state.lastReconcileAt = Math.max(0, Number(raw.lastScanAt) || 0);
+        state.lastReconcileTrigger = String(raw.lastScanTrigger || '').replace(/^reconcile:/, '');
+        state.lastReconcileSummary = String(raw.lastValidationSummary || '').trim();
+    }
+    return state;
 }
 
 export async function saveHiddenIntentionsState(chatId, state) {
@@ -868,6 +885,11 @@ export async function saveHiddenIntentionsState(chatId, state) {
         : [];
     normalized.backfillPauseRequested = normalized.backfillPauseRequested === true;
     normalized.backfillPausedByUser = normalized.backfillPausedByUser === true;
+    normalized.lastReconcileMessageCount = Math.max(0, Math.floor(Number(normalized.lastReconcileMessageCount) || 0));
+    normalized.lastReconcileElapsedDay = Number.isInteger(normalized.lastReconcileElapsedDay) ? normalized.lastReconcileElapsedDay : null;
+    normalized.lastReconcileAt = Math.max(0, Number(normalized.lastReconcileAt) || 0);
+    normalized.lastReconcileTrigger = String(normalized.lastReconcileTrigger || '').slice(0, 120);
+    normalized.lastReconcileSummary = String(normalized.lastReconcileSummary || '').slice(0, 1200);
     normalized.lastRepairAt = Math.max(0, Number(normalized.lastRepairAt) || 0);
     normalized.lastRepairSource = String(normalized.lastRepairSource || '').slice(0, 80);
     normalized.lastRepairSummary = String(normalized.lastRepairSummary || '').slice(0, 1200);

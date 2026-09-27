@@ -3235,6 +3235,13 @@ async function runHiddenIntentionsOperation({ mode = 'reconcile', trigger = 'man
         latestState.lastScanTrigger = `${mode}:${trigger}`;
         latestState.lastJsonRecovery = [batchResult.recovery || '', actorSplitCount ? `${actorSplitCount} actor split${actorSplitCount === 1 ? '' : 's'}` : ''].filter(Boolean).join('; ');
         latestState.lastValidationSummary = summarizeValidation(applied.diagnostics);
+        if (mode === 'reconcile') {
+            latestState.lastReconcileMessageCount = latestState.lastScanMessageCount;
+            latestState.lastReconcileElapsedDay = latestState.lastScanElapsedDay;
+            latestState.lastReconcileAt = latestState.lastScanAt;
+            latestState.lastReconcileTrigger = trigger;
+            latestState.lastReconcileSummary = latestState.lastValidationSummary;
+        }
         latestState.lastWorkingSetRotations = (applied.diagnostics.rotations || []).slice(-20);
         latestState.lastError = '';
         latestState.scanInProgress = false;

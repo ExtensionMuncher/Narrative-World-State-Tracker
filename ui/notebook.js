@@ -29,6 +29,7 @@ import {
 } from '../data/hiddenIntentions.js';
 import { runHiddenIntentionsGenerate, runHiddenIntentionsReconcile, purgeUserCharacterIntentions } from '../llm/hiddenIntentions.js';
 import { buildAliasRegistry, toCanonicalId } from '../data/aliasRegistry.js';
+import { getHiddenIntentionsConfig } from '../settings.js';
 
 // Flatten a triggerAnchors object into a comma-separated editable string,
 // and parse it back. Anchors are stored structured but edited as flat text.
@@ -668,6 +669,58 @@ function buildHiddenActorGroup(group) {
     </details>`;
 }
 
+function currentHiddenIntentionsMessageCount() {
+    try { return SillyTavern.getContext().chat?.length || 0; } catch (_) { return 0; }
+}
+
+function formatHiddenIntentionsStatus({ items, groups, state, cfg }) {
+    const count = currentHiddenIntentionsMessageCount();
+    const trackable = items.filter(item => !['resolved', 'abandoned', 'stale'].includes(item.status));
+    const ownerIds = new Set(trackable.map(item => item.actorId || toCanonicalId(item.actor)).filter(Boolean));
+    const dirtyActors = (state.dirtyActors || []).map(item => item.actor).filter(Boolean);
+    const relevantDirtyCount = (state.dirtyActors || []).filter(item => ownerIds.has(item.actorId || toCanonicalId(item.actor))).length;
+    const pendingParts = [];
+    if (dirtyActors.length) pendingParts.push(`${dirtyActors.length} dirty actor${dirtyActors.length === 1 ? '' : 's'}`);
+    if (state.worldDirty) pendingParts.push('world changes');
+
+    const lastReconcileMessage = Number.isInteger(state.lastReconcileMessageCount) && state.lastReconcileMessageCount > 0
+        ? state.lastReconcileMessageCount
+        : null;
+    const lastReconcileTrigger = String(state.lastReconcileTrigger || '').replaceAll('_', ' ');
+    const lastReconcile = lastReconcileMessage == null
+        ? 'Last reconciliation: never'
+        : `Last reconciliation: M${lastReconcileMessage}${lastReconcileTrigger ? ` · ${lastReconcileTrigger}` : ''}${state.lastReconcileSummary ? ` · ${state.lastReconcileSummary}` : ''}`;
+
+    let nextAuto = '';
+    if (!cfg.enabled) {
+        nextAuto = 'Automatic reconciliation: disabled';
+    } else if (!trackable.length) {
+        nextAuto = 'Automatic reconciliation: waiting for at least one seeded Hidden Intention';
+    } else {
+        const nextMessage = Math.max(
+            cfg.minimumMessages,
+            Number(state.cooldownUntilMessage || 0),
+            Number(state.lastScanMessageCount || 0) + cfg.cadence
+        );
+        if (count < nextMessage) {
+            const remaining = nextMessage - count;
+            nextAuto = `Next automatic reconciliation: M${nextMessage} · ${remaining} message${remaining === 1 ? '' : 's'} remaining`;
+        } else if (!relevantDirtyCount && !state.worldDirty) {
+            nextAuto = `Automatic reconciliation: eligible at M${nextMessage}, waiting for a relevant actor/world change`;
+        } else {
+            nextAuto = `Automatic reconciliation: eligible now (threshold M${nextMessage})`;
+        }
+    }
+
+    const pending = `Pending signals: ${pendingParts.join(' + ') || 'none'}`;
+    const mode = 'Automatic cadence / Day Advance / Time Skip reconcile existing records only; new records come from Generate, Batch Scan, or Debug Backfill.';
+    const error = state.lastError ? `Last error: ${state.lastError}` : '';
+    return {
+        summary: `${items.length} record${items.length === 1 ? '' : 's'} across ${groups.length} NPC${groups.length === 1 ? '' : 's'}`,
+        lines: [lastReconcile, nextAuto, pending, mode, error].filter(Boolean)
+    };
+}
+
 function refreshHiddenIntentionsSection() {
     const container = document.getElementById('nwst-hi-container');
     const statusEl = document.getElementById('nwst-hi-status');
@@ -696,9 +749,12 @@ function refreshHiddenIntentionsSection() {
     }
     const groups = Array.from(groupsByActor.values()).sort((a, b) => String(a.actor).localeCompare(String(b.actor)));
     const state = getHiddenIntentionsState(chatId);
+    const cfg = getHiddenIntentionsConfig();
     if (statusEl) {
-        const dirty = (state.dirtyActors || []).map(x => x.actor).filter(Boolean);
-        statusEl.textContent = `${items.length} record${items.length === 1 ? '' : 's'} across ${groups.length} NPC${groups.length === 1 ? '' : 's'} · Dirty actors: ${dirty.join(', ') || 'none'} · Last operation: ${state.lastScanTrigger || 'never'}${state.lastError ? ` · Error: ${state.lastError}` : ''}`;
+        const status = formatHiddenIntentionsStatus({ items, groups, state, cfg });
+        statusEl.innerHTML = `
+            <div class="nwst-hi-status-summary">${escapeHTML(status.summary)}</div>
+            ${status.lines.map(line => `<div class="nwst-hi-status-line">${escapeHTML(line)}</div>`).join('')}`;
     }
     container.innerHTML = groups.length
         ? groups.map(buildHiddenActorGroup).join('')

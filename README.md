@@ -1,7 +1,7 @@
 # Narrative World State Tracker
 ### A SillyTavern Extension
 
-> **Status: Alpha / Active Development** — Core systems are implemented and under alpha testing. Back up important chat data before testing new builds.
+> **Status: Beta / Active Development** — Core systems are implemented and under beta testing. Back up important chat data before testing new builds.
 
 ---
 
@@ -93,6 +93,7 @@ NWST's internal working surface. Never injected into your main prompt. Four coll
 - Tracks strategy, nearest intended action, triggers, constraints, confidence, commitment, evidence ranges, related events/communities, lifecycle state, and progress state.
 - Uses a five-record **current working set per actor**, not a lifetime quota. Stronger later generated intentions may park weaker eligible generated records; manual, locked, and pending-review records are protected.
 - **Generate** creates missing grounded records from recent visible narrative. **Reconcile** only maintains existing records and can run on dirty cadence, day advancement, Time Skip, or manually.
+- The Notebook now shows Hidden Intentions cadence/lifecycle status at a glance: the last successful reconciliation, the next automatic reconciliation threshold, pending dirty actor/world signals, and whether automatic reconciliation is currently waiting or eligible.
 - **Debug Backfill** migrates older chats chronologically with resumable checkpoints and pause support; local Audit & Repair has an undo backup and does not make LLM calls.
 - Hidden Intentions are never direct RP-prompt evidence and never count as proof that an NPC actually performed an action.
 

@@ -470,7 +470,7 @@ export function exportAll(chatId) {
     try {
         if (!getActiveChatContext(chatId, 'export all data')) return null;
         const bundle = {
-            version: '1.3.54',
+            version: '1.3.55',
             exportedAt: new Date().toISOString(),
             globalSettings: JSON.parse(exportGlobalSettings()),
             chatData: getAllChatData(chatId),

@@ -41,7 +41,7 @@ const MODULE_NAME = 'nwst';
 
 /** Runtime revision used to distinguish a genuinely current initialization
  * from a completed promise left behind by an older hot-loaded build. */
-const RUNTIME_REVISION = '1.3.54';
+const RUNTIME_REVISION = '1.3.55';
 
 /** Human-readable name shown in toasts and logs. */
 const MODULE_NAME_FANCY = 'Narrative World State Tracker';
