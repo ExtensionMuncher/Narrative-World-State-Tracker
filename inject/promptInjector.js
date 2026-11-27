@@ -10,12 +10,14 @@
 //   • 7-day forecast + moon phases
 //   • Active upcoming events (pending + in-progress only)
 //   • Active world conditions (eye-on only)
-//   • Selective secret blocks (from narrativeConsistency.js)
+//   • Selective secret blocks
+//   • Scene-relevant Hidden Intention plan guidance when no active Event owns it
 //
 // What NEVER gets injected:
 //   • Notebook contents (bullets, core fields, mystery fields)
 //   • Community summaries
-//   • Secrets (except selective blocks from narrativeConsistency.js)
+//   • Secrets (except selective scored blocks)
+//   • Hidden Intentions except scene-relevant executable plans selected by the dedicated scorer
 //
 // ── OUTPUT DENSITY MODES ──────────────────────────────────────────────────
 //
@@ -53,6 +55,7 @@ import {
 } from '../settings.js';
 import { getChatId } from '../utils.js';
 import { buildSecretsInjection } from '../llm/secretsInjection.js';
+import { buildHiddenIntentionsInjection } from '../llm/hiddenIntentionsInjection.js';
 import { computeSeason, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
 import { getMoonConfig } from '../data/moons.js';
 import { buildNagerHolidayPromptBlock } from '../data/nagerDate.js';
@@ -150,6 +153,12 @@ export function buildInjectionBlock(chatId) {
         const conditionsBlock = buildConditionsBlock(conditions, mode);
         if (conditionsBlock) parts.push(conditionsBlock);
     }
+
+    // ── Scene-relevant Hidden Intention plan injection ───────────
+    // Pure-JS relevance selection. Active Events generated from the same
+    // intention suppress this path to prevent duplicate narrative pressure.
+    const hiddenIntentionsBlock = buildHiddenIntentionsInjection(chatId);
+    if (hiddenIntentionsBlock) parts.push(hiddenIntentionsBlock);
 
     // ── Selective Secret Injection ───────────────────────────────
     // Always instant JS lookup — no API call, no density difference.

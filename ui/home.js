@@ -37,7 +37,7 @@ import { getEventsGroupedByTier } from '../data/events.js';
 import { advanceToNextDay, restorePreviousDay, regenerateForecastOnly, regenerateMoonPhasesFromDate, setMoonPhaseAnchor, computeLunarAngleFromDate, getLunarAngle, setLunarAngle, generateMoonPhases, getMoonPhaseNames, getMoonPhaseForAngle, computeSeason, buildMoonPhenomenaOptions, normalizeMoonPhenomena } from '../llm/dayAdvancement.js';
 import { executeTimeSkip } from '../llm/timeskip.js';
 import { getMoonConfig } from '../data/moons.js';
-import { getScannerHealth } from '../llm/scanner.js';
+import { getScannerHealth } from '../llm/scanner.js?v=1.3.69';
 import { getNagerHolidaysForCurrentDate } from '../data/nagerDate.js';
 import { getWeatherHomeStatus } from '../data/severeWeather.js';
 

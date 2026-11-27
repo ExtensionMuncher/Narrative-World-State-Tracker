@@ -246,6 +246,10 @@ export async function reconcileEventTiers(chatId, options = {}) {
         if (!target) continue;
 
         if (target === 'missed') {
+            // An Event that has already started is not "missed" merely because
+            // the calendar crossed its original start window. Narrative evidence
+            // must resolve or explicitly miss/abort it.
+            if (event.status === 'inprogress') continue;
             if (!markMissed) continue;
             event.status = 'missed';
             if (typeof event.resolveDay !== 'number') event.resolveDay = dayCount;
@@ -1057,7 +1061,7 @@ export async function rollEventHorizon(chatId, tierChanges) {
 // ── Bulk operations ───────────────────────────────────────────────────────
 
 /**
- * Remove a single concluded event from the active list, preserving a concise
+ * Remove a single concluded event from the active list, preserving a complete
  * summary in the Notebook's doNotForget section (same format as Event Horizon
  * Compaction). Used by the promotion review queue, where the event leaves the
  * list whether or not the player promotes it to a secret.
@@ -1076,9 +1080,9 @@ export async function removeEventWithSummary(chatId, eventId) {
         const statusIcon = event.status === 'resolved' ? '✅' : '⏳';
         const tierTag = event.tier !== 'undetermined' ? ` [${event.tier}]` : '';
         const dateTag = event.scheduledDate ? ` (${event.scheduledDate})` : '';
-        const resolveTag = typeof event.resolveElapsedDay === 'number' ? ` — Resolved after ${event.resolveElapsedDay} elapsed story day(s)` : '';
-        let summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag}${resolveTag}`;
-        if (summary.length > 300) summary = summary.substring(0, 297) + '...';
+        const statusLabel = event.status === 'resolved' ? 'Resolved' : (event.status === 'missed' ? 'Missed' : 'Concluded');
+        const resolveTag = typeof event.resolveElapsedDay === 'number' ? ` — ${statusLabel} on elapsed story day ${event.resolveElapsedDay}` : '';
+        const summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag}${resolveTag}`;
         const updatedDoNotForget = [...doNotForget, summary];
         if (updatedDoNotForget.length > 50) {
             updatedDoNotForget.splice(0, updatedDoNotForget.length - 50);
@@ -1117,7 +1121,7 @@ export async function cleanupPromotedConcludedEvents(chatId) {
 
 /**
  * Compact stale resolved/missed events into the Notebook's "Past Events"
- * (doNotForget) section, then remove them from the active events array.
+ * (doNotForget) section without discarding Event description text, then remove them from the active events array.
  *
  * This prevents the events list from accumulating narrative dead weight.
  * Resolved/missed events are not injected into the RP prompt (only active
@@ -1179,10 +1183,14 @@ export async function compactEventHorizon(chatId, thresholdDays = 0) {
             const statusIcon = event.status === 'resolved' ? '✅' : '⏳';
             const tierTag = event.tier !== 'undetermined' ? ` [${event.tier}]` : '';
             const dateTag = event.scheduledDate ? ` (${event.scheduledDate})` : '';
-            const summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag} — Resolved after ${event.resolveElapsedDay} elapsed story day(s)`;
+            const statusLabel = event.status === 'resolved' ? 'Resolved' : 'Missed';
+            const summary = `📋 ${statusIcon} ${event.title}: ${event.description}${tierTag}${dateTag} — ${statusLabel} on elapsed story day ${event.resolveElapsedDay}`;
 
-            // Truncate overlong summaries (cap at 300 chars to keep the field tidy)
-            summaries.push(summary.length > 300 ? summary.substring(0, 297) + '...' : summary);
+            // Preserve the full concluded Event. The Notebook entry is the
+            // historical replacement for the Event after compaction, so silent
+            // character truncation destroys the very context compaction exists
+            // to retain. The existing 50-entry FIFO cap bounds list growth.
+            summaries.push(summary);
         }
 
         // Add summaries to doNotForget (with FIFO cap of 50)

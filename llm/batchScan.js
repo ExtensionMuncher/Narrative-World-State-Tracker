@@ -20,7 +20,7 @@ import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 //   7. Runs once — non-compounding
 // =============================================================================
 
-import { getChatId, nwstToast } from '../utils.js';
+import { getChatId, nwstToast, startLongOperationToast } from '../utils.js?v=1.3.69';
 import { chatHasData, getChatData, setChatData, setAllChatData } from '../data/storage.js';
 import { getSettingContext, getCalendarConfig, getSeasonConfig, getStartDate, saveStartDate, getEraPin } from '../data/worldState.js';
 import { computeDeterministicDate, dayOfYearFor, parseCurrentCalendarDate, daysBetweenCalendarDates, startWeekdayForAnchor, calendarMonthLayoutFor, extractYearFromText } from '../lib/calendarMath.js';
@@ -565,9 +565,9 @@ export async function runBatchScan() {
         return false;
     }
 
-    nwstToast('Batch scan started — analyzing chat history...', 'info');
     showBatchScanLoading(true);
     const finalizationWarnings = [];
+    let stopBatchReminder = () => {};
 
     try {
         const profile = resolveProfile('planningLLM');
@@ -582,6 +582,11 @@ export async function runBatchScan() {
             showBatchScanLoading(false);
             return false;
         }
+
+        stopBatchReminder = startLongOperationToast({
+            initialMessage: 'Batch Scan started. Large chats can take a long time to process.',
+            stillRunningMessage: 'Batch Scan is still running. NWST is still working; large chats can take a while to process.',
+        });
 
         // Get setting context — the authoritative source for date and world info
         const settingContext = getSettingContext(chatId);
@@ -732,7 +737,7 @@ export async function runBatchScan() {
         // Scan owns its initial population. Build the live alias registry from
         // the freshly synthesized events/communities/secrets, dirty every known
         // character, and GENERATE additions for the highest-priority NPCs now.
-        // Automatic cadence/day advancement only reconcile records after they exist.
+        // Automatic cadence/day advancement later maintain existing records and can discover newly grounded agency; Batch Scan still provides the initial broad seed.
         try {
             const { getHiddenIntentionsConfig } = await import('../settings.js');
             if (getHiddenIntentionsConfig().enabled !== false) {
@@ -760,7 +765,7 @@ export async function runBatchScan() {
         // If the scanner is in warmup phase, this transitions it to cadence
         // immediately without requiring the warmup floor to be reached first.
         try {
-            const { notifyBatchScanComplete } = await import('./scanner.js');
+            const { notifyBatchScanComplete } = await import('./scanner.js?v=1.3.69');
             notifyBatchScanComplete();
         } catch (e) { /* non-fatal — scanner may not be running */ }
 
@@ -782,6 +787,7 @@ export async function runBatchScan() {
         }
         return false;
     } finally {
+        stopBatchReminder();
         showBatchScanLoading(false);
     }
 }

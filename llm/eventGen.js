@@ -24,6 +24,8 @@ import { getCurrentDay, getEnabledConditions, getSettingContext, getMoonPhases, 
 import { getTrackedEvents, getActivePersistentEvents, MAX_ACTIVE_PERSISTENT_EVENTS } from '../data/events.js';
 import { getNotebook } from '../data/notebook.js';
 import { getHiddenIntentions } from '../data/hiddenIntentions.js';
+import { buildAliasRegistry } from '../data/aliasRegistry.js';
+import { eventSemanticallyRepresentsIntention } from './hiddenIntentionsInjection.js';
 import { getHiddenIntentionsConfig } from '../settings.js';
 import { getAllCommunities } from '../data/communities.js';
 import { resolveProfile, generateWithProfile } from './connections.js';
@@ -31,6 +33,7 @@ import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
 import { dlog } from "../lib/debug.js";
 import { completeEventParticipants } from './eventParticipants.js';
 import { getChatData, setAllChatData } from '../data/storage.js';
+import { filterForwardNovelEvents } from './eventNovelty.js';
 
 // ── Internal prompts ──────────────────────────────────────────────────────
 
@@ -208,7 +211,7 @@ async function regenerateTierEventsInternal(tier, options = {}) {
             scheduledDate: tier === 'persistent' ? null : (event.scheduledDate || null),
             resolutionCondition: tier === 'persistent' ? String(event.resolutionCondition || '').replace(/\s+/g, ' ').trim().slice(0, 600) : null,
             participants: Array.isArray(event.participants) ? event.participants.map(x => String(x || '').trim()).filter(Boolean).slice(0, 12) : [],
-            sourceIntentionIds: event.isNPC && Array.isArray(event.sourceIntentionIds)
+            sourceIntentionIds: Array.isArray(event.sourceIntentionIds)
                 ? Array.from(new Set(event.sourceIntentionIds.filter(id => allowedIntentionIds.has(id))))
                 : []
         })).filter(event => tier !== 'persistent' || event.resolutionCondition);
@@ -229,7 +232,23 @@ async function regenerateTierEventsInternal(tier, options = {}) {
                 console.warn('[NWST EventGen] Preserving NPC event that still needs participant review:', unresolved);
             }
         }
-        const events = options.worldOnly ? participantResult.events.filter(event => !event.isNPC) : participantResult.events;
+        // Providers occasionally omit sourceIntentionIds even when they clearly
+        // turned one supplied Active Plan/Commitment into an Event. Repair that
+        // provenance deterministically after participant completion so prompt
+        // injection can suppress the duplicate private-plan path. This applies
+        // to both NPC-labelled and mixed/social Events; event.isNPC is not a
+        // reliable proxy for whether an NPC intention drove the occurrence.
+        const registry = buildAliasRegistry(chatId);
+        const directIntentions = (context.hiddenIntentions || []).filter(item => item.eventRole === 'direct');
+        const provenanceRepairedEvents = participantResult.events.map(event => {
+            const linked = new Set(Array.isArray(event.sourceIntentionIds) ? event.sourceIntentionIds : []);
+            for (const intention of directIntentions) {
+                if (linked.has(intention.id)) continue;
+                if (eventSemanticallyRepresentsIntention(intention, event, registry)) linked.add(intention.id);
+            }
+            return { ...event, sourceIntentionIds: Array.from(linked).filter(id => allowedIntentionIds.has(id)) };
+        });
+        const events = options.worldOnly ? provenanceRepairedEvents.filter(event => !event.isNPC) : provenanceRepairedEvents;
 
         // Category-aware caps (applied before plausibility check):
         //   Detected NPC events  — no cap (facts extracted from chat)
@@ -652,23 +671,14 @@ function runPlausibilityCheck(chatId, candidateEvents, options = {}) {
     const duplicateReferenceEvents = options.settingRefresh
         ? activeEvents.filter(event => !isReplaceableGeneratedWorldEvent(event))
         : activeEvents;
-    const activeTitles = duplicateReferenceEvents.map(e => String(e.title || '').toLowerCase().trim()).filter(Boolean);
 
-    return candidateEvents.filter(event => {
-        // Remove duplicates by title
-        if (activeTitles.includes(event.title.toLowerCase().trim())) {
-            dlog(`[NWST EventGen] Discarded duplicate: "${event.title}"`);
-            return false;
+    return filterForwardNovelEvents(candidateEvents, duplicateReferenceEvents, {
+        currentDay: getCurrentDay(chatId),
+        calendarConfig: getCalendarConfig(chatId),
+        onReject: (event, reason) => {
+            if (reason === 'duplicate') dlog(`[NWST EventGen] Discarded duplicate/near-duplicate: "${event?.title || '(untitled)'}"`);
+            else if (reason === 'past_schedule') dlog(`[NWST EventGen] Discarded generated event scheduled behind Current Day: "${event?.title || '(untitled)'}"`);
+            else if (reason === 'retrospective') dlog(`[NWST EventGen] Discarded retrospective event (belongs in Notebook/history): "${event?.title || '(untitled)'}"`);
         }
-        // Remove events that are written in past tense (LLM failure to follow instructions)
-        const desc = (event.description || '').trim();
-        const pastTenseMarkers = [' has ', ' have ', ' had ', ' was ', ' were ', ' did ', ' occurred', ' happened', ' departed', ' left ', ' arrived', ' found ', ' discovered '];
-        const firstSentence = desc.split('.')[0].toLowerCase();
-        const isPastTense = event.tier !== 'persistent' && pastTenseMarkers.some(m => firstSentence.includes(m));
-        if (isPastTense) {
-            dlog(`[NWST EventGen] Discarded past-tense event (should be in notebook): "${event.title}"`);
-            return false;
-        }
-        return true;
     });
 }

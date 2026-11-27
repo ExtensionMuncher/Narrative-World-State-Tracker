@@ -9,8 +9,8 @@
 // and the individual tab modules (home.js, events.js, worldState.js, etc.).
 // =============================================================================
 
-import { buildHomeTab, refreshHomeUI } from './home.js';
-import { buildSettingsTab, refreshSettingsUI } from './settings.js';
+import { buildHomeTab, refreshHomeUI } from './home.js?v=1.3.69';
+import { buildSettingsTab, refreshSettingsUI } from './settings.js?v=1.3.69';
 import { buildEventsTab, refreshEventsUI } from './events.js';
 import { buildWorldStateTab, refreshWorldStateUI } from './worldState.js';
 import { buildNotebookTab, refreshNotebookUI, collapseHiddenIntentionsForNotebookExit } from './notebook.js';

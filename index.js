@@ -41,7 +41,7 @@ const MODULE_NAME = 'nwst';
 
 /** Runtime revision used to distinguish a genuinely current initialization
  * from a completed promise left behind by an older hot-loaded build. */
-const RUNTIME_REVISION = '1.3.55';
+const RUNTIME_REVISION = '1.3.69';
 
 /** Human-readable name shown in toasts and logs. */
 const MODULE_NAME_FANCY = 'Narrative World State Tracker';
@@ -240,7 +240,9 @@ const defaultSettings = {
         recordCapVersion: 2,
         maxContingenciesPerActor: 1,
         reviewNewIntentions: false,
-        autoAddConfidence: 'medium'
+        autoAddConfidence: 'medium',
+        injectPlans: true,
+        maxInjectedPlans: 3
     },
 
     // Internal planner instruction. Not exposed for user editing because it coordinates
@@ -548,11 +550,11 @@ function wireEnableToggle() {
 
         if (enabled) {
             debug('Extension enabled — starting scanner.');
-            const { startScanner } = await import('./llm/scanner.js');
+            const { startScanner } = await import('./llm/scanner.js?v=1.3.69');
             startScanner();
         } else {
             debug('Extension disabled — stopping scanner.');
-            const { stopScanner } = await import('./llm/scanner.js');
+            const { stopScanner } = await import('./llm/scanner.js?v=1.3.69');
             stopScanner();
         }
 
@@ -573,12 +575,12 @@ function wireEnableToggle() {
 
         if (getSetting('scanPaused')) {
             debug('Scanning paused — freezing cadence and stopping scanner.');
-            const { freezeScannerCadence, stopScanner } = await import('./llm/scanner.js');
+            const { freezeScannerCadence, stopScanner } = await import('./llm/scanner.js?v=1.3.69');
             await freezeScannerCadence();
             stopScanner();
         } else {
             debug('Scanning resumed — restoring frozen cadence and starting scanner.');
-            const { resumeScannerCadence, startScanner } = await import('./llm/scanner.js');
+            const { resumeScannerCadence, startScanner } = await import('./llm/scanner.js?v=1.3.69');
             await resumeScannerCadence();
             startScanner();
         }
@@ -745,12 +747,12 @@ async function onChatChanged() {
     // chat's cadence on entry so messages written here while paused cannot
     // consume its main/sidecar/warmup/Hidden Intentions countdowns.
     if (getSetting('enabled') && !getSetting('scanPaused')) {
-        import('./llm/scanner.js').then(({ restartScanner }) => {
+        import('./llm/scanner.js?v=1.3.69').then(({ restartScanner }) => {
             restartScanner();
         });
     } else if (getSetting('enabled') && getSetting('scanPaused')) {
         try {
-            const { freezeScannerCadence } = await import('./llm/scanner.js');
+            const { freezeScannerCadence } = await import('./llm/scanner.js?v=1.3.69');
             await freezeScannerCadence();
         } catch (e) {
             console.warn('[NWST] Could not freeze cadence for paused chat (non-fatal):', e);
@@ -836,7 +838,7 @@ async function initOnce() {
     // 3b. Dynamically import UI modules to avoid circular dependency
     //    (sub-modules like ui/home.js import from index.js, so they must
     //     be loaded AFTER index.js is fully evaluated)
-    const { initializeTabs } = await import('./ui/panel.js');
+    const { initializeTabs } = await import(`./ui/panel.js?v=${RUNTIME_REVISION}`);
     initializeTabs();
 
     // 4. Wire ST's native CHAT_CHANGED event for data isolation between chats
@@ -861,7 +863,7 @@ async function initOnce() {
     // 7. Start background scanner if extension is enabled
     if (getSetting('enabled') && !getSetting('scanPaused')) {
         try {
-            const { startScanner } = await import('./llm/scanner.js');
+            const { startScanner } = await import('./llm/scanner.js?v=1.3.69');
             startScanner();
             log('Background scanner started.');
         } catch (err) {
@@ -869,7 +871,7 @@ async function initOnce() {
         }
     } else if (getSetting('enabled') && getSetting('scanPaused')) {
         try {
-            const { freezeScannerCadence } = await import('./llm/scanner.js');
+            const { freezeScannerCadence } = await import('./llm/scanner.js?v=1.3.69');
             await freezeScannerCadence();
             log('Scanner paused; cadence checkpoint frozen for this chat.');
         } catch (err) {

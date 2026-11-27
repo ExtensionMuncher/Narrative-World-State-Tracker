@@ -675,10 +675,7 @@ function currentHiddenIntentionsMessageCount() {
 
 function formatHiddenIntentionsStatus({ items, groups, state, cfg }) {
     const count = currentHiddenIntentionsMessageCount();
-    const trackable = items.filter(item => !['resolved', 'abandoned', 'stale'].includes(item.status));
-    const ownerIds = new Set(trackable.map(item => item.actorId || toCanonicalId(item.actor)).filter(Boolean));
     const dirtyActors = (state.dirtyActors || []).map(item => item.actor).filter(Boolean);
-    const relevantDirtyCount = (state.dirtyActors || []).filter(item => ownerIds.has(item.actorId || toCanonicalId(item.actor))).length;
     const pendingParts = [];
     if (dirtyActors.length) pendingParts.push(`${dirtyActors.length} dirty actor${dirtyActors.length === 1 ? '' : 's'}`);
     if (state.worldDirty) pendingParts.push('world changes');
@@ -688,14 +685,12 @@ function formatHiddenIntentionsStatus({ items, groups, state, cfg }) {
         : null;
     const lastReconcileTrigger = String(state.lastReconcileTrigger || '').replaceAll('_', ' ');
     const lastReconcile = lastReconcileMessage == null
-        ? 'Last reconciliation: never'
-        : `Last reconciliation: M${lastReconcileMessage}${lastReconcileTrigger ? ` · ${lastReconcileTrigger}` : ''}${state.lastReconcileSummary ? ` · ${state.lastReconcileSummary}` : ''}`;
+        ? 'Last maintenance/reconciliation: never'
+        : `Last maintenance/reconciliation: M${lastReconcileMessage}${lastReconcileTrigger ? ` · ${lastReconcileTrigger}` : ''}${state.lastReconcileSummary ? ` · ${state.lastReconcileSummary}` : ''}`;
 
     let nextAuto = '';
     if (!cfg.enabled) {
-        nextAuto = 'Automatic reconciliation: disabled';
-    } else if (!trackable.length) {
-        nextAuto = 'Automatic reconciliation: waiting for at least one seeded Hidden Intention';
+        nextAuto = 'Automatic maintenance/discovery: disabled';
     } else {
         const nextMessage = Math.max(
             cfg.minimumMessages,
@@ -704,20 +699,23 @@ function formatHiddenIntentionsStatus({ items, groups, state, cfg }) {
         );
         if (count < nextMessage) {
             const remaining = nextMessage - count;
-            nextAuto = `Next automatic reconciliation: M${nextMessage} · ${remaining} message${remaining === 1 ? '' : 's'} remaining`;
-        } else if (!relevantDirtyCount && !state.worldDirty) {
-            nextAuto = `Automatic reconciliation: eligible at M${nextMessage}, waiting for a relevant actor/world change`;
+            nextAuto = `Next automatic maintenance/discovery: M${nextMessage} · ${remaining} message${remaining === 1 ? '' : 's'} remaining`;
+        } else if (!dirtyActors.length && !state.worldDirty) {
+            nextAuto = `Automatic maintenance/discovery: eligible at M${nextMessage}, waiting for a relevant actor/world change`;
         } else {
-            nextAuto = `Automatic reconciliation: eligible now (threshold M${nextMessage})`;
+            nextAuto = `Automatic maintenance/discovery: eligible now (threshold M${nextMessage})`;
         }
     }
 
     const pending = `Pending signals: ${pendingParts.join(' + ') || 'none'}`;
-    const mode = 'Automatic cadence / Day Advance / Time Skip reconcile existing records only; new records come from Generate, Batch Scan, or Debug Backfill.';
+    const mode = 'Automatic cadence / Day Advance / Time Skip maintain existing records and can create newly grounded intentions. Manual Generate and Reconcile remain available as diagnostic controls.';
+    const injection = cfg.injectPlans === false
+        ? 'RP plan injection: disabled'
+        : `RP plan injection: scene-relevant executable plans enabled · max ${cfg.maxInjectedPlans || 3} · relevant dirty plans get fast reconciliation after 3 narrative messages · active corresponding Events suppress duplicate plan injection`;
     const error = state.lastError ? `Last error: ${state.lastError}` : '';
     return {
         summary: `${items.length} record${items.length === 1 ? '' : 's'} across ${groups.length} NPC${groups.length === 1 ? '' : 's'}`,
-        lines: [lastReconcile, nextAuto, pending, mode, error].filter(Boolean)
+        lines: [lastReconcile, nextAuto, pending, mode, injection, error].filter(Boolean)
     };
 }
 
@@ -758,7 +756,7 @@ function refreshHiddenIntentionsSection() {
     }
     container.innerHTML = groups.length
         ? groups.map(buildHiddenActorGroup).join('')
-        : '<div class="nwst-nb-empty">No hidden intentions yet. Use <strong>Generate new intentions</strong> to seed this chat. Automatic cadence and day advancement only reconcile records after they exist.</div>';
+        : '<div class="nwst-nb-empty">No hidden intentions yet. Automatic maintenance can create new records once relevant actors/story state are marked dirty; use <strong>Generate new intentions</strong> to force an immediate discovery pass.</div>';
     wireHiddenIntentionsEvents();
 }
 

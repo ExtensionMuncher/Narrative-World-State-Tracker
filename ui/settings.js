@@ -42,13 +42,14 @@ import {
 import { getChatId, nwstToast, getSetting, setSetting, updateStatusLabel, updatePauseButton } from '../index.js';
 import { download } from '../../../../utils.js';
 import { deleteAllChatData, DEFAULT_SEASON_CONFIG, DEFAULT_CALENDAR_CONFIG, getChatData, setChatData } from '../data/storage.js';
-import { runBatchScan } from '../llm/batchScan.js';
+import { runBatchScan } from '../llm/batchScan.js?v=1.3.69';
 import { getSecretsMeta, setSecretsMeta } from '../data/secretsMeta.js';
 import { rebaseElapsedStoryDays } from '../data/timeMigration.js';
 import { getWeatherProfilesState, saveWeatherProfilesState, getActiveWeatherProfile, setActiveWeatherProfile, deleteWeatherProfile, makeDefaultWeatherProfile, upsertWeatherProfile, profileSummary, WEATHER_EVENT_DEFS, REGIONAL_HAZARD_LEVELS, normalizeRegionalHazards } from '../data/severeWeather.js';
 import { analyzeSettingContextToWeatherProfile, analyzeRegionalHazardsForProfiles } from '../llm/weatherProfile.js';
 import { getContextSnapshots, getContextSnapshot, saveContextSnapshot, deleteContextSnapshot, clearContextSnapshots } from '../data/contextSnapshots.js';
 import { dlog } from '../lib/debug.js';
+import { startLongOperationToast } from '../utils.js?v=1.3.69';
 
 // ── Build the Settings tab HTML ───────────────────────────────────────────
 
@@ -829,22 +830,22 @@ export function buildSettingsTab() {
             <div class="nwst-accordion-body" id="nwst-accordion-hidden-intentions">
                 <div class="nwst-card">
                     <div style="font-size:11px;color:#999;margin-bottom:12px;line-height:1.5">
-                        Maintains compact, evidence-grounded NPC objectives, active plans, commitments, ongoing priorities, contingencies, and emerging interests in the Notebook. These records are never injected directly. Generation creates new records; reconciliation only maintains records that already exist.
+                        Maintains compact, evidence-grounded NPC objectives, active plans, commitments, ongoing priorities, contingencies, and emerging interests in the Notebook. Normal automatic cycles both maintain existing records and discover genuinely new durable agency. Scene-relevant executable plans can be selectively injected as narrator guidance when no active Event already represents them.
                     </div>
                     <div class="nwst-setting-row">
                         <div><div class="nwst-setting-label">Enable Hidden Intentions</div><div class="nwst-setting-sub">Disabling preserves existing records but stops automatic scans and downstream use.</div></div>
                         <label class="nwst-toggle"><input type="checkbox" id="nwst-hi-enabled"><span class="nwst-slider"></span></label>
                     </div>
                     <div class="nwst-setting-row">
-                        <div><div class="nwst-setting-label">Message cadence</div><div class="nwst-setting-sub">Minimum messages between dirty-gated reconciliations of existing records. Automatic cadence does not generate new intentions.</div></div>
+                        <div><div class="nwst-setting-label">Message cadence</div><div class="nwst-setting-sub">Minimum messages between dirty-gated automatic maintenance cycles. Each cycle can update existing records and discover new independent intentions from recent story developments.</div></div>
                         <div style="display:flex;align-items:center;gap:6px"><input type="number" id="nwst-hi-cadence" min="5" max="200" value="30" style="width:58px;text-align:center"><span style="font-size:12px;color:#666">msgs</span></div>
                     </div>
                     <div class="nwst-setting-row">
-                        <div><div class="nwst-setting-label">Minimum messages</div><div class="nwst-setting-sub">Warmup floor before automatic reconciliation can begin after records exist.</div></div>
+                        <div><div class="nwst-setting-label">Minimum messages</div><div class="nwst-setting-sub">Warmup floor before automatic Hidden Intentions maintenance/discovery can begin.</div></div>
                         <input type="number" id="nwst-hi-minimum" min="1" max="200" value="20" style="width:58px;text-align:center">
                     </div>
                     <div class="nwst-setting-row">
-                        <div><div class="nwst-setting-label">Cooldown</div><div class="nwst-setting-sub">Minimum messages after a successful Hidden Intentions operation before automatic reconciliation may run again.</div></div>
+                        <div><div class="nwst-setting-label">Cooldown</div><div class="nwst-setting-sub">Minimum messages after a successful Hidden Intentions operation before automatic maintenance/discovery may run again.</div></div>
                         <div style="display:flex;align-items:center;gap:6px"><input type="number" id="nwst-hi-cooldown" min="0" max="200" value="15" style="width:58px;text-align:center"><span style="font-size:12px;color:#666">msgs</span></div>
                     </div>
                     <div class="nwst-setting-row">
@@ -852,8 +853,16 @@ export function buildSettingsTab() {
                         <div style="display:flex;align-items:center;gap:6px"><input type="number" id="nwst-hi-scan-range" min="8" max="100" value="40" style="width:58px;text-align:center"><span style="font-size:12px;color:#666">msgs</span></div>
                     </div>
                     <div class="nwst-setting-row">
-                        <div><div class="nwst-setting-label">Reconcile on day advancement</div><div class="nwst-setting-sub">Runs after date, events, world conditions, and compaction update, before world-event top-up.</div></div>
+                        <div><div class="nwst-setting-label">Maintain/discover on day advancement</div><div class="nwst-setting-sub">Runs maintenance + new-intention discovery after date, events, world conditions, and compaction update, before world-event top-up.</div></div>
                         <label class="nwst-toggle"><input type="checkbox" id="nwst-hi-day-advance"><span class="nwst-slider"></span></label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Inject scene-relevant plans</div><div class="nwst-setting-sub">Injects only actionable private plans that are relevant to the current scene. If an active Event was generated from the same intention, the Hidden Intention injection is suppressed until that Event leaves the active horizon or is deleted.</div></div>
+                        <label class="nwst-toggle"><input type="checkbox" id="nwst-hi-inject-plans"><span class="nwst-slider"></span></label>
+                    </div>
+                    <div class="nwst-setting-row">
+                        <div><div class="nwst-setting-label">Maximum injected plans</div><div class="nwst-setting-sub">Hard cap on scene-relevant Hidden Intention guidance sent to the main RP model at once.</div></div>
+                        <input type="number" id="nwst-hi-max-injected" min="1" max="5" value="3" style="width:58px;text-align:center">
                     </div>
                     <div class="nwst-setting-row">
                         <div><div class="nwst-setting-label">Maximum actors per scan</div><div class="nwst-setting-sub">Prioritizes dirty actors, existing record owners, immediate event participants, and recent cast.</div></div>
@@ -1051,6 +1060,7 @@ export function buildSettingsTab() {
                     <button class="menu_button nwst-btn" id="nwst-debug-pause-hidden-intentions" title="Request a safe pause after the current in-flight request or transactional segment. Completed segments remain saved; Debug Backfill resumes from the same checkpoint.">⏸️ Pause Backfill</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-repair-hidden-intentions" title="Audit and repair the stored Hidden Intentions locally: clear obsolete next actions, correct reinforcement timestamps, normalize lifecycle contradictions, repair wording contamination, and reassign unmistakable character-card/title records to the actual NPC while preserving distinct intentions. Only strict duplicates may merge. Uses zero LLM calls and saves an undo backup first.">🧹 Audit & Repair Intentions</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-undo-repair-hidden-intentions" title="Restore the complete Hidden Intentions ledger and runtime state saved immediately before the last manual repair. Uses zero LLM calls.">↩️ Undo Last Repair</button>
+                    <button class="menu_button nwst-btn" id="nwst-debug-refresh-hidden-intentions" title="Rebuild the Hidden Intentions RP prompt injection immediately from the ledger as it exists right now. Uses zero API calls and does not create, update, park, reactivate, or otherwise mutate Hidden Intention records.">🔃 Refresh HI Prompt Injection</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-reconcile-hidden-intentions" title="Force a broad LLM maintenance pass over existing Hidden Intentions only. This uses API credits; use Audit & Repair first for mechanical state cleanup.">🔄 Debug Reconcile Hidden Intentions</button>
                     <button class="menu_button nwst-btn" id="nwst-debug-clear-hidden-intentions" title="Delete every Hidden Intention in this chat and reset all Hidden Intentions cadence, backfill checkpoints, counters, actor caches, cooldowns, and diagnostics. Does not affect other Notebook data.">🗑️ Clear All Hidden Intentions</button>
                     <button class="menu_button nwst-btn-debug" id="nwst-debug-review-participants" title="Use the Planning LLM to review every event, remove incorrect participants, add missing direct participants, and flag NPC events that still have no named actor">🔎 Review event participants</button>
@@ -2229,6 +2239,7 @@ function populateSettingsUI() {
     setCheckbox('nwst-hi-enabled', hi.enabled);
     setCheckbox('nwst-hi-day-advance', hi.dayAdvancement);
     setCheckbox('nwst-hi-review-new', hi.reviewNewIntentions);
+    setCheckbox('nwst-hi-inject-plans', hi.injectPlans);
     const hiValues = {
         'nwst-hi-cadence': hi.cadence,
         'nwst-hi-minimum': hi.minimumMessages,
@@ -2236,7 +2247,8 @@ function populateSettingsUI() {
         'nwst-hi-scan-range': hi.scanRange,
         'nwst-hi-max-actors': hi.maxActorsPerScan,
         'nwst-hi-max-active': hi.maxActivePerActor,
-        'nwst-hi-max-contingencies': hi.maxContingenciesPerActor
+        'nwst-hi-max-contingencies': hi.maxContingenciesPerActor,
+        'nwst-hi-max-injected': hi.maxInjectedPlans
     };
     for (const [id, value] of Object.entries(hiValues)) {
         const el = document.getElementById(id); if (el) el.value = value;
@@ -3083,6 +3095,7 @@ function wireSettingsEvents() {
     wireCheckbox('nwst-hi-enabled', (checked) => setHiddenIntentionsConfigValue('enabled', checked));
     wireCheckbox('nwst-hi-day-advance', (checked) => setHiddenIntentionsConfigValue('dayAdvancement', checked));
     wireCheckbox('nwst-hi-review-new', (checked) => setHiddenIntentionsConfigValue('reviewNewIntentions', checked));
+    wireCheckbox('nwst-hi-inject-plans', (checked) => { setHiddenIntentionsConfigValue('injectPlans', checked); import('../inject/promptInjector.js').then(m => m.updateInjection()).catch(()=>{}); });
     wireInput('nwst-hi-cadence', (val) => setHiddenIntentionsConfigValue('cadence', Math.max(5, parseInt(val, 10) || 30)));
     wireInput('nwst-hi-minimum', (val) => setHiddenIntentionsConfigValue('minimumMessages', Math.max(1, parseInt(val, 10) || 20)));
     wireInput('nwst-hi-cooldown', (val) => setHiddenIntentionsConfigValue('cooldownMessages', Math.max(0, parseInt(val, 10) || 0)));
@@ -3090,6 +3103,7 @@ function wireSettingsEvents() {
     wireInput('nwst-hi-max-actors', (val) => setHiddenIntentionsConfigValue('maxActorsPerScan', Math.max(1, Math.min(10, parseInt(val, 10) || 4))));
     wireInput('nwst-hi-max-active', (val) => setHiddenIntentionsConfigValue('maxActivePerActor', Math.max(1, Math.min(5, parseInt(val, 10) || 5))));
     wireInput('nwst-hi-max-contingencies', (val) => setHiddenIntentionsConfigValue('maxContingenciesPerActor', Math.max(0, Math.min(4, parseInt(val, 10) || 0))));
+    wireInput('nwst-hi-max-injected', (val) => { setHiddenIntentionsConfigValue('maxInjectedPlans', Math.max(1, Math.min(5, parseInt(val, 10) || 3))); import('../inject/promptInjector.js').then(m => m.updateInjection()).catch(()=>{}); });
     wireSelect('nwst-hi-auto-confidence', (val) => setHiddenIntentionsConfigValue('autoAddConfidence', ['low','medium','high'].includes(val) ? val : 'medium'));
 
     const hiGenerateNow = document.getElementById('nwst-hi-generate-now');
@@ -4250,7 +4264,7 @@ function wireSettingsEvents() {
         // Global settings are live runtime controls, not just serialized data.
         // Rebind the scanner from the imported per-chat checkpoint and make the
         // header/prompt injection reflect imported enabled/pause settings now.
-        const { stopScanner, startScanner, freezeScannerCadence, resumeScannerCadence } = await import('../llm/scanner.js');
+        const { stopScanner, startScanner, freezeScannerCadence, resumeScannerCadence } = await import('../llm/scanner.js?v=1.3.69');
         stopScanner();
         if (getSetting('enabled')) {
             if (getSetting('scanPaused')) {
@@ -4343,7 +4357,7 @@ function wireSettingsEvents() {
             // continuing an in-memory cadence from the data that was just erased.
             let scannerModule = null;
             try {
-                scannerModule = await import('../llm/scanner.js');
+                scannerModule = await import('../llm/scanner.js?v=1.3.69');
                 scannerModule.stopScanner();
             } catch (error) {
                 console.warn('[NWST Settings] Could not stop scanner before Clear All:', error);
@@ -4471,6 +4485,10 @@ function wireSettingsEvents() {
             debugGenerateIntentions.disabled = true;
             const original = debugGenerateIntentions.textContent;
             debugGenerateIntentions.textContent = '⏳ Backfilling intentions...';
+            const stopBackfillReminder = startLongOperationToast({
+                initialMessage: 'Hidden Intentions debug backfill started. This can take a long time to process on large chats.',
+                stillRunningMessage: 'Hidden Intentions debug backfill is still running. The LLM is still working; the backfill is just taking a while.',
+            });
             try {
                 const { runHiddenIntentionsBackfill, getHiddenIntentionsDebugReport } = await import('../llm/hiddenIntentions.js');
                 await runHiddenIntentionsBackfill({ expectedChatId: chatId, force: true });
@@ -4481,6 +4499,7 @@ ${getHiddenIntentionsDebugReport(chatId)}`);
                 console.error('[NWST Settings] Hidden Intentions debug backfill failed:', e);
                 nwstToast('Hidden Intentions backfill failed. Completed chunks were preserved; check F12.', 'error');
             } finally {
+                stopBackfillReminder();
                 debugGenerateIntentions.disabled = false;
                 debugGenerateIntentions.textContent = original;
             }
@@ -4615,6 +4634,30 @@ ${getHiddenIntentionsDebugReport(chatId)}`);
         });
     }
 
+    const debugRefreshIntentions = document.getElementById('nwst-debug-refresh-hidden-intentions');
+    if (debugRefreshIntentions) {
+        debugRefreshIntentions.addEventListener('click', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const chatId = getChatId();
+            if (!chatId) { nwstToast('No active chat.', 'error'); return; }
+            debugRefreshIntentions.disabled = true;
+            const original = debugRefreshIntentions.textContent;
+            debugRefreshIntentions.textContent = '⏳ Rebuilding injection...';
+            try {
+                const { updateInjection } = await import('../inject/promptInjector.js');
+                updateInjection();
+                nwstToast('Hidden Intentions prompt injection rebuilt from the current ledger. No Hidden Intention records were changed and no API call was used.', 'success');
+                dlog('[NWST HiddenIntentions] Manual prompt-injection refresh completed with zero ledger mutation.');
+            } catch (e) {
+                console.error('[NWST Settings] Hidden Intentions prompt injection refresh failed:', e);
+                nwstToast('Could not rebuild Hidden Intentions prompt injection. Check F12.', 'error');
+            } finally {
+                debugRefreshIntentions.disabled = false;
+                debugRefreshIntentions.textContent = original;
+            }
+        });
+    }
+
     const debugReconcileIntentions = document.getElementById('nwst-debug-reconcile-hidden-intentions');
     if (debugReconcileIntentions) {
         debugReconcileIntentions.addEventListener('click', async (event) => {
@@ -4624,6 +4667,10 @@ ${getHiddenIntentionsDebugReport(chatId)}`);
             debugReconcileIntentions.disabled = true;
             const original = debugReconcileIntentions.textContent;
             debugReconcileIntentions.textContent = '⏳ Reconciling intentions...';
+            const stopReconcileReminder = startLongOperationToast({
+                initialMessage: 'Hidden Intentions debug reconciliation started. This can take a long time to process when many records need review.',
+                stillRunningMessage: 'Hidden Intentions debug reconciliation is still running. The LLM is still working; the reconciliation is just taking a while.',
+            });
             try {
                 const { markHiddenIntentionsDirty, runHiddenIntentionsReconcile, getHiddenIntentionsDebugReport } = await import('../llm/hiddenIntentions.js');
                 await markHiddenIntentionsDirty(chatId, [], 'Manual Debug reconciliation requested.', { worldDirty: true });
@@ -4640,6 +4687,7 @@ ${getHiddenIntentionsDebugReport(chatId)}`);
                 console.error('[NWST Settings] Hidden Intentions debug reconciliation failed:', e);
                 nwstToast('Hidden Intentions debug reconciliation failed. Check F12.', 'error');
             } finally {
+                stopReconcileReminder();
                 debugReconcileIntentions.disabled = false;
                 debugReconcileIntentions.textContent = original;
             }
@@ -4744,7 +4792,7 @@ ${getHiddenIntentionsDebugReport(chatId)}`);
             debugScanCommunities.textContent = '⏳ Scanning...';
             debugScanCommunities.disabled = true;
             try {
-                const { synthesizeCommunities } = await import('../llm/scanner.js');
+                const { synthesizeCommunities } = await import('../llm/scanner.js?v=1.3.69');
                 const chatId = getChatId();
                 const ctx = SillyTavern.getContext();
                 const messages = (ctx.chat || []).filter(m => !(m.is_system && m.extra?.hidden) && m.extra?.display !== 'none');
@@ -4766,7 +4814,7 @@ ${getHiddenIntentionsDebugReport(chatId)}`);
             debugScanWorldState.textContent = '⏳ Scanning...';
             debugScanWorldState.disabled = true;
             try {
-                const { runScan } = await import('../llm/scanner.js');
+                const { runScan } = await import('../llm/scanner.js?v=1.3.69');
                 await runScan();
                 nwstToast('World state scan complete.', 'success');
                 if (typeof window?.nwstRefreshTabs === 'function') window.nwstRefreshTabs('home', 'world', 'notebook');

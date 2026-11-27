@@ -55,11 +55,24 @@ export async function saveWorldState(chatId, worldState) {
         const cleanDateSub = normalizeDateSub(currentDay.dateSub);
         if (cleanDateSub !== currentDay.dateSub) {
             normalized = {
-                ...worldState,
+                ...normalized,
                 currentDay: { ...currentDay, dateSub: cleanDateSub }
             };
         }
     }
+
+    // Spiritual Climate is subordinate to the Spiritual/Supernatural world
+    // condition toggle. When that condition is disabled, do not retain stale
+    // prose in Current Day where later generators/exporters can accidentally
+    // treat it as live setting context.
+    const spiritualEnabled = normalized?.conditions?.spiritual?.enabled === true;
+    if (!spiritualEnabled && normalized?.currentDay?.spiritualClimate) {
+        normalized = {
+            ...normalized,
+            currentDay: { ...normalized.currentDay, spiritualClimate: '' }
+        };
+    }
+
     await setChatData(chatId, 'worldState', normalized);
 }
 
@@ -70,6 +83,9 @@ export async function saveWorldState(chatId, worldState) {
  */
 export function getCurrentDay(chatId) {
     const ws = getWorldState(chatId);
+    if (ws?.conditions?.spiritual?.enabled !== true && ws?.currentDay?.spiritualClimate) {
+        return { ...ws.currentDay, spiritualClimate: '' };
+    }
     return ws.currentDay;
 }
 

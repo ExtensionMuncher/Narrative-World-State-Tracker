@@ -23,6 +23,54 @@ export function nwstToast(message, type = 'info') {
     }
 }
 
+export const LONG_OPERATION_REMINDER_MS = 45_000;
+
+/**
+ * Warn the user that a potentially long NWST operation has started, then keep
+ * reminding them at the same 45-second slow-call interval used by RST until
+ * the caller explicitly stops the reminder. Chained timeouts avoid overlapping
+ * reminders and make teardown deterministic on success, failure, or abort.
+ *
+ * @param {object} options
+ * @param {string} options.initialMessage
+ * @param {string} options.stillRunningMessage
+ * @param {number} [options.intervalMs=LONG_OPERATION_REMINDER_MS]
+ * @returns {() => void} stop function
+ */
+export function startLongOperationToast({
+    initialMessage = '',
+    stillRunningMessage = '',
+    intervalMs = LONG_OPERATION_REMINDER_MS,
+} = {}) {
+    const delay = Number.isFinite(Number(intervalMs)) && Number(intervalMs) > 0
+        ? Number(intervalMs)
+        : LONG_OPERATION_REMINDER_MS;
+    let stopped = false;
+    let timer = null;
+
+    if (initialMessage) nwstToast(initialMessage, 'info');
+
+    const scheduleReminder = () => {
+        timer = setTimeout(() => {
+            timer = null;
+            if (stopped) return;
+            if (stillRunningMessage) nwstToast(stillRunningMessage, 'info');
+            scheduleReminder();
+        }, delay);
+        // Node-based regression runs should not be kept alive solely by a toast timer.
+        if (typeof timer?.unref === 'function') timer.unref();
+    };
+
+    scheduleReminder();
+
+    return () => {
+        if (stopped) return;
+        stopped = true;
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+    };
+}
+
 /**
  * Get the current chat ID from SillyTavern context.
  * @returns {string|null} The current chat ID, or null if unavailable

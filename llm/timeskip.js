@@ -35,11 +35,13 @@ import { acquireStoryOperation, releaseStoryOperation } from '../lib/storyOperat
 import { getMoonConfig } from '../data/moons.js';
 import { ensureNagerHolidayCacheForCurrentWindow } from '../data/nagerDate.js';
 import { completeEventParticipants } from './eventParticipants.js';
+import { filterForwardNovelEvents, isLikelyCurrentOccurrenceEvent } from './eventNovelty.js';
+import { isNarrativeChatMessage } from './detectedEventValidation.js';
 import { getWeatherProfilesState, saveWeatherProfilesState, prepareSevereWeatherAdvance, commitPreparedWeather } from '../data/severeWeather.js';
 
 // ── Internal prompt ───────────────────────────────────────────────────────
 
-const TIMESKIP_SYSTEM_PROMPT = `You are a time skip assistant for a narrative roleplay. The user wants to skip forward in time. Your job is to perform a complete overhaul of the world state to reflect the passage of time described.
+const TIMESKIP_SYSTEM_PROMPT_TEMPLATE = `You are a time skip assistant for a narrative roleplay. The user wants to skip forward in time. Your job is to perform a complete overhaul of the world state to reflect the passage of time described.
 
 You will receive:
 - The time skip description (what the user wants to skip)
@@ -54,6 +56,16 @@ You must update ALL of the following:
 1. CURRENT DAY BLOCK: New date, new season, new weather, new moon phase appropriate to the new time period
 2. ALL EVENTS: Mark past-due ordinary events as resolved or missed. Update surviving ordinary events to correct tiers. Generate new dated/ordinary events where the skip context warrants them. Adjust NPC events based on what would plausibly have occurred. PERSISTENT events are excluded from time-skip maintenance: never resolve, miss, re-tier, or create Persistent events merely because time passed; their explicit narrative resolution is handled by the cadence scanner and player review.
 
+NEW-EVENT TEMPORAL CONTRACT — STRICT:
+- eventUpdates.newEvents contains ONLY genuinely NEW, FORWARD-FACING events that are still ahead of the LANDING POINT after the time skip.
+- The supplied recent narrative is HISTORY by the time you land. Do NOT turn actions that already occurred in that narrative, or actions that occurred during the skipped interval, into new Events.
+- Do NOT summarize recent scenes as Events. If an occurrence already happened, its consequence belongs in Notebook/current state or in maintenance of an existing Event — not newEvents.
+- Existing Events are an anti-duplication ledger across active and concluded history. Never create a renamed/reworded copy of one.
+- A prior action may INSPIRE a later consequence, but newEvents must state the NEXT occurrence. Example: WRONG: "The group has gathered for karaoke." RIGHT: "After the outing, a participant schedules a still-future follow-up meeting" only if current context supports that projection.
+- Example: WRONG: "Taro has purchased envelopes and begun writing letters." That already happened. A valid future Event would have to describe a still-unfulfilled next step, such as an actual decision to send something, and only when the supplied state supports that projection.
+- scheduledDate must be on or after the landing date. Do NOT emit a date from earlier in the current calendar cycle; NWST must not reinterpret a recap as next year.
+- If there is no strong new future event, return fewer newEvents or an empty array. Never pad with recaps.
+
 CRITICAL — NPC vs User Events: Events driven by NPC characters (events about a character's internal struggle, personal relationships, backstory, or decisions) MUST have "isNPC": true. Events that are world-facing or player-facing (faction movements, festivals, environmental changes, rumors the player can investigate) should have "isNPC": false. When in doubt, if a specific NPC name appears in the title or description, set isNPC: true.
 EVENT PARTICIPANTS — MANDATORY:
 - Every new event must include a participants array.
@@ -61,12 +73,12 @@ EVENT PARTICIPANTS — MANDATORY:
 - Non-NPC meetings, reviews, inspections, assignments, hearings, visits, and obligations must still list the named characters who directly attend, organize, perform, or carry responsibility.
 - Use [] only for genuinely ambient world events with no direct named character involvement.
 
-3. WORLD CONDITIONS: Use one of two mental modes for each condition. GROUNDED means the skip description/current state actually establishes the macro condition, with at most ONE conservative inference and no invented actor, reaction, institution, team, rumor, policy, coordination, awareness, or offscreen development. AMBIENT means a restrained low-stakes background condition consistent with Setting Context and the new date/season, independent of the immediate cast. Ambient may introduce modest background motion involving setting-supported institutions/factions/populations/environments, including named overarching institutions, provided it stays something the active cast could plausibly never notice. If an invented development would force immediate plan changes, urgent follow-up, or substantially rewrite the playable world, it is too consequential unless the supplied world state already supports that scale. Keep conditions at macro/durable scale: institutions, factions, populations, districts, regions, cultures, social patterns, spiritual systems, or environments. A named character may be identified as the CAUSE of a genuine grounded macro shift, but do not turn their personal actions into the World Condition itself. Do not invent unseen meetings, rumor circulation, institutional reactions, coordination, mutual awareness, policy shifts, resource strain, new teams/details, or faction-wide sentiment to bridge a local fact into a macro consequence. Preserve information asymmetry. Plausible future consequences are not current conditions. Avoid casually inventing plot-forcing upheavals such as war, coups, states of emergency, sweeping nationwide crackdowns/purges, mass civil disorder, economic collapse, catastrophic disasters, mass-casualty events, widespread infrastructure failure, or supernatural/metaphysical catastrophes. Avoid unsupported unprecedented/historic/system-wide claims.
+3. WORLD CONDITIONS: Use one of two mental modes for each condition. GROUNDED means the skip description/current state actually establishes the macro condition, with at most ONE conservative inference and no invented actor, reaction, institution, team, rumor, policy, coordination, awareness, or offscreen development. AMBIENT means a restrained low-stakes background condition consistent with Setting Context and the new date/season, independent of the immediate cast. Ambient may introduce modest background motion involving setting-supported institutions/factions/populations/environments, including named overarching institutions, provided it stays something the active cast could plausibly never notice. If an invented development would force immediate plan changes, urgent follow-up, or substantially rewrite the playable world, it is too consequential unless the supplied world state already supports that scale. Keep conditions at macro/durable scale: institutions, factions, populations, districts, regions, cultures, social patterns, or environments. A named character may be identified as the CAUSE of a genuine grounded macro shift, but do not turn their personal actions into the World Condition itself. Do not invent unseen meetings, rumor circulation, institutional reactions, coordination, mutual awareness, policy shifts, resource strain, new teams/details, or faction-wide sentiment to bridge a local fact into a macro consequence. Preserve information asymmetry. Plausible future consequences are not current conditions. Avoid casually inventing plot-forcing upheavals such as war, coups, states of emergency, sweeping nationwide crackdowns/purges, mass civil disorder, economic collapse, catastrophic disasters, mass-casualty events, widespread infrastructure failure. Avoid unsupported unprecedented/historic/system-wide claims.
 
 CATEGORY BOUNDARIES / MACRO THRESHOLDS FOR WORLD CONDITIONS:
 - POLITICAL: institutions, factions, governance, territory, policy/regulatory pressure, leadership/hierarchy, organizational posture, or institutional/faction relationships. One case, target, operative, restraining order, arrest, or investigation is not macro by itself. AMBIENT Political may include modest institutional motion such as routine procedural guidance, staffing/budget pressure, promotion cycles, municipal initiatives, enforcement-priority shifts, or low-key faction/corporate maneuvering when background-scale.
 - SOCIAL: collective behavior, norms, communities, public routines, workplaces, commerce, social spaces, population habits, or group-level pressures. Private relationships are not Social World State. Season/weather may explain social behavior but should not dominate the paragraph.
-- SPIRITUAL/SUPERNATURAL: durable metaphysical systems/pressures, supernatural factions, ritual cycles, regional phenomena, barriers/realms, or other setting-supported supernatural conditions. One character's aura/encounter/emotion is not world-scale metaphysics. Do not invent supernatural ontology absent setting support.
+{{SPIRITUAL_CATEGORY_RULE}}
 - ENVIRONMENTAL: durable climate/seasonal patterns, ecology, landscape, water/air conditions, regional hazards, flora/fauna shifts, or persistent environmental change. The new day's immediate weather belongs in Current Day unless it reflects a wider pattern.
 - A GROUNDED FACT is not automatically a GROUNDED WORLD CONDITION. If the skip only establishes case-specific facts, keep/preserve the broader condition or use restrained AMBIENT background rather than inflating those facts into macro state.
 4. NOTEBOOK: Maintain the latest coherent Notebook state after the skip — not an archive of every superseded intermediate state. Remove or replace outdated, contradicted, resolved, expired, or no-longer-current bullets across all Notebook fields. characterWhereabouts must contain only one latest-known position per character; offscreenPressure only one current pressure per source; currentToneAtmosphere only the current tone. Preserve durable facts unless the story explicitly corrected them.
@@ -93,11 +105,11 @@ Respond with a JSON object:
     "weatherToday": "weather at the new time",
     "flora": "seasonal flora description",
     "fauna": "seasonal fauna description",
-    "spiritualClimate": "if applicable",
-    "moonPhaseName": "exact moon phase name at the new date (e.g. 'Waning Crescent', 'First Quarter', 'Full Moon')",
+{{SPIRITUAL_CURRENT_DAY_FIELD}}    "moonPhaseName": "exact moon phase name at the new date (e.g. 'Waning Crescent', 'First Quarter', 'Full Moon')",
     "daysSkipped": number — the total whole days elapsed in this skip (e.g. "three weeks" = 21). REQUIRED. Count carefully; the system advances its deterministic calendar by exactly this many days.
   },
   "eventUpdates": {
+    "inProgress": ["event_id_started", ...],
     "resolved": ["event_id_1", ...],
     "missed": ["event_id_2", ...],
     "tierChanges": { "event_id_3": "immediate" | "week" | "month" } (never move events in or out of the "undetermined" tier — those are timeless by design),
@@ -108,15 +120,15 @@ Respond with a JSON object:
         "tier": "immediate"|"week"|"month"|"undetermined",
         "isNPC": true|false,
         "origin": "generated",
-        "scheduledDate": "REQUIRED when timing is clear — after a timeskip, events happening on the new date or near future MUST include a scheduledDate. Format: \"Day #\" or \"Month/Date\". OMIT for vague/uncertain timing."
+        "scheduledDate": "REQUIRED when timing is clear — after a timeskip, events happening on the new date or near future MUST include a scheduledDate. Format: \"Day #\" or \"Month/Date\". OMIT for vague/uncertain timing.",
+        "participants": ["REQUIRED named participants; [] only for genuinely ambient world events"]
       }
     ]
   },
   "conditionUpdates": {
     "political": "updated content or empty string",
     "social": "...",
-    "spiritual": "...",
-    "environmental": "..."
+{{SPIRITUAL_CONDITION_FIELD}}    "environmental": "..."
   },
   "notebookUpdates": {
     "removeCoreBullets": { "fieldName": [index1, index2] },
@@ -126,9 +138,22 @@ Respond with a JSON object:
   }
 }
 
-EVENT UPDATE SAFETY: Only list an existing ordinary event under resolved, missed, or tierChanges when the time skip clearly changes that event. Existing events omitted from eventUpdates remain unchanged; omission does NOT mean resolved. Persistent events must NEVER appear under resolved, missed, tierChanges, or newEvents; passage of time is not resolution evidence for them.
+EVENT UPDATE SAFETY:
+- If an EXISTING pending Event has begun by the landing point but is not finished, put its ID in inProgress. Do NOT create a newEvents replacement describing the same occurrence as "underway", "in progress", or already happening.
+- Only list an existing ordinary event under inProgress, resolved, missed, or tierChanges when the time skip clearly changes that event. Existing events omitted from eventUpdates remain unchanged; omission does NOT mean resolved.
+- Persistent events must NEVER appear under inProgress, resolved, missed, tierChanges, or newEvents; passage of time is not resolution evidence for them.
 
 Write with atmospheric detail. Ground everything in the setting context and the skip description.`;
+
+export function buildTimeskipSystemPrompt(spiritualEnabled) {
+    const spiritualRule = spiritualEnabled
+        ? `- SPIRITUAL/SUPERNATURAL: durable metaphysical systems/pressures, supernatural factions, ritual cycles, regional phenomena, barriers/realms, or other setting-supported supernatural conditions. One character's aura/encounter/emotion is not world-scale metaphysics. Do not invent supernatural ontology absent setting support.`
+        : '';
+    return TIMESKIP_SYSTEM_PROMPT_TEMPLATE
+        .replace('{{SPIRITUAL_CATEGORY_RULE}}', spiritualRule)
+        .replace('{{SPIRITUAL_CURRENT_DAY_FIELD}}', spiritualEnabled ? '    "spiritualClimate": "current metaphysical climate",\n' : '')
+        .replace('{{SPIRITUAL_CONDITION_FIELD}}', spiritualEnabled ? '    "spiritual": "...",\n' : '');
+}
 
 // ── Execute Time Skip ─────────────────────────────────────────────────────
 
@@ -187,6 +212,10 @@ export async function executeTimeSkip(skipDescription) {
         // ── 3. Build prompt with full context ──────────────────
         const currentDay = getCurrentDay(chatId);
         const conditions = getConditions(chatId);
+        const enabledConditionKeys = Object.entries(conditions)
+            .filter(([, condition]) => condition?.enabled === true)
+            .map(([key]) => key);
+        const spiritualEnabled = enabledConditionKeys.includes('spiritual');
         const events = getAllEvents(chatId);
         const notebook = getNotebook(chatId);
         const settingContext = getSettingContext(chatId);
@@ -213,7 +242,7 @@ export async function executeTimeSkip(skipDescription) {
 
         // ── 4. Call Planning LLM via connection profile ────────
         const messages = [
-            { role: 'system', content: TIMESKIP_SYSTEM_PROMPT },
+            { role: 'system', content: buildTimeskipSystemPrompt(spiritualEnabled) },
             { role: 'user', content: userPrompt }
         ];
 
@@ -309,7 +338,7 @@ export async function executeTimeSkip(skipDescription) {
 
             const computedSeason = computeSeason(newDayCount, seasonConfig);
             const finalSeason = computedSeason !== null ? computedSeason : (result.currentDay.season || preDay.season || '');
-            const mergedCurrentDay = mergeTimeskipCurrentDay(preDay, result.currentDay);
+            const mergedCurrentDay = mergeTimeskipCurrentDay(preDay, result.currentDay, { spiritualEnabled });
             await replaceCurrentDay(chatId, {
                 ...mergedCurrentDay,
                 season: finalSeason,
@@ -332,7 +361,7 @@ export async function executeTimeSkip(skipDescription) {
 
         // Apply condition updates
         if (result.conditionUpdates) {
-            await applyConditionUpdates(chatId, result.conditionUpdates);
+            await applyConditionUpdates(chatId, result.conditionUpdates, new Set(enabledConditionKeys));
             nwstToast('World conditions updated.', 'info');
         }
 
@@ -591,7 +620,7 @@ function estimateDaysBetweenDates(oldDate, newDate) {
 
 // ── Prompt building ───────────────────────────────────────────────────────
 
-function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook, settingContext, chatContext, computedSeason, eraPin = '') {
+export function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook, settingContext, chatContext, computedSeason, eraPin = '') {
     let prompt = '';
 
     prompt += `TIME SKIP DESCRIPTION:\n"${skipDesc}"\n\n`;
@@ -610,7 +639,9 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     prompt += `Weather: ${currentDay.weatherToday || '(not set)'}\n`;
     prompt += `Flora: ${currentDay.flora || ''}\n`;
     prompt += `Fauna: ${currentDay.fauna || ''}\n`;
-    prompt += `Spiritual Climate: ${currentDay.spiritualClimate || ''}\n`;
+    if (conditions?.spiritual?.enabled === true && currentDay.spiritualClimate) {
+        prompt += `Spiritual Climate: ${currentDay.spiritualClimate}\n`;
+    }
 
     // Get current moon phase info for LLM context
     const chatId = getChatId();
@@ -650,6 +681,7 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     // Conditions
     prompt += `=== WORLD CONDITIONS ===\n`;
     for (const [key, cond] of Object.entries(conditions)) {
+        if (cond?.enabled !== true) continue;
         prompt += `[${key}]: ${cond.content || '(empty)'}\n`;
     }
     prompt += '\n';
@@ -678,10 +710,12 @@ function buildTimeskipPrompt(skipDesc, currentDay, conditions, events, notebook,
     }
 
     if (chatContext) {
-        prompt += `=== RECENT CHAT CONTEXT ===\n${chatContext}\n\n`;
+        prompt += `=== RECENT NARRATIVE HISTORY — ALREADY OCCURRED / CONTEXT ONLY ===\n`;
+        prompt += `(Narrated actions below are history at the landing point. Do not copy or paraphrase them into eventUpdates.newEvents. Explicit unfulfilled future commitments may inform a genuinely later projection, but the Event must describe what still comes next.)\n`;
+        prompt += `${chatContext}\n\n`;
     }
 
-    prompt += `Perform a complete time skip overhaul. Respond with valid JSON only.`;
+    prompt += `Perform a complete time skip overhaul. For newEvents, run one final mental check: "Has this occurrence already happened anywhere above?" If yes, delete it. Respond with valid JSON only.`;
 
     return prompt;
 }
@@ -692,11 +726,7 @@ function getVisibleChatContext(count = 20) {
     try {
         const ctx = SillyTavern.getContext();
         const chat = ctx.chat || [];
-        const visibleMessages = chat.filter(msg => {
-            if (msg.is_system && msg.extra?.hidden) return false;
-            if (msg.extra?.display === 'none') return false;
-            return Boolean(msg.mes);
-        });
+        const visibleMessages = chat.filter(isNarrativeChatMessage);
 
         return visibleMessages.slice(-count).map(msg => {
             const sender = msg.is_user ? 'USER/PC' : 'NARRATION';
@@ -752,11 +782,17 @@ export function parseTimeskipResponse(response) {
  * never belong in persistent world state, and omitted model fields must not
  * erase existing canonical data.
  */
-export function mergeTimeskipCurrentDay(preDay = {}, modelDay = {}) {
+export function mergeTimeskipCurrentDay(preDay = {}, modelDay = {}, options = {}) {
     const merged = { ...(preDay && typeof preDay === 'object' ? preDay : {}) };
-    const stringFields = ['dateDisplay', 'dateSub', 'season', 'weatherToday', 'flora', 'fauna', 'spiritualClimate'];
+    const spiritualEnabled = options.spiritualEnabled !== false;
+    const stringFields = ['dateDisplay', 'dateSub', 'season', 'weatherToday', 'flora', 'fauna'];
     for (const key of stringFields) {
         if (typeof modelDay?.[key] === 'string') merged[key] = modelDay[key];
+    }
+    if (spiritualEnabled) {
+        if (typeof modelDay?.spiritualClimate === 'string') merged.spiritualClimate = modelDay.spiritualClimate;
+    } else {
+        merged.spiritualClimate = '';
     }
     return merged;
 }
@@ -772,6 +808,16 @@ async function applyEventUpdates(chatId, updates) {
     // Only explicit LLM decisions mutate existing events. Omission means
     // "unchanged", not "resolved" — otherwise a truncated or incomplete
     // response can silently close unrelated future events.
+    // Existing events that have started but not concluded should advance in
+    // place. This gives the planner a correct destination for "the meetup is
+    // underway" instead of forcing it to invent a duplicate new Event.
+    for (const id of (updates.inProgress || [])) {
+        const event = events.find(e => e.id === id);
+        if (event && event.tier !== 'persistent' && event.status === 'pending') {
+            event.status = 'inprogress';
+        }
+    }
+
     for (const id of (updates.resolved || [])) {
         const event = events.find(e => e.id === id);
         if (event && event.tier !== 'persistent') {
@@ -820,13 +866,40 @@ async function applyEventUpdates(chatId, updates) {
         }
     }
 
-    // Persist the modified events array (getAllEvents returns a deep clone,
-    // so modifications must be saved back explicitly)
+    // Time Skip historically trusted newEvents blindly, allowing the Planning
+    // LLM to turn recent history into a second copy of an already-completed
+    // occurrence. Fail closed at the persistence boundary just like normal Event
+    // Generation: reject duplicates/near-duplicates against the entire event
+    // ledger (including concluded history) and reject retrospective summaries.
+    const forwardNovelEvents = filterForwardNovelEvents(updates.newEvents || [], events, {
+        currentDay,
+        calendarConfig: getCalendarConfig(chatId),
+        onReject: (event, reason, details = {}) => {
+            if (reason === 'duplicate') {
+                const reference = details?.referenceEvent;
+                // Fail-safe for models that still emit a current occurrence in
+                // newEvents. If the matching tracked Event is pending and the
+                // duplicate says the occurrence is already underway, advance the
+                // tracked record instead of merely throwing the model output away.
+                if (reference?.status === 'pending' && reference?.tier !== 'persistent' && isLikelyCurrentOccurrenceEvent(event)) {
+                    reference.status = 'inprogress';
+                    dlog(`[NWST Timeskip] Rejected duplicate current-occurrence event and advanced existing Event to inprogress: "${reference?.title || '(untitled)'}"`);
+                } else {
+                    dlog(`[NWST Timeskip] Rejected duplicate/near-duplicate new event: "${event?.title || '(untitled)'}"`);
+                }
+            }
+            else if (reason === 'past_schedule') dlog(`[NWST Timeskip] Rejected new event scheduled before the landing day: "${event?.title || '(untitled)'}"`);
+            else if (reason === 'retrospective') dlog(`[NWST Timeskip] Rejected retrospective new event (already happened): "${event?.title || '(untitled)'}"`);
+        }
+    });
+
+    // Persist the modified event ledger after duplicate/current-occurrence
+    // recovery has had a chance to advance matching existing Events.
     await saveAllEvents(chatId, events);
 
-    // Add new events after participant completion. NPC events that still lack
-    // a resolvable named participant are preserved and surfaced for review.
-    const participantResult = await completeEventParticipants(chatId, updates.newEvents || [], {
+    // Add only validated new events after participant completion. NPC events that
+    // still lack a resolvable named participant are preserved and surfaced for review.
+    const participantResult = await completeEventParticipants(chatId, forwardNovelEvents, {
         notebook: getNotebook(chatId),
         reviewAll: true
     });
@@ -846,8 +919,9 @@ async function applyEventUpdates(chatId, updates) {
     }
 }
 
-async function applyConditionUpdates(chatId, updates) {
+async function applyConditionUpdates(chatId, updates, enabledKeys = null) {
     for (const [key, content] of Object.entries(updates)) {
+        if (enabledKeys instanceof Set && !enabledKeys.has(key)) continue;
         if (content) {
             await updateConditionContent(chatId, key, content);
         }

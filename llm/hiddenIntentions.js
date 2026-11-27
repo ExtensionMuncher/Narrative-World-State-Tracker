@@ -3,8 +3,9 @@
 // NWST Hidden Intentions — llm/hiddenIntentions.js
 // =============================================================================
 // Maintains compact, evidence-grounded private NPC objectives, plans, commitments,
-// priorities, contingencies, and emerging interests. Records are Notebook-only and are NEVER directly injected into
-// the RP prompt. They may inform generated NPC events and community synthesis.
+// priorities, contingencies, and emerging interests. Records live in the Notebook.
+// Scene-relevant executable plans may be selectively injected into the RP prompt by
+// hiddenIntentionsInjection.js when no active Event already represents the same plan.
 // =============================================================================
 
 import { getChatId, nwstToast } from '../utils.js';
@@ -26,12 +27,29 @@ import { getAllCommunities } from '../data/communities.js';
 import { buildAliasRegistry, toCanonicalId } from '../data/aliasRegistry.js';
 import { getUserCharacterIdentity } from '../data/secretsMeta.js';
 import { dlog } from '../lib/debug.js';
+import { getChatData } from '../data/storage.js';
+import { isNarrativeChatMessage } from './detectedEventValidation.js';
+import { selectHiddenIntentionsForInjection } from './hiddenIntentionsInjection.js';
 
 const CONFIDENCE_RANK = { low: 1, medium: 2, high: 3 };
 let cadenceTimer = null;
+let promptFreshnessTimer = null;
+const PROMPT_FRESHNESS_REVIEW_GAP = 3;
 let stateQueue = Promise.resolve();
 let activeBackfillChatId = null;
 const activeHiddenIntentionsOperationChatIds = new Set();
+
+
+function isMainGroundingComplete(chatId) {
+    if (!chatId) return false;
+    const scannerState = getChatData(chatId, 'scannerState');
+    if (!scannerState || typeof scannerState !== 'object') return false;
+    if (scannerState.groundingComplete === true) return true;
+    if (scannerState.groundingComplete === false) return false;
+    // Backward compatibility for pre-v1.3.68 chats whose scanner state already
+    // reached cadence before the explicit grounding flag existed.
+    return scannerState.scanPhase === 'cadence';
+}
 
 const COMMON_SYSTEM_PROMPT = `You maintain HIDDEN INTENTIONS for important NPCs in an ongoing roleplay.
 
@@ -245,6 +263,51 @@ VALID STRATEGY ENRICHMENT SHAPE:
   ]
 }`;
 
+const MAINTAIN_SYSTEM_PROMPT = `${COMMON_SYSTEM_PROMPT}
+
+MODE: AUTONOMOUS HIDDEN INTENTIONS MAINTENANCE + DISCOVERY
+- This is the normal automatic mode. Maintain existing records AND discover genuinely new durable agency created by recent story developments.
+- Every actor may return updates, additions, both, or neither.
+- Reconcile existing records for preparation, attempts, progress, blocking, revision, fulfillment, abandonment, staleness, parking, and reactivation.
+- Also inspect the supplied recent actor-relevant narrative for a new independent objective, plan, commitment, priority, contingency, or emerging interest that is NOT already represented by an existing record.
+- New additions are not optional functionality: if recent evidence establishes a genuinely new durable agency thread, return it. Do not force an addition when none is grounded.
+- Prefer updating an existing record when the new behavior is merely its next step, obstacle, strategy revision, evidence, or natural maturation. Add only when the new thread can progress or resolve independently.
+- An actor with no existing records may still receive additions; its updates array must remain empty.
+- A full working set does not forbid discovery: propose a stronger current addition when justified and NWST will deterministically park the weakest eligible generated record.
+- Do not pad the ledger, duplicate an Event, or convert a one-off reaction into a durable intention.
+- Active Plans and Contingencies must include a distinct broad strategy. Active Plans and Commitments must include a nearest nextAction where required by type.
+- Every lifecycle operation beyond a plain update requires a concise progressNote.
+
+VALID AUTONOMOUS MAINTENANCE SHAPE:
+{
+  "actors": [
+    {
+      "actorId": "exact_actor_id_from_packet",
+      "updates": [
+        {
+          "id": "R1",
+          "operation": "progress",
+          "progressStage": "progressed",
+          "progressNote": "The actor completed the first step and selected a follow-up.",
+          "basis": ["Recent narrative shows the first step occurring"]
+        }
+      ],
+      "additions": [
+        {
+          "type": "active_plan",
+          "domain": "relational",
+          "objective": "Privately ask the friend about what happened at the club",
+          "strategy": "Wait for a relaxed one-on-one opening rather than question her in front of the group",
+          "nextAction": "Use the karaoke outing to find a private conversational beat",
+          "basis": ["The actor explicitly decided to ask later when the friend recovered"],
+          "confidence": "high",
+          "commitment": "medium"
+        }
+      ]
+    }
+  ]
+}`;
+
 const BACKFILL_SYSTEM_PROMPT = `${COMMON_SYSTEM_PROMPT}
 
 MODE: SPARSE CHRONOLOGICAL HIDDEN INTENTIONS BACKFILL
@@ -315,6 +378,9 @@ function compactRecoverySystemPrompt(mode) {
     if (mode === 'generate') {
         return `${COMPACT_RECOVERY_BASE_PROMPT}\n- Generate missing durable records only. Every updates array must be empty.`;
     }
+    if (mode === 'maintain') {
+        return `${COMPACT_RECOVERY_BASE_PROMPT}\n- Maintain existing records and add genuinely new independent durable agency when grounded. Both arrays may be used.`;
+    }
     if (mode === 'final') {
         return `${COMPACT_RECOVERY_BASE_PROMPT}\n- Reconcile existing records only. Every additions array must be empty.`;
     }
@@ -327,12 +393,13 @@ function compactRecoverySystemPrompt(mode) {
 
 function systemPromptForMode(mode) {
     if (mode === 'generate') return GENERATE_SYSTEM_PROMPT;
+    if (mode === 'maintain') return MAINTAIN_SYSTEM_PROMPT;
     if (mode === 'backfill') return BACKFILL_SYSTEM_PROMPT;
     return RECONCILE_SYSTEM_PROMPT;
 }
 
 function currentMessageCount() {
-    try { return SillyTavern.getContext().chat?.length || 0; } catch (_) { return 0; }
+    try { return (SillyTavern.getContext().chat || []).filter(isNarrativeChatMessage).length; } catch (_) { return 0; }
 }
 
 function currentElapsedDay(chatId) {
@@ -343,11 +410,7 @@ function currentElapsedDay(chatId) {
 function getVisibleChatMessages() {
     try {
         const chat = SillyTavern.getContext().chat || [];
-        return chat.map((msg, index) => ({ ...msg, _nwstIndex: index })).filter(msg => {
-            if (msg.extra?.hidden || msg.is_hidden === true) return false;
-            if (msg.extra?.display === 'none') return false;
-            return true;
-        });
+        return chat.map((msg, index) => ({ ...msg, _nwstIndex: index })).filter(isNarrativeChatMessage);
     } catch (_) { return []; }
 }
 
@@ -554,16 +617,148 @@ export async function maybeRunHiddenIntentionsCadence(currentCount = null) {
     if (!cfg.enabled) return false;
     const chatId = getChatId();
     if (!chatId) return false;
+    if (!isMainGroundingComplete(chatId)) return false;
     const count = Number.isInteger(currentCount) ? currentCount : currentMessageCount();
     const state = getHiddenIntentionsState(chatId);
     if (state.scanInProgress) return false;
     if (count < cfg.minimumMessages) return false;
     if (count < (state.cooldownUntilMessage || 0)) return false;
     if (count - (state.lastScanMessageCount || 0) < cfg.cadence) return false;
-    const ownerIds = new Set(getHiddenIntentions(chatId).filter(trackableRecord).map(item => item.actorId));
-    const hasRelevantDirtyActor = (state.dirtyActors || []).some(item => ownerIds.has(item.actorId));
-    if (!hasRelevantDirtyActor && !state.worldDirty) return false;
-    return runHiddenIntentionsReconcile({ trigger: 'cadence', expectedChatId: chatId });
+    const hasDirtyActor = (state.dirtyActors || []).length > 0;
+    if (!hasDirtyActor && !state.worldDirty) return false;
+    return runHiddenIntentionsMaintain({ trigger: 'cadence', expectedChatId: chatId });
+}
+
+// Prompt injection is evaluated every generation, so existing executable plans
+// need a faster freshness lane than the 30-message discovery cadence. Ordinary
+// stale plans still wait for a small review gap, but a dirty actor who has just
+// made an explicit new decision/plan in recent narrative is eligible immediately
+// for focused maintenance+discovery. This catches new agency without turning
+// every actor mention into an LLM call. The focused pass preserves normal
+// cadence/dirty state so broad maintenance still receives its full signal later.
+const PROMPT_DISCOVERY_WINDOW = 6;
+const EXPLICIT_AGENCY_SIGNAL_RE = /\b(?:plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|decid(?:e|es|ed|ing)|resolv(?:e|es|ed|ing)|vow(?:s|ed|ing)?|promis(?:e|es|ed|ing)|order(?:s|ed|ing)?)\b[\s\S]{0,180}\b(?:to|that)\b|\b(?:will|would|shall)\b[\s\S]{0,90}\b(?:meet|wait|watch|stake|ask|tell|go|return|stay|follow|intercept|call|visit|arrive|buy|bring|hold|keep|send|take|make|engineer|stage|be)\b/i;
+
+function agencySegments(text) {
+    const source = String(text || '').trim();
+    if (!source) return [];
+    // Long autonomous/cutaway replies commonly use Markdown scene headings.
+    // Keep those scenes separate so one character's decision does not make
+    // every named NPC in a 30k-character multi-scene reply look actionable.
+    const headingSplit = source.split(/(?=^#{1,3}\s+)/m).map(part => part.trim()).filter(Boolean);
+    if (headingSplit.length > 1) return headingSplit;
+    // For ordinary prose, nearby paragraphs are a safer agency unit than the
+    // entire message while still preserving pronoun context around a decision.
+    const paragraphs = source.split(/\n\s*\n+/).map(part => part.trim()).filter(Boolean);
+    if (paragraphs.length <= 4) return [source];
+    const windows = [];
+    for (let i = 0; i < paragraphs.length; i++) {
+        if (!EXPLICIT_AGENCY_SIGNAL_RE.test(paragraphs[i])) continue;
+        windows.push(paragraphs.slice(Math.max(0, i - 3), Math.min(paragraphs.length, i + 2)).join('\n\n'));
+    }
+    return windows.length ? windows : [source];
+}
+
+function recentExplicitAgencyActorIds(chatId, dirtyIds) {
+    const registry = buildAliasRegistry(chatId);
+    const found = new Set();
+    const messages = getVisibleChatMessages().slice(-PROMPT_DISCOVERY_WINDOW);
+    for (const msg of messages) {
+        for (const segment of agencySegments(msg?.mes)) {
+            if (!EXPLICIT_AGENCY_SIGNAL_RE.test(segment)) continue;
+            for (const actorId of registry.scanProse(segment)) {
+                if (dirtyIds.has(actorId) && !registry.isGroup(actorId) && !registry.isUserPc(actorId)) found.add(actorId);
+            }
+        }
+    }
+    return found;
+}
+
+function latestActorReviewMessage(chatId, actorId) {
+    return getHiddenIntentions(chatId)
+        .filter(item => item?.actorId === actorId && trackableRecord(item))
+        .reduce((max, item) => Math.max(max, Number(item?.lastReviewedMessage || item?.lastReinforcedMessage || item?.createdMessage || 0)), 0);
+}
+
+export function queueHiddenIntentionsPromptFreshnessCheck({ currentCount = null, isScannerBusy = null } = {}) {
+    const expectedChatId = getChatId();
+    if (promptFreshnessTimer) clearTimeout(promptFreshnessTimer);
+    promptFreshnessTimer = setTimeout(async () => {
+        promptFreshnessTimer = null;
+        try {
+            if (!expectedChatId || getChatId() !== expectedChatId) return;
+            if (typeof isScannerBusy === 'function' && isScannerBusy()) return;
+            await maybeRefreshHiddenIntentionsForPrompt(currentCount);
+        } catch (e) {
+            dlog('[NWST HiddenIntentions] Prompt-freshness check failed (non-fatal):', e);
+        }
+    }, 750);
+}
+
+export async function maybeRefreshHiddenIntentionsForPrompt(currentCount = null) {
+    const cfg = getHiddenIntentionsConfig();
+    if (!cfg.enabled || cfg.injectPlans === false) return false;
+    const chatId = getChatId();
+    if (!chatId) return false;
+    if (!isMainGroundingComplete(chatId)) return false;
+    const state = getHiddenIntentionsState(chatId);
+    if (state.scanInProgress || state.backfillInProgress) return false;
+    const count = Number.isInteger(currentCount) ? currentCount : currentMessageCount();
+    if (count < cfg.minimumMessages) return false;
+
+    const selected = selectHiddenIntentionsForInjection(chatId);
+    const dirtyEntries = state.dirtyActors || [];
+    const dirtyIds = new Set(dirtyEntries.map(item => item.actorId));
+    const explicitAgencyIds = recentExplicitAgencyActorIds(chatId, dirtyIds);
+    const actors = [];
+    const seen = new Set();
+    const addActor = (actorId, actor, reason) => {
+        if (!actorId || seen.has(actorId)) return;
+        seen.add(actorId);
+        actors.push({ actorId, actor: actor || actorId, reason });
+    };
+
+    // Existing plans use the conservative stale-plan gate. This is the cheap
+    // freshness behavior introduced in v1.3.60/61.
+    for (const item of selected) {
+        const record = item.record;
+        const actorId = item.actorId || record?.actorId;
+        if (!actorId || seen.has(actorId)) continue;
+        if (!state.worldDirty && !dirtyIds.has(actorId)) continue;
+        const reviewedAt = Number(record?.lastReviewedMessage || record?.lastReinforcedMessage || record?.createdMessage || 0);
+        if (count - reviewedAt < PROMPT_FRESHNESS_REVIEW_GAP) continue;
+        addActor(actorId, record.actor || actorId, 'stale-plan');
+    }
+
+    // New explicit agency cannot wait for the normal 30-message discovery
+    // cadence. If a dirty actor has made a concrete decision/plan since their
+    // ledger was last reviewed, run focused maintenance immediately. Unlike
+    // reconcile mode, maintenance is allowed to create a new independent HI.
+    for (const dirty of dirtyEntries) {
+        const actorId = dirty?.actorId;
+        if (!actorId || seen.has(actorId) || !explicitAgencyIds.has(actorId)) continue;
+        const reviewedAt = latestActorReviewMessage(chatId, actorId);
+        const dirtyAt = Number(dirty?.markedAtMessage || 0);
+        if (dirtyAt <= reviewedAt) continue;
+        addActor(actorId, dirty.actor || actorId, 'new-agency');
+    }
+
+    if (!actors.length) return false;
+
+    dlog(`[NWST HiddenIntentions] Fast focused maintenance for ${actors.map(item => `${item.actor} (${item.reason})`).join(', ')} at M${count}.`);
+    const result = await runHiddenIntentionsMaintain({
+        trigger: 'prompt_freshness', expectedChatId: chatId, force: true,
+        actorsOverride: actors, preserveCadence: true, preserveDirty: true
+    });
+    if (result?.ran && getChatId() === chatId) {
+        try {
+            const { updateInjection } = await import('../inject/promptInjector.js');
+            updateInjection();
+        } catch (e) {
+            dlog('[NWST HiddenIntentions] Could not rebuild injection after prompt-freshness reconciliation:', e);
+        }
+    }
+    return result;
 }
 
 function actorMentionedInText(actor, registry, text) {
@@ -619,18 +814,74 @@ const BACKFILL_NARRATIVE_RETRY_DEPTH = 2;
 const BACKFILL_MAX_ACTORS_PER_REQUEST = 4;
 const BACKFILL_PROACTIVE_NARRATIVE_CHAR_TARGET = 24000;
 const BACKFILL_MAX_CALLS_PER_SEGMENT = 12;
+const BACKFILL_SINGLE_MESSAGE_FRAGMENT_TARGET = 12000;
 
 function compactBackfillMessageText(msg) {
     const sender = narrativeSpeakerLabel(msg);
+    const fragment = Number.isInteger(msg?._nwstBackfillFragmentIndex) && Number.isInteger(msg?._nwstBackfillFragmentCount)
+        ? `|fragment ${msg._nwstBackfillFragmentIndex + 1}/${msg._nwstBackfillFragmentCount}`
+        : '';
     const body = String(msg?.mes || '')
         .replace(/\r\n?/g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
-    return `[M${msg?._nwstIndex ?? '?'}|${sender}] ${body}`;
+    return `[M${msg?._nwstIndex ?? '?'}|${sender}${fragment}] ${body}`;
 }
 
 function messageBackfillText(msg) {
     return compactBackfillMessageText(msg);
+}
+
+function splitTextForBackfillFragments(text, targetChars = BACKFILL_SINGLE_MESSAGE_FRAGMENT_TARGET) {
+    const target = Math.max(4000, Number(targetChars) || BACKFILL_SINGLE_MESSAGE_FRAGMENT_TARGET);
+    const normalized = String(text || '').replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    if (!normalized || normalized.length <= target) return normalized ? [normalized] : [];
+
+    // Prefer paragraph boundaries. If one paragraph is itself enormous, fall
+    // back to sentence-ish boundaries and finally a hard character slice.
+    const units = normalized.split(/\n\n+/).filter(Boolean);
+    const fragments = [];
+    let current = '';
+    const pushUnit = (unit) => {
+        if (!unit) return;
+        if (!current) { current = unit; return; }
+        const candidate = `${current}\n\n${unit}`;
+        if (candidate.length <= target) current = candidate;
+        else { fragments.push(current); current = unit; }
+    };
+
+    for (const unit of units) {
+        if (unit.length <= target) { pushUnit(unit); continue; }
+        if (current) { fragments.push(current); current = ''; }
+        const sentences = unit.split(/(?<=[.!?。！？])\s+/).filter(Boolean);
+        let sentenceBuffer = '';
+        for (const sentence of sentences.length > 1 ? sentences : [unit]) {
+            if (sentence.length <= target) {
+                if (!sentenceBuffer) sentenceBuffer = sentence;
+                else if (`${sentenceBuffer} ${sentence}`.length <= target) sentenceBuffer += ` ${sentence}`;
+                else { fragments.push(sentenceBuffer); sentenceBuffer = sentence; }
+                continue;
+            }
+            if (sentenceBuffer) { fragments.push(sentenceBuffer); sentenceBuffer = ''; }
+            for (let offset = 0; offset < sentence.length; offset += target) {
+                fragments.push(sentence.slice(offset, offset + target));
+            }
+        }
+        if (sentenceBuffer) fragments.push(sentenceBuffer);
+    }
+    if (current) fragments.push(current);
+    return fragments.filter(Boolean);
+}
+
+function splitBackfillSingleMessage(msg, targetChars = BACKFILL_SINGLE_MESSAGE_FRAGMENT_TARGET) {
+    const fragments = splitTextForBackfillFragments(msg?.mes, targetChars);
+    if (fragments.length <= 1) return [msg];
+    return fragments.map((mes, index) => ({
+        ...msg,
+        mes,
+        _nwstBackfillFragmentIndex: index,
+        _nwstBackfillFragmentCount: fragments.length
+    }));
 }
 
 function chunkVisibleMessagesForBackfill(messages, targetChars = BACKFILL_NARRATIVE_CHAR_TARGET) {
@@ -840,7 +1091,7 @@ function trackableRecord(record) {
     return !['resolved', 'abandoned', 'stale'].includes(record.status);
 }
 
-function collectCandidateActors(chatId, trigger, state, cfg, mode = 'reconcile', broad = false) {
+function collectCandidateActors(chatId, trigger, state, cfg, mode = 'reconcile', broad = false, actorLimit = null) {
     const registry = buildAliasRegistry(chatId);
     const existing = getHiddenIntentions(chatId);
     const existingByActor = new Map();
@@ -865,7 +1116,8 @@ function collectCandidateActors(chatId, trigger, state, cfg, mode = 'reconcile',
     for (const record of existing) {
         if (!activeRecord(record)) continue;
         const needsStrategy = strategyRequiredForType(record.type) && !String(record.strategy || '').trim();
-        add(record.actor, mode === 'reconcile' && needsStrategy ? 155 : (mode === 'reconcile' ? 100 : 35), needsStrategy ? 'strategy-enrichment' : 'existing');
+        const maintenanceWeight = mode === 'maintain' ? (needsStrategy ? 120 : 48) : 35;
+        add(record.actor, mode === 'reconcile' && needsStrategy ? 155 : (mode === 'reconcile' ? 100 : maintenanceWeight), needsStrategy ? 'strategy-enrichment' : 'existing');
     }
     for (const event of getTrackedEvents(chatId)) {
         const weight = event.tier === 'immediate' ? 70 : event.tier === 'week' ? 35 : 15;
@@ -877,7 +1129,7 @@ function collectCandidateActors(chatId, trigger, state, cfg, mode = 'reconcile',
             if (!registry.isGroup(id) && !registry.isUserPc(id)) add(registry.getDisplay(id), 15, 'mentioned');
         }
     }
-    if (mode === 'generate' || trigger === 'day_advance' || state.worldDirty || broad) {
+    if (mode === 'generate' || mode === 'maintain' || trigger === 'day_advance' || state.worldDirty || broad) {
         for (const com of getAllCommunities(chatId)) {
             for (const member of communityMembers(com)) add(member, broad ? 20 : 8, 'community');
         }
@@ -894,22 +1146,27 @@ function collectCandidateActors(chatId, trigger, state, cfg, mode = 'reconcile',
         }
     }
 
-    if (mode === 'generate') {
-        // Generation should spend its limited actor slots looking for missing
+    if (mode === 'generate' || mode === 'maintain') {
+        // Generation/autonomous maintenance should spend limited actor slots looking for missing
         // agency, not repeatedly re-selecting only actors who already own a
         // healthy ledger. Existing owners remain eligible for genuinely separate
         // threads, but unrepresented named NPCs receive a gap-detection boost.
         for (const candidate of scores.values()) {
             if (!existingByActor.has(candidate.actorId)) {
-                candidate.score += broad ? 45 : 24;
+                candidate.score += broad ? 45 : (mode === 'maintain' ? 36 : 24);
                 candidate.reasons.push('missing-ledger-gap');
             }
         }
     }
 
-    const limit = broad && mode === 'generate'
+    const explicitLimit = Number.isFinite(Number(actorLimit)) && Number(actorLimit) > 0
+        ? Math.max(1, Math.min(32, Math.floor(Number(actorLimit))))
+        : null;
+    const limit = explicitLimit ?? (broad && mode === 'generate'
         ? Math.min(10, Math.max(cfg.maxActorsPerScan, cfg.maxActorsPerScan * 2))
-        : cfg.maxActorsPerScan;
+        : broad && mode === 'maintain'
+            ? Math.min(32, Math.max(12, cfg.maxActorsPerScan * 4))
+            : cfg.maxActorsPerScan);
     return Array.from(scores.values())
         .sort((a, b) => b.score - a.score || a.actor.localeCompare(b.actor))
         .slice(0, limit);
@@ -1020,7 +1277,7 @@ function buildActorPacket(chatId, actor, registry, cfg, trigger = 'cadence', opt
 }
 
 function buildPrompt(chatId, actors, cfg, trigger, mode = 'reconcile', options = {}) {
-    const operationLabel = mode === 'generate' ? 'GENERATE NEW RECORDS' : mode === 'backfill' ? 'CHRONOLOGICAL BACKFILL' : 'RECONCILE EXISTING RECORDS';
+    const operationLabel = mode === 'generate' ? 'GENERATE NEW RECORDS' : mode === 'maintain' ? 'AUTONOMOUS MAINTENANCE + DISCOVERY' : mode === 'backfill' ? 'CHRONOLOGICAL BACKFILL' : 'RECONCILE EXISTING RECORDS';
     let prompt = `OPERATION: ${operationLabel}\n`;
     prompt += `SCAN TRIGGER: ${trigger}\n`;
     prompt += `Current message count: ${currentMessageCount()}\n`;
@@ -1054,12 +1311,14 @@ function buildPrompt(chatId, actors, cfg, trigger, mode = 'reconcile', options =
     for (const actor of actors) {
         const packet = buildActorPacket(chatId, actor, registry, cfg, trigger, options);
         if (mode === 'backfill') packet.implicitGrounding = 'historical_segment';
-        else if (mode === 'reconcile') packet.implicitGrounding = 'recent_scan';
+        else if (mode === 'reconcile' || mode === 'maintain') packet.implicitGrounding = 'recent_scan';
         packets.set(actor.actorId, packet);
         prompt += packet.text + '\n';
     }
     if (mode === 'generate') {
         prompt += `Generate only missing, durable records. Keep every updates array empty. Active Plans and Contingencies must include a distinct broad strategy. Favor a grounded balance of constructive, mundane, professional, relational, protective, and conflict-related agency. When Low confidence is enabled, actively look for nonlinear emerging interests supported by at least one actor-specific signal plus compatible corroboration from another supplied source. Keep such records tentative and omit strategy/nextAction unless directly supported. No prose outside JSON.`;
+    } else if (mode === 'maintain') {
+        prompt += `Autonomously maintain the existing records AND discover any genuinely new independent durable agency established by the supplied recent evidence. Both updates and additions are allowed. Do not add a separate record for a mere next step or evidence update to an existing objective. An actor with no records may still receive additions. Active Plans and Contingencies must include a distinct broad strategy. No prose outside JSON.`;
     } else if (mode === 'backfill') {
         prompt += `Process this chronological chunk as migration state. Reconcile records carried from earlier chunks and add newly supported durable records. Both arrays may be used. Active Plans and Contingencies must include a distinct broad strategy; enrich blank required strategies when this chunk reveals the method. Ground historical changes in this chunk's narrative evidence. No prose outside JSON.`;
     } else {
@@ -1080,12 +1339,21 @@ function buildCompactBackfillActorState(chatId, actor, registry, cfg, messageInd
     if (entity?.aliases?.length) text += `aliases=${entity.aliases.slice(0, 8).join(', ')}\n`;
     if (intentions.length) {
         text += `records:\n`;
-        // Current records matter most. Include only the two most recent parked
-        // records so historical storage cannot make later prompts explode.
-        const rows = [
-            ...intentions.filter(item => item.status !== 'parked'),
-            ...parked.slice().sort((a, b) => Number(b.parkedAtMessage || 0) - Number(a.parkedAtMessage || 0)).slice(0, 2)
-        ];
+        // Current records matter most. Keep all current working records, but bound
+        // closed/parked history so long-running chats cannot make later backfill
+        // requests exceed the hard request-size limit.
+        const closedStatuses = new Set(['resolved', 'abandoned', 'stale']);
+        const currentRows = intentions.filter(item => item.status !== 'parked' && !closedStatuses.has(item.status));
+        const recentClosedRows = intentions
+            .filter(item => closedStatuses.has(item.status))
+            .slice()
+            .sort((a, b) => Number(b.lastReviewedMessage || b.lastReinforcedMessage || b.createdMessage || 0) - Number(a.lastReviewedMessage || a.lastReinforcedMessage || a.createdMessage || 0))
+            .slice(0, 3);
+        const recentParkedRows = parked
+            .slice()
+            .sort((a, b) => Number(b.parkedAtMessage || 0) - Number(a.parkedAtMessage || 0))
+            .slice(0, 2);
+        const rows = [...currentRows, ...recentClosedRows, ...recentParkedRows];
         rows.forEach((item, index) => {
             const ref = `R${index + 1}`;
             recordIdMap[ref.toLowerCase()] = item.id;
@@ -3091,7 +3359,7 @@ function applyModelResult(chatId, actors, parsed, packets, cfg, mode = 'reconcil
         });
         list = rebalanced.list;
 
-        if (mode === 'reconcile') {
+        if (mode === 'reconcile' || mode === 'maintain') {
             list = list.map(item => item.actorId === actorId
                 ? normalizeHiddenIntention({ ...item, lastReviewedDay: elapsedDay, lastReviewedMessage: messageCount })
                 : item);
@@ -3103,30 +3371,47 @@ function applyModelResult(chatId, actors, parsed, packets, cfg, mode = 'reconcil
 
 function summarizeValidation(diagnostics = {}) {
     const mode = diagnostics.mode || 'reconcile';
-    const seen = mode === 'generate' ? Number(diagnostics.additionsSeen || 0) : Number(diagnostics.updatesSeen || 0);
-    const accepted = mode === 'generate' ? Number(diagnostics.additionsAccepted || 0) : Number(diagnostics.updatesApplied || 0);
+    const updatesSeen = Number(diagnostics.updatesSeen || 0);
+    const updatesApplied = Number(diagnostics.updatesApplied || 0);
+    const additionsSeen = Number(diagnostics.additionsSeen || 0);
+    const additionsAccepted = Number(diagnostics.additionsAccepted || 0);
     const rejected = Array.isArray(diagnostics.rejected) ? diagnostics.rejected : [];
-    const unit = mode === 'generate' ? 'addition' : 'update';
     const parked = Number(diagnostics.parked || 0);
     const reactivated = Number(diagnostics.reactivated || 0);
     const merged = Number(diagnostics.duplicatesMerged || 0);
     const recovered = Number(diagnostics.semanticRecoveries || 0);
     const suppressed = Array.isArray(diagnostics.suppressed) ? diagnostics.suppressed.length : 0;
-    if (!seen) {
-        const base = mode === 'generate' ? 'No additions returned.' : 'No updates returned.';
-        return `${base}${parked ? ` ${parked} record${parked === 1 ? '' : 's'} parked.` : ''}${reactivated ? ` ${reactivated} reactivated.` : ''}${merged ? ` ${merged} duplicate proposal${merged === 1 ? '' : 's'} merged.` : ''}${suppressed ? ` ${suppressed} non-record proposal${suppressed === 1 ? '' : 's'} ignored.` : ''}`;
+    const parts = [];
+    if (mode === 'generate') {
+        parts.push(additionsSeen ? `${additionsAccepted}/${additionsSeen} additions accepted` : 'No additions returned');
+    } else if (mode === 'maintain') {
+        parts.push(updatesSeen ? `${updatesApplied}/${updatesSeen} updates accepted` : 'No updates returned');
+        parts.push(additionsSeen ? `${additionsAccepted}/${additionsSeen} new intentions accepted` : 'No new intentions returned');
+    } else {
+        parts.push(updatesSeen ? `${updatesApplied}/${updatesSeen} updates accepted` : 'No updates returned');
     }
-    const reasonCounts = new Map();
-    for (const item of rejected) reasonCounts.set(item.reason, (reasonCounts.get(item.reason) || 0) + 1);
-    const reasons = Array.from(reasonCounts.entries()).map(([reason, count]) => `${reason} (${count})`).join('; ');
-    return `${accepted}/${seen} ${unit}${seen === 1 ? '' : 's'} accepted${parked ? `; ${parked} parked` : ''}${reactivated ? `; ${reactivated} reactivated` : ''}${merged ? `; ${merged} duplicate proposal${merged === 1 ? '' : 's'} merged` : ''}${recovered ? `; ${recovered} schema/semantic recover${recovered === 1 ? 'y' : 'ies'}` : ''}${suppressed ? `; ${suppressed} non-record proposal${suppressed === 1 ? '' : 's'} ignored` : ''}${rejected.length ? `; ${rejected.length} rejected: ${reasons}` : ''}.`;
+    if (parked) parts.push(`${parked} parked`);
+    if (reactivated) parts.push(`${reactivated} reactivated`);
+    if (merged) parts.push(`${merged} duplicate proposal${merged === 1 ? '' : 's'} merged`);
+    if (recovered) parts.push(`${recovered} schema/semantic recover${recovered === 1 ? 'y' : 'ies'}`);
+    if (suppressed) parts.push(`${suppressed} non-record proposal${suppressed === 1 ? '' : 's'} ignored`);
+    if (rejected.length) {
+        const reasonCounts = new Map();
+        for (const item of rejected) reasonCounts.set(item.reason, (reasonCounts.get(item.reason) || 0) + 1);
+        const reasons = Array.from(reasonCounts.entries()).map(([reason, count]) => `${reason} (${count})`).join('; ');
+        parts.push(`${rejected.length} rejected: ${reasons}`);
+    }
+    return `${parts.join('; ')}.`;
 }
 
 function manualOperation(trigger) {
     return String(trigger || '').startsWith('manual_');
 }
 
-async function runHiddenIntentionsOperation({ mode = 'reconcile', trigger = 'manual_reconcile', expectedChatId = null, force = false, broad = false } = {}) {
+async function runHiddenIntentionsOperation({
+    mode = 'reconcile', trigger = 'manual_reconcile', expectedChatId = null, force = false, broad = false,
+    actorsOverride = null, actorLimit = null, preserveCadence = false, preserveDirty = false
+} = {}) {
     const cfg = getHiddenIntentionsConfig();
     if (!cfg.enabled && !force) return false;
     const chatId = expectedChatId || getChatId();
@@ -3158,7 +3443,20 @@ async function runHiddenIntentionsOperation({ mode = 'reconcile', trigger = 'man
         return false;
     }
 
-    const actors = collectCandidateActors(chatId, trigger, state, cfg, mode, broad);
+    let actors;
+    if (Array.isArray(actorsOverride) && actorsOverride.length) {
+        const registry = buildAliasRegistry(chatId);
+        const seen = new Set();
+        actors = actorsOverride.map(item => normalizeActor(chatId, typeof item === 'string' ? item : (item?.actor || item?.name || item?.actorId || ''), registry))
+            .filter(Boolean)
+            .filter(item => {
+                if (seen.has(item.actorId)) return false;
+                seen.add(item.actorId);
+                return true;
+            });
+    } else {
+        actors = collectCandidateActors(chatId, trigger, state, cfg, mode, broad, actorLimit);
+    }
     if (!actors.length) {
         if (manualOperation(trigger)) {
             nwstToast(mode === 'generate'
@@ -3224,21 +3522,28 @@ async function runHiddenIntentionsOperation({ mode = 'reconcile', trigger = 'man
 
         const latestState = getHiddenIntentionsState(chatId);
         const scannedIds = new Set(actors.map(a => a.actorId));
-        latestState.dirtyActors = (latestState.dirtyActors || []).filter(item => !scannedIds.has(item.actorId));
-        latestState.worldDirty = false;
-        latestState.reasons = latestState.dirtyActors.length ? latestState.reasons : [];
-        latestState.lastScanMessageCount = currentMessageCount();
-        latestState.lastScanElapsedDay = currentElapsedDay(chatId);
-        latestState.lastScanAt = Date.now();
-        latestState.cooldownUntilMessage = currentMessageCount() + cfg.cooldownMessages;
-        latestState.lastScannedActorIds = actors.map(a => a.actorId);
-        latestState.lastScanTrigger = `${mode}:${trigger}`;
+        const operationMessageCount = currentMessageCount();
+        const operationElapsedDay = currentElapsedDay(chatId);
+        const operationAt = Date.now();
+        if (!preserveDirty) {
+            latestState.dirtyActors = (latestState.dirtyActors || []).filter(item => !scannedIds.has(item.actorId));
+            latestState.worldDirty = false;
+            latestState.reasons = latestState.dirtyActors.length ? latestState.reasons : [];
+        }
+        if (!preserveCadence) {
+            latestState.lastScanMessageCount = operationMessageCount;
+            latestState.lastScanElapsedDay = operationElapsedDay;
+            latestState.lastScanAt = operationAt;
+            latestState.cooldownUntilMessage = operationMessageCount + cfg.cooldownMessages;
+            latestState.lastScannedActorIds = actors.map(a => a.actorId);
+            latestState.lastScanTrigger = `${mode}:${trigger}`;
+        }
         latestState.lastJsonRecovery = [batchResult.recovery || '', actorSplitCount ? `${actorSplitCount} actor split${actorSplitCount === 1 ? '' : 's'}` : ''].filter(Boolean).join('; ');
         latestState.lastValidationSummary = summarizeValidation(applied.diagnostics);
-        if (mode === 'reconcile') {
-            latestState.lastReconcileMessageCount = latestState.lastScanMessageCount;
-            latestState.lastReconcileElapsedDay = latestState.lastScanElapsedDay;
-            latestState.lastReconcileAt = latestState.lastScanAt;
+        if (mode === 'reconcile' || mode === 'maintain') {
+            latestState.lastReconcileMessageCount = operationMessageCount;
+            latestState.lastReconcileElapsedDay = operationElapsedDay;
+            latestState.lastReconcileAt = operationAt;
             latestState.lastReconcileTrigger = trigger;
             latestState.lastReconcileSummary = latestState.lastValidationSummary;
         }
@@ -3755,6 +4060,22 @@ export async function runHiddenIntentionsBackfill({ expectedChatId = null, force
                 }
                 return { actors: actorCount };
             }
+            if (error?.code === 'REQUEST_TOO_LARGE' && chunk.length === 1) {
+                const target = Math.max(5000, Math.floor(BACKFILL_SINGLE_MESSAGE_FRAGMENT_TARGET / Math.max(1, depth + 1)));
+                const fragments = splitBackfillSingleMessage(chunk[0], target);
+                if (fragments.length > 1) {
+                    narrativeSplitCount += fragments.length - 1;
+                    console.warn(`[NWST HiddenIntentions] Oversized single message M${first} still exceeds request safety after actor splitting. Retrying as ${fragments.length} same-message chronological fragments.`);
+                    let actorCount = 0;
+                    for (const fragment of fragments) {
+                        if (pauseRequested()) throw pauseError();
+                        if (segmentCallBudgetExceeded()) throw segmentCallBudgetError();
+                        const result = await applyPart([fragment], parentSegmentIndex, depth + 1);
+                        actorCount += result.actors;
+                    }
+                    return { actors: actorCount };
+                }
+            }
             throw error;
         }
 
@@ -3918,7 +4239,7 @@ export async function runHiddenIntentionsBackfill({ expectedChatId = null, force
             ].filter(Boolean).join('; '),
             lastValidationSummary: summary,
             lastError: complete || pausedByUser ? '' : (recoveryAbort
-                ? 'Backfill paused only after compact no-think recovery, actor splitting, and smaller chronological retries were exhausted. Completed segments and the failed segment rollback were preserved. Press Debug Backfill to retry the same checkpoint.'
+                ? 'Backfill paused only after compact no-think recovery, actor splitting, smaller chronological retries, and oversized single-message fragmentation were exhausted. Completed segments and the failed segment rollback were preserved. Press Debug Backfill to retry the same checkpoint.'
                 : `${failures.length} call${failures.length === 1 ? '' : 's'} failed. Press Debug Backfill to retry only failed work.`)
         });
         await saveHiddenIntentionsBackfillCheckpoint(chatId, {
@@ -3978,6 +4299,16 @@ export async function runHiddenIntentionsBackfill({ expectedChatId = null, force
 }
 
 
+export async function runHiddenIntentionsRefresh({ expectedChatId = null, force = true } = {}) {
+    const chatId = expectedChatId || getChatId();
+    if (!chatId || getChatId() !== chatId) return false;
+    const cfg = getHiddenIntentionsConfig();
+    const actorLimit = Math.min(32, Math.max(12, Number(cfg.maxActorsPerScan || 4) * 4));
+    return runHiddenIntentionsOperation({
+        mode: 'maintain', trigger: 'debug_refresh', expectedChatId: chatId, force, broad: true, actorLimit
+    });
+}
+
 export async function runHiddenIntentionsGenerate(options = {}) {
     return runHiddenIntentionsOperation({ mode: 'generate', trigger: 'manual_generate', ...options });
 }
@@ -3986,8 +4317,12 @@ export async function runHiddenIntentionsReconcile(options = {}) {
     return runHiddenIntentionsOperation({ mode: 'reconcile', trigger: 'manual_reconcile', ...options });
 }
 
-// Compatibility entry point for older internal callers. Batch Scan seeds new
-// records; all other legacy scan triggers are maintenance reconciliations.
+export async function runHiddenIntentionsMaintain(options = {}) {
+    return runHiddenIntentionsOperation({ mode: 'maintain', trigger: 'automatic_maintenance', ...options });
+}
+
+// Compatibility entry point for older internal callers. Batch Scan remains a
+// pure generation pass; ordinary automatic triggers use maintenance+discovery.
 export async function runHiddenIntentionsScan(options = {}) {
     if (options?.trigger === 'debug_generate' || options?.trigger === 'debug_backfill') {
         return runHiddenIntentionsBackfill(options);
@@ -3995,7 +4330,10 @@ export async function runHiddenIntentionsScan(options = {}) {
     if (options?.trigger === 'batch_scan' || options?.mode === 'generate') {
         return runHiddenIntentionsGenerate(options);
     }
-    return runHiddenIntentionsReconcile(options);
+    if (options?.mode === 'reconcile' || String(options?.trigger || '').startsWith('manual_')) {
+        return runHiddenIntentionsReconcile(options);
+    }
+    return runHiddenIntentionsMaintain(options);
 }
 
 export async function runHiddenIntentionsDayAdvance(chatId = null) {
@@ -4003,7 +4341,7 @@ export async function runHiddenIntentionsDayAdvance(chatId = null) {
     if (!cfg.enabled || !cfg.dayAdvancement) return false;
     const target = chatId || getChatId();
     if (!target || getChatId() !== target) return false;
-    return runHiddenIntentionsReconcile({ trigger: 'day_advance', expectedChatId: target });
+    return runHiddenIntentionsMaintain({ trigger: 'day_advance', expectedChatId: target });
 }
 
 export function getHiddenIntentionsDebugReport(chatId = null) {
@@ -4043,7 +4381,7 @@ export function getHiddenIntentionsDebugReport(chatId = null) {
         `Backfill status: ${state.backfillInProgress ? 'running' : (state.backfillFinalPassCompleted && !(state.backfillFailedSegments || []).length ? 'complete' : (state.backfillSummary ? 'paused/incomplete' : '(never run)'))}`,
         `Backfill progress: ${state.backfillCompletedChunks || 0}/${state.backfillTotalChunks || 0} safe history segments; ${state.backfillPlannedCalls || state.backfillTotalBatches || 0} remaining-plan root call(s); ${state.backfillCompletedCalls || state.backfillCompletedBatches || 0} actual LLM calls`,
         `Durable backfill checkpoint: ${checkpointState ? `${checkpointState.backfillCompletedChunks || 0}/${checkpointState.backfillTotalChunks || 0} segments (${durableCheckpoint.source || 'unknown source'})` : '(none)'}`,
-        `Backfill request safety: narrative target ${state.backfillNarrativeCharTarget || 0} chars; hard combined-request limit ${state.backfillRequestCharLimit || 0} chars; per-segment call cap ${BACKFILL_MAX_CALLS_PER_SEGMENT}`,
+        `Backfill request safety: narrative target ${state.backfillNarrativeCharTarget || 0} chars; hard combined-request limit ${state.backfillRequestCharLimit || 0} chars; oversized single-message fragment target ${BACKFILL_SINGLE_MESSAGE_FRAGMENT_TARGET} chars; per-segment call cap ${BACKFILL_MAX_CALLS_PER_SEGMENT}`,
         `Backfill next segment: ${Math.min((state.backfillTotalChunks || 0) + 1, (state.backfillNextChunk || 0) + 1)}`,
         `Backfill sparse results: ${state.backfillEmptySegments || 0} empty model segment(s); ${state.backfillSkippedSegments || 0} locally skipped segment(s); final cleanup ${state.backfillFinalPassCompleted ? 'complete' : 'not complete'}`,
         `Backfill recovery: ${state.backfillReasoningExhaustions || 0} reasoning exhaustion(s); ${state.backfillCompactRetries || 0} compact no-think retry/retries; ${state.backfillProactiveActorBatches || 0} proactive actor batch(es); ${state.backfillProactiveNarrativeBatches || 0} proactive narrative batch(es); ${state.backfillActorSplits || 0} reactive actor split(s); ${state.backfillNarrativeSplits || 0} narrative split(s); ${state.backfillRollbacks || 0} transactional rollback(s)`,

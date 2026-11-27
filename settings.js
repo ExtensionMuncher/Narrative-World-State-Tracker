@@ -204,7 +204,9 @@ export function getHiddenIntentionsConfig() {
         recordCapVersion: 2,
         maxContingenciesPerActor: Math.max(0, Math.min(4, intOr(cfg.maxContingenciesPerActor, 1))),
         reviewNewIntentions: cfg.reviewNewIntentions === true,
-        autoAddConfidence: ['low','medium','high'].includes(cfg.autoAddConfidence) ? cfg.autoAddConfidence : 'medium'
+        autoAddConfidence: ['low','medium','high'].includes(cfg.autoAddConfidence) ? cfg.autoAddConfidence : 'medium',
+        injectPlans: cfg.injectPlans !== false,
+        maxInjectedPlans: Math.max(1, Math.min(5, intOr(cfg.maxInjectedPlans, 3)))
     };
 }
 
@@ -470,7 +472,7 @@ export function exportAll(chatId) {
     try {
         if (!getActiveChatContext(chatId, 'export all data')) return null;
         const bundle = {
-            version: '1.3.55',
+            version: '1.3.69',
             exportedAt: new Date().toISOString(),
             globalSettings: JSON.parse(exportGlobalSettings()),
             chatData: getAllChatData(chatId),

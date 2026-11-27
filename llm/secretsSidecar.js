@@ -40,6 +40,7 @@ import { buildAliasRegistry } from '../data/aliasRegistry.js';
 import { getUserCharacterIdentity } from '../data/secretsMeta.js';
 import { dlog } from '../lib/debug.js';
 import { getChatData, setChatData } from '../data/storage.js';
+import { isNarrativeChatMessage } from './detectedEventValidation.js';
 
 let sidecarInFlight = false;
 
@@ -125,18 +126,41 @@ function buildSidecarPrompt(recentMessages, registry, secrets, userIdentity) {
 function getRecentProseMessages(count = 5) {
     try {
         const ctx = SillyTavern.getContext();
-        const chat = ctx.chat || [];
-        const out = [];
-        for (let i = chat.length - 1; i >= 0 && out.length < count; i--) {
-            const msg = chat[i];
-            if (msg.is_system && msg.extra?.hidden) continue;
-            if (msg.extra?.display === 'none') continue;
-            if (msg.mes) out.unshift(msg);
-        }
-        return out;
+        const chat = (ctx.chat || []).filter(isNarrativeChatMessage);
+        return chat.slice(Math.max(0, chat.length - Math.max(1, Number(count) || 5)));
     } catch (e) {
         return [];
     }
+}
+
+function currentNarrativeMessageCount() {
+    try {
+        return (SillyTavern.getContext().chat || []).filter(isNarrativeChatMessage).length;
+    } catch (_) {
+        return 0;
+    }
+}
+
+/**
+ * Scene-sidecar presence is only safe while its analyzed window still overlaps
+ * the current prose window. At an age exactly equal to the scan range there is
+ * zero overlap, so the cache is stale (strict `<`, not `<=`). New builds stamp
+ * narrative-message count directly; legacy states fall back to raw chat length.
+ */
+export function sidecarFreshness(sidecar, { rawCount = 0, narrativeCount = 0, scanRange = 5 } = {}) {
+    if (!sidecar || typeof sidecar !== 'object') return { fresh: false, presenceFresh: false, age: null, basis: 'none' };
+    const windowSize = Math.max(1, Number(sidecar.scanRange || scanRange) || 5);
+    const analyzedNarrative = Number(sidecar.analyzedAtNarrativeMessageCount);
+    if (Number.isFinite(analyzedNarrative) && analyzedNarrative >= 0) {
+        const age = Math.max(0, Number(narrativeCount || 0) - analyzedNarrative);
+        return { fresh: age < windowSize, presenceFresh: age === 0, age, basis: 'narrative' };
+    }
+    const analyzedRaw = Number(sidecar.analyzedAtMessageIndex);
+    if (Number.isFinite(analyzedRaw) && analyzedRaw >= 0) {
+        const age = Math.max(0, Number(rawCount || 0) - analyzedRaw);
+        return { fresh: age < windowSize, presenceFresh: age === 0, age, basis: 'raw-legacy' };
+    }
+    return { fresh: false, presenceFresh: false, age: null, basis: 'unstamped' };
 }
 
 // ── Parse sidecar JSON response ───────────────────────────────────────────
@@ -252,9 +276,12 @@ export async function runSecretsSidecar() {
         const analysis = parseSidecarResponse(response, registry);
         if (!analysis) return null;
 
-        // Stamp with the current message index for staleness tracking
+        // Stamp both raw and narrative counts. Presence freshness is based on
+        // narrative overlap so utility/system messages cannot extend a stale
+        // semantic scene read. Keep the raw stamp for legacy/debug continuity.
         const ctx = SillyTavern.getContext();
         analysis.analyzedAtMessageIndex = (ctx.chat || []).length;
+        analysis.analyzedAtNarrativeMessageCount = currentNarrativeMessageCount();
         analysis.scanRange = scanRange;
         analysis.messagesAnalyzed = recentMessages.length;
         analysis.messageRangeStart = Math.max(1, analysis.analyzedAtMessageIndex - recentMessages.length + 1);
@@ -312,35 +339,33 @@ export function getSceneContext(chatId) {
     let activePressures = [];
     let sceneSummary = '';
     let sidecarFresh = false;
+    let sidecarPresenceFresh = false;
 
     if (sidecar) {
         // Staleness: only trust semantic sidecar output while it is fresh.
         // Stale sceneType/pressures/characters can otherwise haunt later scenes.
         try {
             const ctx = SillyTavern.getContext();
-            const currentIdx = (ctx.chat || []).length;
-            const age = currentIdx - (sidecar.analyzedAtMessageIndex || 0);
-            // Keep semantic sidecar data only while it still overlaps the
-            // configured prose window. Cadence decides when the LLM runs;
-            // scan range decides how far its cached scene read may reach.
             const freshnessWindow = Math.max(1, parseInt(getSidecarScanRange(), 10) || 5);
-            sidecarFresh = age <= freshnessWindow;
+            const freshness = sidecarFreshness(sidecar, {
+                rawCount: (ctx.chat || []).length,
+                narrativeCount: currentNarrativeMessageCount(),
+                scanRange: freshnessWindow
+            });
+            sidecarFresh = freshness.fresh;
+            sidecarPresenceFresh = freshness.presenceFresh;
         } catch (e) { /* default false */ }
 
         if (sidecarFresh) {
-            // Sidecar is AUTHORITATIVE for presence when fresh. The raw JS scan
-            // flags any name string in the prose — including names that only
-            // appear inside in-world documents (surveillance readouts, order
-            // records, messages a character is reading). Those are mentions,
-            // not presence. The sidecar LLM is instructed to exclude mentions,
-            // so we trust its list rather than polluting it with the JS union.
-            //
-            // We keep the explicit user/PC if a user message is in range (the
-            // sidecar may not always tag the silent PC), but we do NOT blindly
-            // add every JS-detected name.
-            const sidecarChars = new Set(sidecar.charactersPresent || []);
-            if (userMessagePresent && userCanonical) sidecarChars.add(userCanonical);
-            charactersPresent = Array.from(sidecarChars);
+            // Semantic scene type/pressure data may remain useful while the
+            // windows overlap, but character presence becomes stale as soon as
+            // any newer narrative message exists. Otherwise an old cast can
+            // suppress the current scene for several turns.
+            if (sidecarPresenceFresh) {
+                const sidecarChars = new Set(sidecar.charactersPresent || []);
+                if (userMessagePresent && userCanonical) sidecarChars.add(userCanonical);
+                charactersPresent = Array.from(sidecarChars);
+            }
             sceneType = sidecar.sceneType || 'unknown';
             activePressures = sidecar.activePressures || [];
             sceneSummary = sidecar.sceneSummary || '';
@@ -355,11 +380,21 @@ export function getSceneContext(chatId) {
         sceneType,
         activePressures,
         sceneSummary,
-        sidecarFresh,             // if false, scoring uses only fresh JS signals
-        sidecarAge: sidecar?.analyzedAtMessageIndex ? Math.max(0, ((SillyTavern.getContext().chat || []).length) - sidecar.analyzedAtMessageIndex) : null,
+        sidecarFresh,             // semantic sidecar overlap
+        sidecarPresenceFresh,     // true only when the sidecar includes the latest narrative message
+        sidecarAge: (() => {
+            try {
+                return sidecarFreshness(sidecar, {
+                    rawCount: (SillyTavern.getContext().chat || []).length,
+                    narrativeCount: currentNarrativeMessageCount(),
+                    scanRange: Math.max(1, parseInt(getSidecarScanRange(), 10) || 5)
+                }).age;
+            } catch (_) { return null; }
+        })(),
         sidecarScanRange: Math.max(1, parseInt(getSidecarScanRange(), 10) || 5),
         recentMessageCount: recentMessages.length,
         recentText: recentMessages.map(m => m.mes || '').join('\\n'),
+        currentText: recentMessages.slice(-2).map(m => m.mes || '').join('\\n'),
         registry                  // pass through so scoring can resolve names
     };
 }

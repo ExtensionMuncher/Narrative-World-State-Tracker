@@ -624,7 +624,8 @@ function deleteAllChatData(chatId) {
 
 /**
  * Check if the current chat has ANY meaningful NWST content.
- * Used to determine whether batch scan has been run.
+ * Used as a generic meaningful-content guard (for example, Batch Scan overwrite safety).
+ * Scanner grounding is tracked separately in scannerState.groundingComplete.
  * Ignores auxiliary keys (settingContext, snapshots) — only checks
  * content keys that batch scan actually populates.
  *

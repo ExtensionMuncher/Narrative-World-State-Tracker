@@ -18,9 +18,8 @@ import { hasExplicitNarrativeEvidence } from './persistentEvidence.js';
 
 import { generateWithProfile } from './connections.js';
 import { LLM_TOKEN_BUDGETS } from './tokenBudgets.js';
-import { getChatId, nwstToast } from '../utils.js';
+import { getChatId, nwstToast, startLongOperationToast } from '../utils.js?v=1.3.69';
 import { getScanFrequency, getScanMinimumMessages, isPaused, isEnabled } from '../settings.js';
-import { chatHasData } from '../data/storage.js';
 import { getWorldState, getSettingContext, updateConditionContent, getCalendarConfig } from '../data/worldState.js';
 import { getTrackedEvents } from '../data/events.js';
 import { getNotebook, addCoreBullet, addMysteryBullet, replaceMysteryFieldDiff, getCoreField, getMysteryField, addSecret, getAllSecrets, flagSecretForArchive, getSecretStatus, getInjectableSecrets } from '../data/notebook.js';
@@ -37,10 +36,11 @@ import { dlog } from "../lib/debug.js";
 import { completeEventParticipants } from './eventParticipants.js';
 import { buildAliasRegistry, toCanonicalId } from '../data/aliasRegistry.js';
 import { buildWorldEvidenceSources, formatWorldEvidenceSources, collectRecentCastNames, validateWorldConditionPayload, isLikelySceneContaminatedCondition } from './worldConditionEvidence.js';
-import { markLatestMessageForHiddenIntentions, queueHiddenIntentionsCadenceCheck, markHiddenIntentionsFromScan } from './hiddenIntentions.js';
+import { markLatestMessageForHiddenIntentions, queueHiddenIntentionsCadenceCheck, queueHiddenIntentionsPromptFreshnessCheck, maybeRefreshHiddenIntentionsForPrompt, markHiddenIntentionsFromScan } from './hiddenIntentions.js';
 import { getChatData, setChatData } from '../data/storage.js';
 import { getHiddenIntentions, getHiddenIntentionsState, saveHiddenIntentionsState } from '../data/hiddenIntentions.js';
 import { isForwardDetectedEvent, isNarrativeChatMessage } from './detectedEventValidation.js';
+import { isRedundantPersistentState } from './eventNovelty.js';
 
 // ── Scanner state ─────────────────────────────────────────────────────────
 //
@@ -63,8 +63,13 @@ import { isForwardDetectedEvent, isNarrativeChatMessage } from './detectedEventV
 
 let messageCountAtLastScan = 0;  // Set after each completed scan
 let messageCountAtLastSidecar = 0;  // Independent cadence for the secrets sidecar
-let warmupMessageCount = 0;      // Counts messages during Phase 1 warmup
+let warmupMessageCount = 0;      // Narrative-message baseline when Phase 1 warmup began
 let scanPhase = 'warmup';        // 'warmup' | 'cadence'
+let groundingComplete = false;   // True only after a successful initial scan or completed Batch Scan
+let bootstrapMode = 'fresh';     // 'fresh' | 'preexisting' | 'batch' | 'legacy'
+let bootstrapHistoryStart = null;
+const MAX_SCAN_WINDOW = 60;
+const PREEXISTING_BOOTSTRAP_HISTORY = 50;
 let scanTimer = null;
 let isScanning = false;
 // Message count at the last FAILED scan attempt (0 = none) — retry backoff
@@ -98,6 +103,9 @@ function saveScannerState() {
             messageCountAtLastSidecar,
             warmupMessageCount,
             scanPhase,
+            groundingComplete,
+            bootstrapMode,
+            bootstrapHistoryStart,
             pauseCadenceSnapshot: _pauseCadenceSnapshot ? { ..._pauseCadenceSnapshot } : null,
             lastScanFailureCount: _lastScanFailureCount,
             lastScanFailureReason: _lastScanFailureReason,
@@ -130,11 +138,14 @@ function normalizeScannerStateForPause(savedState = null, currentCount = getCurr
     // When this chat owns the live module state, prefer it over persisted
     // metadata because setChatData() is queued/async and may still be flushing
     // the immediately preceding successful scan.
+    const legacyGrounded = stored.groundingComplete === undefined
+        && stored.scanPhase === 'cadence';
+    const grounded = hasCurrentModuleState
+        ? groundingComplete
+        : (stored.groundingComplete === true || legacyGrounded);
     const phase = hasCurrentModuleState
         ? scanPhase
-        : (stored.scanPhase === 'cadence' || stored.scanPhase === 'warmup'
-            ? stored.scanPhase
-            : (chatHasData(chatId) ? 'cadence' : 'warmup'));
+        : (grounded ? 'cadence' : 'warmup');
 
     const lastScan = hasCurrentModuleState
         ? Math.max(0, Number(messageCountAtLastScan) || 0)
@@ -169,6 +180,9 @@ function normalizeScannerStateForPause(savedState = null, currentCount = getCurr
         messageCountAtLastSidecar: lastSidecar,
         warmupMessageCount: warmupBase,
         scanPhase: phase,
+        groundingComplete: grounded,
+        bootstrapMode: hasCurrentModuleState ? bootstrapMode : (stored.bootstrapMode || (grounded ? 'legacy' : (currentCount > 0 ? 'preexisting' : 'fresh'))),
+        bootstrapHistoryStart: hasCurrentModuleState ? bootstrapHistoryStart : (Number.isInteger(stored.bootstrapHistoryStart) ? stored.bootstrapHistoryStart : null),
         lastScanFailureCount: failureBase
     };
 }
@@ -197,6 +211,9 @@ export async function freezeScannerCadence() {
         messageCountAtLastSidecar: stored.messageCountAtLastSidecar,
         warmupMessageCount: stored.warmupMessageCount,
         scanPhase: stored.scanPhase,
+        groundingComplete: stored.groundingComplete === true,
+        bootstrapMode: stored.bootstrapMode || 'fresh',
+        bootstrapHistoryStart: Number.isInteger(stored.bootstrapHistoryStart) ? stored.bootstrapHistoryStart : null,
         lastScanFailureCount: stored.lastScanFailureCount
     };
     stored.pauseCadenceSnapshot = snapshot;
@@ -240,7 +257,10 @@ export async function resumeScannerCadence() {
     stored.messageCountAtLastScan = shift(snapshot.messageCountAtLastScan);
     stored.messageCountAtLastSidecar = shift(snapshot.messageCountAtLastSidecar);
     stored.warmupMessageCount = shift(snapshot.warmupMessageCount);
-    stored.scanPhase = snapshot.scanPhase === 'cadence' ? 'cadence' : 'warmup';
+    stored.groundingComplete = snapshot.groundingComplete === true;
+    stored.scanPhase = stored.groundingComplete ? 'cadence' : 'warmup';
+    stored.bootstrapMode = snapshot.bootstrapMode || stored.bootstrapMode || 'fresh';
+    stored.bootstrapHistoryStart = Number.isInteger(snapshot.bootstrapHistoryStart) ? snapshot.bootstrapHistoryStart : null;
     stored.lastScanFailureCount = Number(snapshot.lastScanFailureCount) > 0
         ? shift(snapshot.lastScanFailureCount)
         : 0;
@@ -266,6 +286,9 @@ export async function resumeScannerCadence() {
     messageCountAtLastSidecar = stored.messageCountAtLastSidecar;
     warmupMessageCount = stored.warmupMessageCount;
     scanPhase = stored.scanPhase;
+    groundingComplete = stored.groundingComplete === true;
+    bootstrapMode = stored.bootstrapMode || bootstrapMode;
+    bootstrapHistoryStart = Number.isInteger(stored.bootstrapHistoryStart) ? stored.bootstrapHistoryStart : null;
     _lastScanFailureCount = stored.lastScanFailureCount;
     _pauseCadenceSnapshot = null;
     emitScannerHealth();
@@ -357,6 +380,9 @@ export function getScannerHealth() {
         scanFrequency: frequency,
         warmupProgress: healthPhase === 'warmup' ? messagesSinceWarmup : null,
         warmupFloor: floor,
+        groundingComplete: healthPhase === 'cadence' || groundingComplete,
+        bootstrapMode,
+        bootstrapHistoryStart,
         lastSuccessAt: _lastScanSuccessAt,
         lastSuccessMessageCount: _lastScanSuccessCount,
         lastFailureAt: _lastScanFailureAt,
@@ -412,6 +438,8 @@ WHAT YOU DO:
 2B. PERSISTENT EVENT DETECTION — propose only genuinely durable ongoing pressures/states that should remain tracked until an explicit textual condition ends them.
    - Persistent is NOT a vague unresolved-thread bucket. Do not propose ordinary appointments, one-time plans, current scene activity, moods, or questions.
    - A Persistent event must describe something already ongoing or repeatedly expected to continue (for example escalating repeated attacks, an active manhunt/blockade, or a recurring institutional pressure).
+   - NOVELTY IS REQUIRED: the durable state must be newly established or materially transformed in THIS scan window. Do not create a Persistent Event merely because a long-running state was mentioned again, changed vehicles/locations, or produced a routine status report.
+   - Check the supplied Events, Secrets, Hidden Intentions, and Notebook before proposing one. If the same underlying pressure is already tracked there, update that subsystem's state instead of creating a duplicate Persistent Event.
    - Every proposal MUST include one concrete resolutionCondition describing an observable narrative occurrence that would end the state. No dates/countdowns; passage of time alone never resolves it.
    - Keep this sparse. Return at most 2 proposals; [] is expected when no durable pressure qualifies.
 
@@ -456,8 +484,9 @@ DETECTED NPC EVENT PARTICIPANTS — MANDATORY:
    - Use exact character names from the chat. Exhaust the supplied cast context. If no named NPC can be responsibly identified, preserve the event with participants: [] so NWST can flag it for review; never invent a name and never omit the event solely for this field.
 
 4. EVENT MAINTENANCE — keep tracked Events truthful.
-   - RESOLVED: projected moment clearly happened on-screen.
-   - MISSED: its window clearly passed or premise visibly failed.
+   - IN PROGRESS: projected moment has clearly begun on-screen but has not yet concluded.
+   - RESOLVED: projected moment clearly happened on-screen and concluded.
+   - MISSED: its window clearly passed or premise visibly failed without the projected moment happening.
    - PERSISTENT EVENTS are special: NEVER place them in eventUpdates.resolved, eventUpdates.missed, or tierChanges. They do not age out. If the stored resolution condition is explicitly shown in the supplied recent messages, report it only under persistentResolutions with a shortest exact evidence quote. If the evidence is inferential, speculative, offscreen, or merely makes resolution likely, do not report it.
    - TIER CORRECTIONS: only for active UNDated Events when urgency becomes clear. immediate = today/tomorrow; week = within the rolling seven-day horizon; month = later in the current calendar month.
    - Dated Events are placed structurally by the calendar. Do not tier-correct them.
@@ -520,6 +549,7 @@ RESPONSE FORMAT — valid JSON only:
     }
   ],
   "eventUpdates": {
+    "inProgress": ["E2"],
     "resolved": ["E1"],
     "missed": [],
     "tierChanges": { "E3": "immediate" | "week" | "month" }
@@ -716,6 +746,9 @@ export function startScanner() {
     messageCountAtLastSidecar = 0;
     warmupMessageCount = 0;
     scanPhase = 'warmup';
+    groundingComplete = false;
+    bootstrapMode = 'fresh';
+    bootstrapHistoryStart = null;
     _lastScanFailureCount = 0;
     _lastScanFailureReason = '';
     _lastScanFailureAt = 0;
@@ -726,54 +759,68 @@ export function startScanner() {
     _pauseCadenceSnapshot = null;
 
     const savedState = loadScannerState();
-    const hasData = chatHasData(chatId);
+    const currentCount = getCurrentMessageCount();
+    const legacyGrounded = savedState?.groundingComplete === undefined
+        && savedState?.scanPhase === 'cadence';
+    const savedGrounded = savedState?.groundingComplete === true || legacyGrounded;
 
-    if (hasData) {
-        if (savedState && savedState.scanPhase === 'cadence') {
-            scanPhase = 'cadence';
-            messageCountAtLastScan = Math.max(0, Number(savedState.messageCountAtLastScan) || 0);
-            messageCountAtLastSidecar = Number.isFinite(Number(savedState.messageCountAtLastSidecar))
-                ? Math.max(0, Number(savedState.messageCountAtLastSidecar))
-                : getCurrentMessageCount();
-            warmupMessageCount = Number.isFinite(Number(savedState.warmupMessageCount))
-                ? Math.max(0, Number(savedState.warmupMessageCount))
-                : 0;
-            _pauseCadenceSnapshot = savedState.pauseCadenceSnapshot && typeof savedState.pauseCadenceSnapshot === 'object'
-                ? { ...savedState.pauseCadenceSnapshot }
-                : null;
-            _lastScanFailureCount = savedState.lastScanFailureCount || 0;
-            _lastScanFailureReason = savedState.lastScanFailureReason || '';
-            _lastScanFailureAt = savedState.lastScanFailureAt || 0;
-            _lastScanSuccessAt = savedState.lastScanSuccessAt || 0;
-            _lastScanSuccessCount = savedState.lastScanSuccessCount || 0;
-            _lastScanRangeStart = Number.isInteger(savedState.lastScanRangeStart) ? savedState.lastScanRangeStart : null;
-            _lastScanRangeEnd = Number.isInteger(savedState.lastScanRangeEnd) ? savedState.lastScanRangeEnd : null;
-            dlog(`[NWST Scanner] Restored cadence position from before reload (last scan at msg ${messageCountAtLastScan}).`);
-        } else {
-            scanPhase = 'cadence';
-            const currentCount = getCurrentMessageCount();
-            const frequency = getScanFrequency();
-            const estimatedLastScan = currentCount - (currentCount % frequency);
-            messageCountAtLastScan = estimatedLastScan;
-            messageCountAtLastSidecar = currentCount;
-            dlog(`[NWST Scanner] No persisted state — positioning cadence at msg ${estimatedLastScan}, next scan at msg ${estimatedLastScan + frequency}.`);
-        }
+    if (savedGrounded) {
+        // The persisted scanner state, not arbitrary NWST content, is the only
+        // authority for whether initial grounding completed. Older cadence
+        // states are migrated as grounded for backward compatibility.
+        groundingComplete = true;
+        scanPhase = 'cadence';
+        messageCountAtLastScan = Math.max(0, Number(savedState?.messageCountAtLastScan) || 0);
+        messageCountAtLastSidecar = Number.isFinite(Number(savedState?.messageCountAtLastSidecar))
+            ? Math.max(0, Number(savedState.messageCountAtLastSidecar))
+            : currentCount;
+        warmupMessageCount = Number.isFinite(Number(savedState?.warmupMessageCount))
+            ? Math.max(0, Number(savedState.warmupMessageCount))
+            : 0;
+        bootstrapMode = savedState?.bootstrapMode || 'legacy';
+        bootstrapHistoryStart = Number.isInteger(savedState?.bootstrapHistoryStart)
+            ? savedState.bootstrapHistoryStart
+            : null;
+        _pauseCadenceSnapshot = savedState?.pauseCadenceSnapshot && typeof savedState.pauseCadenceSnapshot === 'object'
+            ? { ...savedState.pauseCadenceSnapshot }
+            : null;
+        _lastScanFailureCount = savedState?.lastScanFailureCount || 0;
+        _lastScanFailureReason = savedState?.lastScanFailureReason || '';
+        _lastScanFailureAt = savedState?.lastScanFailureAt || 0;
+        _lastScanSuccessAt = savedState?.lastScanSuccessAt || 0;
+        _lastScanSuccessCount = savedState?.lastScanSuccessCount || 0;
+        _lastScanRangeStart = Number.isInteger(savedState?.lastScanRangeStart) ? savedState.lastScanRangeStart : null;
+        _lastScanRangeEnd = Number.isInteger(savedState?.lastScanRangeEnd) ? savedState.lastScanRangeEnd : null;
+        dlog(`[NWST Scanner] Restored grounded cadence position (last scan at msg ${messageCountAtLastScan}).`);
     } else if (savedState && savedState.scanPhase === 'warmup' && Number.isFinite(Number(savedState.warmupMessageCount))) {
-        // v1.3.49+: warmup cadence survives reloads and pause/resume instead of
-        // restarting from the current chat length.
+        // Warmup survives reloads. Do not allow unrelated Current Day/Event/
+        // Notebook data to masquerade as a completed Batch Scan.
+        groundingComplete = false;
         scanPhase = 'warmup';
         warmupMessageCount = Math.max(0, Number(savedState.warmupMessageCount));
         messageCountAtLastSidecar = Number.isFinite(Number(savedState.messageCountAtLastSidecar))
             ? Math.max(0, Number(savedState.messageCountAtLastSidecar))
-            : 0;
+            : warmupMessageCount;
+        bootstrapMode = savedState.bootstrapMode || (warmupMessageCount > 0 ? 'preexisting' : 'fresh');
+        bootstrapHistoryStart = Number.isInteger(savedState.bootstrapHistoryStart) ? savedState.bootstrapHistoryStart : null;
         _pauseCadenceSnapshot = savedState.pauseCadenceSnapshot && typeof savedState.pauseCadenceSnapshot === 'object'
             ? { ...savedState.pauseCadenceSnapshot }
             : null;
-        dlog(`[NWST Scanner] Restored warmup position from msg ${warmupMessageCount}.`);
+        _lastScanFailureCount = savedState.lastScanFailureCount || 0;
+        _lastScanFailureReason = savedState.lastScanFailureReason || '';
+        _lastScanFailureAt = savedState.lastScanFailureAt || 0;
+        dlog(`[NWST Scanner] Restored warmup baseline at msg ${warmupMessageCount}.`);
     } else {
+        // No authoritative grounding state exists. Start a real warmup even if
+        // the chat already contains partial/imported NWST data. Preexisting
+        // narrative history becomes bounded context for the first scan; it is
+        // not silently counted as warmup progress.
+        groundingComplete = false;
         scanPhase = 'warmup';
-        warmupMessageCount = getCurrentMessageCount();
-        dlog(`[NWST Scanner] No batch scan data — starting in warmup phase (floor: ${getScanMinimumMessages()} messages).`);
+        warmupMessageCount = currentCount;
+        messageCountAtLastSidecar = currentCount;
+        bootstrapMode = currentCount > 0 ? 'preexisting' : 'fresh';
+        dlog(`[NWST Scanner] Starting ${bootstrapMode} warmup at narrative msg ${warmupMessageCount} (floor: ${getScanMinimumMessages()} new messages).`);
     }
 
     // Normal resume uses resumeScannerCadence() before startScanner(). This
@@ -786,7 +833,10 @@ export function startScanner() {
         messageCountAtLastScan = shift(_pauseCadenceSnapshot.messageCountAtLastScan);
         messageCountAtLastSidecar = shift(_pauseCadenceSnapshot.messageCountAtLastSidecar);
         warmupMessageCount = shift(_pauseCadenceSnapshot.warmupMessageCount);
-        scanPhase = _pauseCadenceSnapshot.scanPhase === 'cadence' ? 'cadence' : 'warmup';
+        groundingComplete = _pauseCadenceSnapshot.groundingComplete === true;
+        scanPhase = groundingComplete ? 'cadence' : 'warmup';
+        bootstrapMode = _pauseCadenceSnapshot.bootstrapMode || bootstrapMode;
+        bootstrapHistoryStart = Number.isInteger(_pauseCadenceSnapshot.bootstrapHistoryStart) ? _pauseCadenceSnapshot.bootstrapHistoryStart : bootstrapHistoryStart;
         _lastScanFailureCount = Number(_pauseCadenceSnapshot.lastScanFailureCount) > 0
             ? shift(_pauseCadenceSnapshot.lastScanFailureCount)
             : 0;
@@ -795,6 +845,18 @@ export function startScanner() {
 
     const { eventSource, event_types } = SillyTavern.getContext();
     eventSource.on(event_types.MESSAGE_RECEIVED, checkAndScan);
+
+    // Prompt-freshness maintenance must finish BEFORE the next generation is
+    // assembled. SillyTavern awaits MESSAGE_SENT listeners, so register this
+    // handler first in the chain: it marks the just-sent user message dirty,
+    // performs only the focused stale-plan reconcile when needed, and lets the
+    // normal prompt injector rebuild afterward from the refreshed ledger.
+    const priorPreGeneration = typeof window !== 'undefined' ? window.__nwstHiddenIntentionsPreGenerationHandler : null;
+    if (priorPreGeneration) eventSource.removeListener?.(event_types.MESSAGE_SENT, priorPreGeneration);
+    eventSource.on(event_types.MESSAGE_SENT, refreshHiddenIntentionsBeforeGeneration);
+    eventSource.makeFirst?.(event_types.MESSAGE_SENT, refreshHiddenIntentionsBeforeGeneration);
+    if (typeof window !== 'undefined') window.__nwstHiddenIntentionsPreGenerationHandler = refreshHiddenIntentionsBeforeGeneration;
+
     scanTimer = 'event-driven';
     saveScannerState(); // also persists warmup baseline for reload/pause safety
     dlog(`[NWST Scanner] Started (cadence: every ${getScanFrequency()} messages).`);
@@ -806,6 +868,11 @@ export function stopScanner() {
     try {
         const { eventSource, event_types } = SillyTavern.getContext();
         eventSource.removeListener(event_types.MESSAGE_RECEIVED, checkAndScan);
+        const preGeneration = typeof window !== 'undefined' ? window.__nwstHiddenIntentionsPreGenerationHandler : refreshHiddenIntentionsBeforeGeneration;
+        eventSource.removeListener?.(event_types.MESSAGE_SENT, preGeneration);
+        if (typeof window !== 'undefined' && window.__nwstHiddenIntentionsPreGenerationHandler === preGeneration) {
+            delete window.__nwstHiddenIntentionsPreGenerationHandler;
+        }
     } catch (e) {
         console.warn('[NWST Scanner] Error detaching listeners:', e);
     }
@@ -825,16 +892,39 @@ export function restartScanner() {
  * batch scan already did the grounding pass.
  */
 export function notifyBatchScanComplete() {
-    if (scanPhase === 'warmup') {
-        scanPhase = 'cadence';
-        messageCountAtLastScan = getCurrentMessageCount();
-        dlog('[NWST Scanner] Batch scan completed during warmup — transitioning to cadence phase.');
-        saveScannerState();
-        emitScannerHealth();
-    }
+    const currentCount = getCurrentMessageCount();
+    groundingComplete = true;
+    scanPhase = 'cadence';
+    bootstrapMode = 'batch';
+    bootstrapHistoryStart = null;
+    warmupMessageCount = currentCount;
+    messageCountAtLastScan = currentCount;
+    messageCountAtLastSidecar = currentCount;
+    _lastScanFailureCount = 0;
+    _lastScanFailureReason = '';
+    dlog('[NWST Scanner] Batch scan completed — grounding marked complete and cadence begins from the current narrative boundary.');
+    saveScannerState();
+    emitScannerHealth();
 }
 
 // ── Scan check ────────────────────────────────────────────────────────────
+
+async function refreshHiddenIntentionsBeforeGeneration() {
+    if (!isEnabled() || isPaused() || !groundingComplete) return;
+    const invocationChatId = getChatId();
+    if (!invocationChatId) return;
+
+    try {
+        // MESSAGE_SENT fires after the user message has been stored. Mark that
+        // exact narrative turn first, then refresh only scene-relevant stale
+        // executable plans. The event emitter awaits this promise before ST
+        // proceeds into generation, so the next model prompt sees fresh HI.
+        await markLatestMessageForHiddenIntentions(invocationChatId);
+        await maybeRefreshHiddenIntentionsForPrompt(getCurrentMessageCount());
+    } catch (e) {
+        dlog('[NWST Scanner] Pre-generation Hidden Intentions freshness check failed (non-fatal):', e);
+    }
+}
 
 async function checkAndScan() {
     if (!isEnabled() || isPaused() || isScanning) { emitScannerHealth(); return; }
@@ -844,78 +934,97 @@ async function checkAndScan() {
     const currentCount = getCurrentMessageCount();
     emitScannerHealth();
 
-    // Hidden Intentions uses the same message event without adding a decision-
-    // detector call. Cheap alias scanning marks relevant actors dirty; the
-    // actual LLM reconciliation remains cadence/cooldown gated.
-    markLatestMessageForHiddenIntentions(invocationChatId).catch(e =>
-        dlog('[NWST Scanner] Hidden Intentions activity marker failed (non-fatal):', e)
-    );
-    queueHiddenIntentionsCadenceCheck({ currentCount, isScannerBusy: () => isScanning });
+    // Auxiliary automatic LLM work must not outrun the main grounding pass.
+    // On preexisting chats, total historical message count can already satisfy
+    // HI/sidecar thresholds before NWST has established its own world state.
+    if (groundingComplete) {
+        // Hidden Intentions uses the same message event without adding a decision-
+        // detector call. Cheap alias scanning marks relevant actors dirty; the
+        // actual LLM reconciliation remains cadence/cooldown gated.
+        try {
+            await markLatestMessageForHiddenIntentions(invocationChatId);
+        } catch (e) {
+            dlog('[NWST Scanner] Hidden Intentions activity marker failed (non-fatal):', e);
+        }
+        queueHiddenIntentionsPromptFreshnessCheck({ currentCount, isScannerBusy: () => isScanning });
+        queueHiddenIntentionsCadenceCheck({ currentCount, isScannerBusy: () => isScanning });
 
-    // ── SECRETS SIDECAR — independent cadence ────────────────────────────
-    // The sidecar runs on its own interval (default 10 msgs), separate from
-    // the main scanner cadence. It only fires if there are secrets to analyze
-    // (the sidecar itself no-ops cheaply when there are none). Runs in all
-    // phases — secrets matter even early in a chat.
-    const sidecarCadence = getSidecarCadence();
-    if (currentCount - messageCountAtLastSidecar >= sidecarCadence) {
-        messageCountAtLastSidecar = currentCount;
-        saveScannerState();
-        // Fire-and-forget — do not block the main scan path on the sidecar
-        runSecretsSidecar().catch(e =>
-            dlog('[NWST Scanner] Secrets sidecar error (non-fatal):', e)
-        );
+        // ── SECRETS SIDECAR — independent cadence after grounding ─────────
+        const sidecarCadence = getSidecarCadence();
+        if (currentCount - messageCountAtLastSidecar >= sidecarCadence) {
+            messageCountAtLastSidecar = currentCount;
+            saveScannerState();
+            runSecretsSidecar().catch(e =>
+                dlog('[NWST Scanner] Secrets sidecar error (non-fatal):', e)
+            );
+        }
     }
 
     // ── PHASE 1: WARMUP ──────────────────────────────────────────────────
-    // Count messages silently until the minimum floor is reached.
-    // Do not fire any LLM calls during warmup.
+    // Warmup progress counts only narrative messages created after NWST began
+    // warming this chat. On a preexisting chat, the first grounding scan also
+    // receives up to 50 immediately preceding historical messages as context,
+    // while keeping each request within the normal 60-message ceiling.
     if (scanPhase === 'warmup') {
-        const messagesSinceStart = currentCount - warmupMessageCount;
+        const messagesSinceStart = Math.max(0, currentCount - warmupMessageCount);
         const floor = getScanMinimumMessages();
 
-        // Check if batch scan was run externally mid-warmup
-        // (e.g. user clicked Run Batch Scan before the floor was hit)
-        const chatId = getChatId();
-        if (chatHasData(chatId)) {
-            // Batch scan done — skip initial scan, go straight to cadence
-            scanPhase = 'cadence';
-            messageCountAtLastScan = currentCount;
-            dlog('[NWST Scanner] Batch scan detected mid-warmup — skipping initial scan, entering cadence.');
-            saveScannerState();
-            emitScannerHealth();
+        if (messagesSinceStart < floor) {
+            dlog(`[NWST Scanner] Warmup: ${messagesSinceStart}/${floor} new narrative messages (${bootstrapMode}).`);
+            return;
+        }
+        if (_lastScanFailureCount > 0 && (currentCount - _lastScanFailureCount) < 3) {
             return;
         }
 
-        if (messagesSinceStart < floor) {
-            dlog(`[NWST Scanner] Warmup: ${messagesSinceStart}/${floor} messages.`);
-            return; // Not ready yet
-        }
+        const newMessageSpan = Math.min(messagesSinceStart, MAX_SCAN_WINDOW);
+        const historyBudget = Math.max(0, MAX_SCAN_WINDOW - newMessageSpan);
+        const historyToInclude = warmupMessageCount > 0
+            ? Math.min(PREEXISTING_BOOTSTRAP_HISTORY, historyBudget, warmupMessageCount)
+            : 0;
+        const initialStart = Math.max(0, currentCount - newMessageSpan - historyToInclude);
+        const initialWindow = Math.min(MAX_SCAN_WINDOW, currentCount - initialStart);
+        bootstrapHistoryStart = initialStart;
 
-        // Floor reached — fire the initial scan over the whole warmup gap
-        dlog(`[NWST Scanner] Warmup complete (${messagesSinceStart} messages). Running initial scan...`);
-        nwstToast('Running initial world state scan...', 'info');
-        const initialWindow = Math.min(messagesSinceStart, 60);
-        const initialOk = await runScan(initialWindow, warmupMessageCount);
+        dlog(`[NWST Scanner] Warmup complete (${messagesSinceStart} new messages). Grounding from narrative ${initialStart}..${currentCount} (${historyToInclude} historical + ${newMessageSpan} new).`);
+        const stopWarmupReminder = startLongOperationToast({
+            initialMessage: bootstrapMode === 'preexisting'
+                ? 'Initial world-state grounding started. This can take a long time to process on a preexisting chat.'
+                : 'Initial world-state grounding started. This can take a long time to process.',
+            stillRunningMessage: 'Initial world-state grounding is still running. The LLM is still working; the scan is just taking a while.',
+        });
+        let initialOk;
+        try {
+            initialOk = await runScan(initialWindow, initialStart);
+        } finally {
+            stopWarmupReminder();
+        }
         if (initialOk === SCAN_ABORTED_CHAT_CHANGE || getChatId() !== invocationChatId) {
             dlog('[NWST Scanner] Initial scan cancelled because the active chat changed.');
             return;
         }
 
-        // Transition to cadence phase. If the warmup gap somehow exceeded the
-        // 60-message safety window, advance only through the slice we actually
-        // processed; the remaining backlog is retained for the cadence pass.
-        // On failure the counter stays at the warmup boundary for re-coverage.
-        scanPhase = 'cadence';
-        if (initialOk) {
-            messageCountAtLastScan = warmupMessageCount + initialWindow;
-        } else {
-            messageCountAtLastScan = warmupMessageCount;
-            dlog('[NWST Scanner] Initial scan did not complete — counter held at warmup boundary for re-coverage.');
+        if (!initialOk) {
+            // A failed bootstrap is NOT grounding. Stay in warmup and retry
+            // after a short message backoff instead of silently entering cadence.
+            groundingComplete = false;
+            scanPhase = 'warmup';
+            _lastScanFailureCount = currentCount;
+            saveScannerState();
+            emitScannerHealth();
+            dlog('[NWST Scanner] Initial grounding failed — remaining in warmup for retry.');
+            return;
         }
-        saveScannerState(); // Persist immediately after initial scan
+
+        groundingComplete = true;
+        scanPhase = 'cadence';
+        messageCountAtLastScan = currentCount;
+        messageCountAtLastSidecar = currentCount;
+        _lastScanFailureCount = 0;
+        _lastScanFailureReason = '';
+        saveScannerState();
         emitScannerHealth();
-        dlog('[NWST Scanner] Initial scan complete. Entering cadence phase.');
+        dlog(`[NWST Scanner] Initial grounding complete (${bootstrapMode}); cadence begins at msg ${currentCount}.`);
         return;
     }
 
@@ -957,6 +1066,78 @@ async function checkAndScan() {
             emitScannerHealth();
         }
     }
+}
+
+/**
+ * Flush every narrative message that has not yet reached the full continuity
+ * scanner before a timeline boundary (Day Advance / similar operation).
+ *
+ * Day Advance must not expire yesterday's pending Events while there is still
+ * unscanned prose that may show those Events starting or completing. This pass
+ * reuses the ordinary scanner so Notebook, Events, Secrets, World Conditions,
+ * and Communities all reach the same narrative boundary before time moves.
+ *
+ * @returns {Promise<{ok:boolean, processed:number, remaining:number, reason?:string}>}
+ */
+export async function flushPendingNarrativeBeforeTimelineBoundary() {
+    if (!isEnabled()) return { ok: false, processed: 0, remaining: 0, reason: 'disabled' };
+    if (isPaused()) return { ok: false, processed: 0, remaining: Math.max(0, getCurrentMessageCount() - messageCountAtLastScan), reason: 'paused' };
+    if (isScanning) return { ok: false, processed: 0, remaining: Math.max(0, getCurrentMessageCount() - messageCountAtLastScan), reason: 'busy' };
+
+    const invocationChatId = getChatId();
+    if (!invocationChatId) return { ok: false, processed: 0, remaining: 0, reason: 'no-chat' };
+
+    // If this chat was restored/reloaded, prefer its persisted cadence state.
+    if (_scannerStateChatId !== invocationChatId) {
+        const stored = loadScannerState();
+        if (stored && typeof stored === 'object') {
+            messageCountAtLastScan = Math.max(0, Number(stored.messageCountAtLastScan) || 0);
+            scanPhase = stored.scanPhase === 'warmup' ? 'warmup' : 'cadence';
+        }
+        _scannerStateChatId = invocationChatId;
+    }
+
+    const boundaryCount = getCurrentMessageCount();
+    let processed = 0;
+
+    // Timeline movement must never reinterpret arbitrary NWST content as proof
+    // that initial grounding completed. During warmup, refuse backlog catch-up
+    // rather than scanning an entire preexisting chat from cursor 0 or inventing
+    // a cadence boundary. Day Advance will preserve unresolved Events when this
+    // returns incomplete.
+    if (!groundingComplete || scanPhase === 'warmup') {
+        return {
+            ok: false,
+            processed: 0,
+            remaining: Math.max(0, boundaryCount - warmupMessageCount),
+            reason: 'warmup-not-grounded'
+        };
+    }
+
+    while (messageCountAtLastScan < boundaryCount) {
+        const start = messageCountAtLastScan;
+        const gap = boundaryCount - start;
+        const windowSize = Math.min(gap, 60);
+        const success = await runScan(windowSize, start);
+        if (success !== true || getChatId() !== invocationChatId) {
+            return {
+                ok: false,
+                processed,
+                remaining: Math.max(0, boundaryCount - messageCountAtLastScan),
+                reason: success === SCAN_ABORTED_CHAT_CHANGE ? 'chat-changed' : 'scan-failed'
+            };
+        }
+        // runScan can intentionally request a minimum prompt window, but the
+        // boundary gap itself is authoritative for cadence bookkeeping.
+        const covered = Math.min(windowSize, boundaryCount - start);
+        messageCountAtLastScan += covered;
+        processed += covered;
+        _lastScanFailureCount = 0;
+        saveScannerState();
+        emitScannerHealth();
+    }
+
+    return { ok: true, processed, remaining: 0 };
 }
 
 export async function runScan(windowSize = 0, startIndex = null) {
@@ -1078,8 +1259,8 @@ export async function runScan(windowSize = 0, startIndex = null) {
 
         if (!isExpectedChat(chatId)) return SCAN_ABORTED_CHAT_CHANGE;
         dlog('[NWST Scanner] Scan complete.');
-        const rangeStart = Number.isInteger(startIndex) ? startIndex : Math.max(0, getCurrentMessageCount() - effectiveWindow);
-        markScanSuccess(rangeStart, rangeStart + effectiveWindow);
+        const rangeStart = Number.isInteger(startIndex) ? startIndex : Math.max(0, getCurrentMessageCount() - recentMessages.length);
+        markScanSuccess(rangeStart, rangeStart + recentMessages.length);
         return true;
 
     } catch (err) {
@@ -1541,6 +1722,14 @@ async function applyScanResults(chatId, result, recentMessages = []) {
             // for automated tier changes (status changes remain allowed).
             const VALID_TIERS = ['immediate', 'week', 'month'];
 
+            for (const ref of (Array.isArray(evUpdates.inProgress) ? evUpdates.inProgress : [])) {
+                const ev = refToEvent(ref);
+                if (!ev || ev.tier === 'persistent' || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
+                if (ev.status === 'resolved' || ev.status === 'missed') continue;
+                await setEvtStatus(chatId, ev.id, 'inprogress');
+                dlog(`[NWST Scanner] Event advanced to in-progress by scan: "${ev.title}"`);
+                hadUpdates = true;
+            }
             for (const ref of (Array.isArray(evUpdates.resolved) ? evUpdates.resolved : [])) {
                 const ev = refToEvent(ref);
                 if (!ev || ev.tier === 'persistent' || ev.validityFlag || ev.promotionFlag || ev.timingFlag) continue;
@@ -1597,12 +1786,29 @@ async function applyScanResults(chatId, result, recentMessages = []) {
             const activePersistent = getActivePersistentEvents(chatId).length;
             const pendingPersistent = existing.filter(event => event?.tier === 'persistent').length;
             let slots = Math.max(0, MAX_ACTIVE_PERSISTENT_EVENTS - activePersistent - pendingPersistent);
-            const trackedTitles = new Set(getTrackedEvents(chatId).map(event => String(event.title || '').toLowerCase().trim()).filter(Boolean));
+            const trackedEvents = getTrackedEvents(chatId);
+            const trackedTitles = new Set(trackedEvents.map(event => String(event.title || '').toLowerCase().trim()).filter(Boolean));
             const pendingTitles = new Set(existing.map(event => String(event.title || '').toLowerCase().trim()).filter(Boolean));
+            const notebook = getNotebook(chatId);
+            const persistentReferences = [
+                ...trackedEvents.map(event => ({ title: event.title, description: event.description })),
+                ...existing.filter(event => event?.tier === 'persistent').map(event => ({ title: event.title, description: event.description })),
+                ...(notebook?.secrets || []).filter(secret => getSecretStatus(secret) !== 'archived').map(secret => ({ title: secret.title, description: secret.secret })),
+                ...getHiddenIntentions(chatId)
+                    .filter(item => !['resolved','abandoned','stale'].includes(item?.status))
+                    .map(item => ({
+                        title: `${item.actor || ''} ${item.objective || ''}`.trim(),
+                        description: [item.strategy, item.nextAction, item.progressNote].filter(Boolean).join(' ')
+                    }))
+            ];
             for (const ev of persistentProposals) {
                 if (slots <= 0) break;
                 const titleKey = ev.title.toLowerCase();
                 if (trackedTitles.has(titleKey) || pendingTitles.has(titleKey)) continue;
+                if (isRedundantPersistentState(ev, persistentReferences)) {
+                    dlog(`[NWST Scanner] Rejected redundant Persistent state already represented elsewhere: "${ev.title}"`);
+                    continue;
+                }
                 existing.push({
                     ...ev,
                     id: `pending_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,

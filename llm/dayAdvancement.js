@@ -1119,6 +1119,27 @@ export async function advanceToNextDay() {
     let mutationStarted = false;
 
     try {
+        // 0. Timeline-boundary continuity flush. A day must not advance past
+        // unscanned narrative and then mechanically classify yesterday's still-
+        // pending Events as missed. Flush the ordinary scanner backlog first so
+        // completed scenes become resolved and current Notebook bullets retire
+        // before the calendar/event horizon moves.
+        let boundaryContinuityFresh = true;
+        try {
+            const { flushPendingNarrativeBeforeTimelineBoundary } = await import('./scanner.js?v=1.3.69');
+            const flush = await flushPendingNarrativeBeforeTimelineBoundary();
+            boundaryContinuityFresh = flush.ok || flush.remaining === 0;
+            if (flush.processed > 0) {
+                dlog(`[NWST DayAdvancement] Pre-boundary scanner flush processed ${flush.processed} narrative message(s).`);
+            }
+            if (!boundaryContinuityFresh) {
+                console.warn(`[NWST DayAdvancement] Pre-boundary scanner flush incomplete (${flush.reason || 'unknown'}; ${flush.remaining || 0} message(s) remain). Past-due Events will be preserved rather than auto-missed this advance.`);
+            }
+        } catch (flushErr) {
+            boundaryContinuityFresh = false;
+            console.warn('[NWST DayAdvancement] Pre-boundary scanner flush failed; preserving unresolved past-due Events:', flushErr);
+        }
+
         // 1. Resolve the Day Advancement LLM profile
         const profile = resolveProfile('dayAdvancementLLM');
         if (!profile) {
@@ -1341,7 +1362,7 @@ export async function advanceToNextDay() {
 
         // 9. Roll event horizon forward (mark missed, adjust tiers)
         //    This runs AFTER snapshot, so the saved snapshot still has 'pending' events.
-        await rollEventHorizonForward(chatId);
+        await rollEventHorizonForward(chatId, { markMissed: boundaryContinuityFresh });
 
         // 9.25 Materialize player-defined special days whose occurrence has
         //      come into range (entered the current calendar month, or is
@@ -1874,7 +1895,8 @@ async function topUpWorldEvents(chatId) {
     }
 }
 
-async function rollEventHorizonForward(chatId) {
+async function rollEventHorizonForward(chatId, options = {}) {
+    const markMissed = options.markMissed !== false;
     // Structural event-horizon roll. Calendar position is cyclical; one-time
     // event occurrence windows are stored in elapsedStoryDays so an annual
     // date does not silently roll forward to next year's occurrence after it
@@ -1887,6 +1909,10 @@ async function rollEventHorizonForward(chatId) {
 
     for (const event of events) {
         if (event.status !== 'pending' && event.status !== 'inprogress') continue;
+        // Once an event has visibly started, calendar passage alone cannot turn
+        // it into a missed occurrence. The scanner must resolve or explicitly
+        // classify an abandoned/failed occurrence.
+        if (event.status === 'inprogress') continue;
         // Persistent events are text-resolved narrative state. Calendar passage
         // must never miss, re-tier, or otherwise age them.
         if (event.tier === 'persistent') continue;
@@ -1894,18 +1920,18 @@ async function rollEventHorizonForward(chatId) {
         const range = getScheduledElapsedRange(event, calendarConfig, currentDay);
 
         if (!range) {
-            if (event.tier === 'immediate') changes[event.id] = 'missed';
+            if (markMissed && event.tier === 'immediate') changes[event.id] = 'missed';
             continue;
         }
 
         if (event.tier === 'undetermined') {
-            if (elapsedStoryDays > range.endElapsed) changes[event.id] = 'missed';
+            if (markMissed && elapsedStoryDays > range.endElapsed) changes[event.id] = 'missed';
             continue;
         }
 
         const target = classifyScheduledEventTier(chatId, range.startElapsed, range.endElapsed) || event.tier;
 
-        if (target === 'missed') changes[event.id] = 'missed';
+        if (target === 'missed' && markMissed) changes[event.id] = 'missed';
         else if (event.tier !== target) changes[event.id] = target;
     }
 
@@ -1916,7 +1942,7 @@ async function rollEventHorizonForward(chatId) {
     // Full pass is authoritative and also sorts the ledger. This catches timer-
     // anchored events without display dates and any legacy shapes the fallback
     // resolver above could not safely interpret.
-    const reconciled = await reconcileEventTiers(chatId);
+    const reconciled = await reconcileEventTiers(chatId, { markMissed });
     if (reconciled.changed) {
         dlog(`[NWST DayAdvancement] Full event reconciliation: ${reconciled.retiered} re-tiered, ${reconciled.missed} missed${reconciled.reordered ? ', reordered' : ''}.`);
     }

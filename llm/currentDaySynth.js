@@ -23,10 +23,10 @@ import { dlog } from "../lib/debug.js";
 
 // ── Internal prompt (NOT user-editable) ───────────────────────────────────
 
-const CURRENT_DAY_SYNTH_PROMPT = `You are a narrative atmosphere writer for an ongoing roleplay. Your job is to write the "Current Day" block — an evocative, sensory description of the world as it exists right now.
+const CURRENT_DAY_SYNTH_PROMPT_BASE = `You are a narrative atmosphere writer for an ongoing roleplay. Your job is to write the "Current Day" block — an evocative, sensory description of the world as it exists right now.
 
 WHAT THE CURRENT DAY BLOCK IS:
-A description of the ambient world — the season, the weather, the natural environment, and the metaphysical climate. It is injected into the main AI's prompt on every message as stable background context.
+A description of the ambient world — the season, the weather, and the natural environment. It is injected into the main AI's prompt on every message as stable background context.
 
 WHAT THE CURRENT DAY BLOCK IS NOT:
 - A summary of recent events
@@ -38,12 +38,12 @@ CRITICAL RULE — NO CHARACTERS:
 Do NOT mention any named characters. Do NOT describe character actions, feelings, states, or presence. Do NOT reference what happened in the story. The Current Day block describes the WORLD, not the people in it. Characters are alive and moving — their states change message to message. The Current Day block is static ambient context. Any character reference will contaminate the main AI's generations by anchoring it to a past moment.
 
 WRONG (character contamination):
-"A named character's magic has leaked into the room, thickening the atmosphere."
-"The shrine is quiet — the character is expected to arrive before sundown."
+"A named character's arrival has left the station unusually tense."
+"The shop is quiet because the protagonist is expected before sundown."
 
 RIGHT (world-only):
-"The air in the building carries an unusual charge — a faint acidity beneath the smell of old wood and chalk dust, the kind of atmospheric disturbance that practitioners learn to recognize without naming."
-"The shrine road is quiet in the way that sacred spaces sometimes are before dusk — held breath, waiting."
+"Cold rain needles the station awnings, and runoff gathers in the seams of the platform concrete."
+"The shopping street has thinned toward dusk, shutters rattling in the wind while bicycle tires hiss over wet pavement."
 
 WHAT TO WRITE:
 Write these sections using the format exactly as shown. Keep each to 1-3 sentences. Write with sensory specificity — what can be seen, smelled, felt, heard. Ground every detail in the setting context and season provided.
@@ -52,13 +52,21 @@ Write these sections using the format exactly as shown. Keep each to 1-3 sentenc
 **Weather today** — Today's specific weather, written as a physical experience. Not just "raining" but what the rain does to the air, the light, the ground.
 **Flora** — What is growing, blooming, wilting, or transforming in the natural world right now. Make it specific to the season and setting.
 **Fauna** — What animal life is present, active, quiet, or notable. What does their behavior signal about the current conditions?
-**Spiritual Climate** — (ONLY include this section if Spiritual/Supernatural conditions are enabled) The metaphysical texture of the current moment — what the spiritually sensitive would perceive, without naming any character as perceiving it.
 
 STYLE GUIDANCE:
 - Write like a perceptive narrator who notices the world, not a journalist who records events
 - Use specific, concrete sensory details over vague atmospheric adjectives
 - Let the world carry subtext — autumn doesn't just mean "leaves falling," it means something about transience, preparation, the approach of cold
 - Aim for 1-3 sentences per section, dense and evocative rather than long and descriptive`;
+
+const CURRENT_DAY_SPIRITUAL_INSTRUCTION = `
+**Spiritual Climate** — The metaphysical texture of the current moment — what the spiritually sensitive would perceive, without naming any character as perceiving it.`;
+
+export function buildCurrentDaySystemPrompt(spiritualEnabled) {
+    return spiritualEnabled
+        ? `${CURRENT_DAY_SYNTH_PROMPT_BASE}${CURRENT_DAY_SPIRITUAL_INSTRUCTION}`
+        : CURRENT_DAY_SYNTH_PROMPT_BASE;
+}
 
 // ── Synthesize Current Day ────────────────────────────────────────────────
 
@@ -85,6 +93,7 @@ export async function synthesizeCurrentDay(chatId, profileOverride, options = {}
         const forecast = getForecast(chatId);
         const todayForecast = forecast.length > 0 ? forecast[0] : null;
         const conditions = options.ignoreConditions ? {} : getEnabledConditions(chatId);
+        const spiritualEnabled = Object.prototype.hasOwnProperty.call(conditions, 'spiritual');
         const activeEvents = options.ignoreEvents ? [] : getActiveEvents(chatId);
         const settingContext = getSettingContext(chatId);
         const todayEvents = options.ignoreEvents ? [] : activeEvents.filter(e => e.tier === 'immediate');
@@ -95,10 +104,10 @@ export async function synthesizeCurrentDay(chatId, profileOverride, options = {}
         const weatherProfileContext = getWeatherProfileForecastContext(chatId);
         const weatherConstraint = getSevereWeatherConstraint(chatId, currentDay?.elapsedStoryDays || 0);
 
-        const userPrompt = buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason, weatherProfileContext, weatherConstraint);
+        const userPrompt = buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason, weatherProfileContext, weatherConstraint, spiritualEnabled);
 
         const messages = [
-            { role: 'system', content: CURRENT_DAY_SYNTH_PROMPT },
+            { role: 'system', content: buildCurrentDaySystemPrompt(spiritualEnabled) },
             { role: 'user', content: userPrompt }
         ];
 
@@ -120,7 +129,7 @@ export async function synthesizeCurrentDay(chatId, profileOverride, options = {}
             weatherToday:    parsed.weatherToday    || currentDay.weatherToday,
             flora:           parsed.flora           || currentDay.flora,
             fauna:           parsed.fauna           || currentDay.fauna,
-            spiritualClimate: parsed.spiritualClimate || currentDay.spiritualClimate
+            spiritualClimate: spiritualEnabled ? (parsed.spiritualClimate || currentDay.spiritualClimate) : ''
         });
 
         dlog('[NWST CurrentDaySynth] Current Day block updated.');
@@ -138,7 +147,7 @@ export async function synthesizeCurrentDay(chatId, profileOverride, options = {}
 
 // ── Prompt building ───────────────────────────────────────────────────────
 
-function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason, weatherProfileContext = '', weatherConstraint = '') {
+export function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents, settingContext, computedSeason, weatherProfileContext = '', weatherConstraint = '', spiritualEnabled = false) {
     let prompt = '';
 
     // Setting context goes FIRST so the LLM grounds itself in the world before
@@ -202,13 +211,11 @@ function buildSynthesisPrompt(currentDay, todayForecast, conditions, todayEvents
         prompt += '\n';
     }
 
-    // Spiritual enabled check
-    const spiritualEnabled = conditions.spiritual !== undefined;
-    if (!spiritualEnabled) {
-        prompt += `NOTE: Spiritual/Supernatural condition is DISABLED. Do NOT include a "Spiritual Climate" section.\n\n`;
+    if (spiritualEnabled) {
+        prompt += `Write the Current Day block now. Describe the world's ambient texture — season, weather, environment, and metaphysical climate. Faction names are fine when they define world texture. Individual character actions and personal states should not appear. No story event recaps.`;
+    } else {
+        prompt += `Write the Current Day block now. Describe the world's ambient texture — season, weather, and environment. Faction names are fine when they define world texture. Individual character actions and personal states should not appear. No story event recaps.`;
     }
-
-    prompt += `Write the Current Day block now. Describe the world's ambient texture — season, weather, environment, metaphysical climate. Faction names are fine when they define world texture. Individual character actions and personal states should not appear. No story event recaps.`;
 
     return prompt;
 }
